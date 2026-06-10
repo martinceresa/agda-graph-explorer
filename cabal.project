@@ -1,0 +1,4 @@
+-- agda-graph-explorer consumes agda-deps' v2 graph.json; it links no
+-- Agda, so there is no Agda source-repository-package pin here (that
+-- lives in the agda-deps repo). Everything resolves from Hackage.
+packages: .

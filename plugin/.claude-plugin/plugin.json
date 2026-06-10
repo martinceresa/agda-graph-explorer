@@ -1,0 +1,17 @@
+{
+  "name": "agda-explore",
+  "version": "0.1.0",
+  "description": "Interactive Agda library explorer. An MCP daemon over agda-deps' dependency graph that answers point queries (locate / callers / impact / type / similar / unused) instead of grep, regenerating the graph on the fly as sources change. Ships with Agda proof-engineering agents.",
+  "author": {
+    "name": "agda-graph-explorer contributors"
+  },
+  "homepage": "https://github.com/input-output-hk/agda-graph-explorer",
+  "repository": "https://github.com/input-output-hk/agda-graph-explorer",
+  "keywords": [
+    "agda",
+    "dependencies",
+    "mcp",
+    "proof-engineering",
+    "dependent-types"
+  ]
+}

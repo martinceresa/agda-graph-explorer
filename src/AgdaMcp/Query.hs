@@ -1,0 +1,992 @@
+{-# LANGUAGE BangPatterns        #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RecordWildCards     #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+
+-- | The point queries the @agda-explore@ daemon answers over a loaded
+-- graph. Everything here works off the in-memory 'Index' (and the raw
+-- 'ExpandedGraph' for module→file lookups); only 'readSignature' touches
+-- the filesystem, to recover a definition's type from source.
+--
+-- These are the queries Claude would otherwise approximate with @grep@:
+-- /where is X/, /who calls X/, /what does X use/, /what breaks if I
+-- change X/, /what's the type of X/, /what resembles X/.
+module AgdaMcp.Query
+  ( queryLocate
+  , queryCallers
+  , queryCallees
+  , queryImpact
+  , queryPath
+  , queryRoots
+  , querySimilarTypes
+  , querySimilarBodies
+  , querySearch
+  , queryStats
+  , readSignature
+  , suggestions
+  ) where
+
+import           Control.Exception  (SomeException, try)
+import           Data.Char          (isDigit, isSpace)
+import qualified Data.IntMap.Strict as IM
+import qualified Data.IntSet        as IS
+import           Data.List          (foldl', isPrefixOf, isSuffixOf, maximumBy,
+                                     sortBy, sortOn)
+import qualified Data.Map.Strict    as M
+import           Data.Ord           (Down (..), comparing)
+import qualified Data.Sequence      as Seq
+import           Data.Sequence      (ViewL (..), (|>))
+import           Data.Text          (Text)
+import qualified Data.Text          as T
+import qualified Data.Vector        as V
+
+import           AgdaGraph.Index
+import           AgdaGraph.Schema   (Access (..), Definition (..),
+                                     ExpandedGraph (..), Kind (..),
+                                     Provenance (..), State (..))
+import           AgdaGraph.Similarity (SigBodyFingerprints (..), fingerprintSize)
+import           AgdaGraph.WL       (weightedJaccard)
+
+import           AgdaMcp.State      (Loaded (..))
+
+-- ---------------------------------------------------------------------
+-- Small renderers
+-- ---------------------------------------------------------------------
+
+tshow :: Show a => a -> Text
+tshow = T.pack . show
+
+renderState :: State -> Text
+renderState Defined   = "Defined"
+renderState Postulate = "Postulate"
+renderState Hole      = "Hole"
+renderState Failed    = "Failed"
+
+renderKind :: Kind -> Text
+renderKind KFunction    = "function"
+renderKind KProjection  = "projection"
+renderKind KDatatype    = "datatype"
+renderKind KRecord      = "record"
+renderKind KConstructor = "constructor"
+renderKind KPostulate   = "postulate"
+renderKind KPrimitive   = "primitive"
+renderKind KOther       = "other"
+
+renderAccess :: Access -> Text
+renderAccess Public  = "public"
+renderAccess Private = "private"
+
+-- | @Module:line@ (line omitted when unknown).
+loc :: Definition -> Text
+loc d = defModule d <> maybe "" ((":" <>) . tshow) (defLine d)
+
+oneLine :: Definition -> Text
+oneLine d =
+  "- `" <> defName d <> "`  [" <> renderKind (defKind d) <> "/"
+        <> renderState (defState d) <> "]  " <> loc d
+
+-- | Bullet list of definitions, each annotated with its enclosing owner
+-- when it's a @where@-/anonymous helper, truncated to @lim@ with a
+-- trailing "…and N more". A provenance-free view of 'provBulletList'.
+bulletList :: Loaded -> Int -> [Definition] -> Text
+bulletList ld lim ds = provBulletList ld lim [ (d, Nothing) | d <- ds ]
+
+-- ---------------------------------------------------------------------
+-- Index helpers
+-- ---------------------------------------------------------------------
+
+realDefs :: Loaded -> [Definition]
+realDefs ld = V.toList (V.take (idxRealCount (ldIndex ld)) (idxDefs (ldIndex ld)))
+
+directOut, directIn :: Index -> Int -> IS.IntSet
+directOut ix i = IM.findWithDefault IS.empty i (idxForward ix)
+directIn  ix i = IM.findWithDefault IS.empty i (idxReverse ix)
+
+defsOf :: Loaded -> IS.IntSet -> [Definition]
+defsOf ld is = [ defAt (ldIndex ld) i | i <- IS.toList is ]
+
+notFound :: Loaded -> Text -> Text
+notFound ld name =
+  "No definition named `" <> name <> "`.\n" <>
+  case suggestions ld name 8 of
+    []  -> "No similarly-named definitions found. Try the `search` tool with a substring."
+    sug -> "Did you mean one of:\n" <> bulletList ld 8 sug
+
+-- | Definitions whose (lower-cased) qualified name contains the query,
+-- ranked by how tightly they match. Untruncated — callers take what they
+-- need.
+rankedMatches :: Loaded -> Text -> [Definition]
+rankedMatches ld q =
+  let q'  = T.toLower q
+      base d = lastComp (defName d)
+      hit d = q' `T.isInfixOf` T.toLower (defName d)
+      score d
+        | T.toLower (base d) == q'              = 0 :: Int
+        | q' `T.isPrefixOf` T.toLower (base d)  = 1
+        | q' `T.isInfixOf`  T.toLower (base d)  = 2
+        | otherwise                             = 3
+  in sortBy (comparing (\d -> (score d, T.length (defName d))))
+            (filter hit (realDefs ld))
+
+-- | Top @lim@ ranked matches — the 'notFound' "did you mean" candidate list.
+suggestions :: Loaded -> Text -> Int -> [Definition]
+suggestions ld q lim = take lim (rankedMatches ld q)
+
+-- | A where-block / anonymous-module local: its qualified name carries the
+-- @._.@ marker Agda inserts for such scopes. 'querySearch' can drop these
+-- on request, since they crowd out top-level results.
+isLocalName :: Definition -> Bool
+isLocalName d = "._." `T.isInfixOf` defName d
+
+lastComp :: Text -> Text
+lastComp t = let (_, suf) = T.breakOnEnd "." t in if T.null suf then t else suf
+
+-- | Drop the @"\@<line>"@ disambiguator the producer appends to
+-- @where@-/anonymous-module helper names ('AgdaDeps.Deps.nodeKey'), for
+-- name-matching purposes only. @Mod._.QED\@388@ ↦ @Mod._.QED@; names with
+-- no such suffix are returned unchanged.
+stripLineTag :: Text -> Text
+stripLineTag t = case T.breakOnEnd "@" t of
+  (pre, suf) | not (T.null pre), not (T.null suf), T.all isDigit suf
+             -> T.dropEnd 1 pre
+  _          -> t
+
+-- | Is @needle@ a segment-aligned dotted suffix of @hay@? True for an
+-- exact match or when @hay@ ends in @"." <> needle@ (so @liveness′@ and
+-- @Theorem3.liveness′@ both match @…Theorem3.liveness′@, but @ness′@
+-- does not).
+isDottedSuffix :: Text -> Text -> Bool
+isDottedSuffix needle hay =
+  hay == needle || ("." <> needle) `T.isSuffixOf` hay
+
+-- | Resolve a query name to a single definition. Tries an exact
+-- fully-qualified match first; failing that, a /unique/ segment-aligned
+-- dotted-suffix match (the documented "or unique name" contract), with
+-- the helper @\@<line>@ disambiguator stripped before comparison so a
+-- bare @sq@ still resolves @Where._.sq\@15@. An unknown or ambiguous name
+-- returns 'Nothing', so callers fall back to the 'notFound' candidate list.
+--
+-- 'defId' of the returned definition equals its node id (see 'buildIndex'),
+-- so callers can feed it straight into 'idxForward' / 'idxReverse' without
+-- a second 'lookupId'.
+resolveDef :: Loaded -> Text -> Maybe Definition
+resolveDef ld name = case lookupDef (ldIndex ld) name of
+  Just d  -> Just d
+  Nothing ->
+    let name' = stripLineTag name
+        matches d = let nm = stripLineTag (defName d)
+                    in isDottedSuffix name' nm
+    in case filter matches (realDefs ld) of
+         [d] -> Just d
+         _   -> Nothing
+
+-- | The enclosing top-level definition of a @where@-/anonymous-module
+-- helper: the nearest non-local def at or above the helper's start line,
+-- in the helper's own module or an enclosing one (the producer renders
+-- the anonymous owner module as @Parent._@, so the real owner lives in a
+-- module prefix — e.g. helper @Where._.sq@ is owned from module @Where@).
+-- 'Nothing' for a non-local def, or when lines are unavailable.
+ownerOf :: Loaded -> Definition -> Maybe Definition
+ownerOf ld d
+  | not (isLocalName d) = Nothing
+  | otherwise = case defLine d of
+      Nothing -> Nothing
+      Just ln ->
+        case [ o | o <- realDefs ld
+                 , enclosingModule (defModule o) (defModule d)
+                 , not (isLocalName o)
+                 , maybe False (<= ln) (defLine o) ] of
+          [] -> Nothing
+          os -> Just (maximumBy (comparing defLine) os)
+  where
+    -- @outer@ is @inner@ or a (segment-aligned) module prefix of it.
+    enclosingModule outer inner =
+      outer == inner || (outer <> ".") `T.isPrefixOf` inner
+
+-- | @"  (in `owner`)"@ suffix for a local helper, else empty. Appended to
+-- 'locate' / 'callers' / 'callees' lines so the anonymised @_@ owner is
+-- visible without opening the file.
+ownerNote :: Loaded -> Definition -> Text
+ownerNote ld d = case ownerOf ld d of
+  Just o  -> "  (in `" <> defName o <> "`)"
+  Nothing -> ""
+
+-- ** Filter-value parsers (Text -> enum), for the tool layer
+
+parseKind :: Text -> Maybe Kind
+parseKind t = case T.toLower t of
+  "function"    -> Just KFunction
+  "projection"  -> Just KProjection
+  "datatype"    -> Just KDatatype
+  "record"      -> Just KRecord
+  "constructor" -> Just KConstructor
+  "postulate"   -> Just KPostulate
+  "primitive"   -> Just KPrimitive
+  "other"       -> Just KOther
+  _             -> Nothing
+
+parseState :: Text -> Maybe State
+parseState t = case T.toLower t of
+  "defined"   -> Just Defined
+  "postulate" -> Just Postulate
+  "hole"      -> Just Hole
+  "failed"    -> Just Failed
+  _           -> Nothing
+
+parseProv :: Text -> Maybe Provenance
+parseProv t = case T.toLower t of
+  "signature" -> Just ProvSignature
+  "body"      -> Just ProvBody
+  "where"     -> Just ProvWhere
+  "with"      -> Just ProvWith
+  "unknown"   -> Just ProvUnknown
+  _           -> Nothing
+
+renderProv :: Provenance -> Text
+renderProv ProvSignature = "signature"
+renderProv ProvBody      = "body"
+renderProv ProvWhere     = "where"
+renderProv ProvWith      = "with"
+renderProv ProvUnknown   = "unknown"
+
+-- | @Just bad@ when a filter string was supplied but didn't parse.
+badParse :: (Text -> Maybe a) -> Maybe Text -> Maybe Text
+badParse p mt = mt >>= \t -> maybe (Just t) (const Nothing) (p t)
+
+-- | Validate optional @kind@/@state@ filter strings shared by @search@
+-- and @roots@; 'Just' a user-facing error naming the bad value, or
+-- 'Nothing' when both parse (or are absent).
+filterError :: Maybe Text -> Maybe Text -> Maybe Text
+filterError mKindTxt mStateTxt =
+  case (badParse parseKind mKindTxt, badParse parseState mStateTxt) of
+    (Just bad, _) -> Just $ "Unknown kind filter `" <> bad <> "` — use one of function / "
+                       <> "projection / datatype / record / constructor / postulate / primitive / other."
+    (_, Just bad) -> Just $ "Unknown state filter `" <> bad
+                       <> "` — use one of defined / postulate / hole / failed."
+    _             -> Nothing
+
+-- | Module-subtree predicate: keep a definition when no prefix is given,
+-- or its module starts with it. Shared by @search@ / @callers@ /
+-- @callees@ / @roots@ / @path@.
+modulePrefixPred :: Maybe Text -> Definition -> Bool
+modulePrefixPred mp d = maybe True (`T.isPrefixOf` defModule d) mp
+
+-- ---------------------------------------------------------------------
+-- locate / callers / callees / impact
+-- ---------------------------------------------------------------------
+
+queryLocate :: Loaded -> Text -> Text
+queryLocate ld name = case resolveDef ld name of
+  Nothing -> notFound ld name
+  Just d  ->
+    let ix      = ldIndex ld
+        i       = defId d
+        synth   = i >= idxRealCount ix
+        file    = M.lookup (defModule d) (ldModFiles ld)
+        recursive = IS.member i (directOut ix i)
+        nIn     = IS.size (IS.delete i (directIn  ix i))
+        nOut    = IS.size (IS.delete i (directOut ix i))
+        transUp   = IS.size (ancestors   ix (IS.singleton i))
+        transDown = IS.size (descendants ix (IS.singleton i))
+    in T.unlines $
+         [ "`" <> defName d <> "`"
+         , "  module:   " <> defModule d
+         , "  location: " <> maybe (defModule d <> " (line unknown)")
+                                   (\f -> T.pack f <> maybe "" ((":" <>) . tshow) (defLine d))
+                                   file
+         , "  kind:     " <> renderKind (defKind d)
+                          <> ", state: " <> renderState (defState d)
+                          <> ", access: " <> renderAccess (defAccess d)
+                          <> (if recursive then " (recursive)" else "")
+         ] ++
+         [ "  owner:    " <> defName o <> maybe "" ((":" <>) . tshow) (defLine o)
+         | Just o <- [ownerOf ld d] ] ++
+         [ "  used by:  " <> tshow nIn <> " direct caller(s)"
+         , "  uses:     " <> tshow nOut <> " direct dependency(ies)"
+         , "  blast radius: " <> tshow transUp <> " transitive caller(s), "
+                              <> tshow transDown <> " transitive dependency(ies)"
+         ] ++
+         [ "  note:     referenced but has no definition record "
+             <> "(external, or compiler-generated)" | synth ]
+
+queryCallers :: Loaded -> Bool -> Maybe Text -> Maybe Text -> Bool -> Int -> Text -> Text
+queryCallers = edgesQuery True
+
+queryCallees :: Loaded -> Bool -> Maybe Text -> Maybe Text -> Bool -> Int -> Text -> Text
+queryCallees = edgesQuery False
+
+-- | Provenance of the edge @s -> t@, if the graph carries per-edge tags.
+edgeProv :: Index -> Int -> Int -> Maybe Provenance
+edgeProv ix s t = idxEdgeProvenance ix >>= IM.lookup s >>= IM.lookup t
+
+-- | Shared implementation of callers (reverse edges) and callees
+-- (forward edges), direct or transitive. @mPrefix@ keeps only results
+-- whose module starts with the given prefix; @mProvTxt@ keeps only direct
+-- edges of a given provenance (signature/body/where/with/unknown) and
+-- annotates each direct line with its tag; @byMod@ renders a per-module
+-- count summary instead of a flat list.
+edgesQuery :: Bool -> Loaded -> Bool -> Maybe Text -> Maybe Text -> Bool -> Int -> Text -> Text
+edgesQuery wantReverse ld transitive mPrefix mProvTxt byMod lim name =
+  case mProvTxt of
+    Just p | parseProv p == Nothing ->
+      "Unknown provenance filter `" <> p
+        <> "` — use one of signature / body / where / with / unknown."
+    _ -> case resolveDef ld name of
+      Nothing -> notFound ld name
+      Just d  -> render d
+  where
+    mProv = mProvTxt >>= parseProv
+    render d =
+      let ix  = ldIndex ld
+          i   = defId d
+          -- Direction-dependent pair: the subject's direct neighbours and
+          -- the matching transitive closure (callers/reverse vs callees/
+          -- forward). Picked once so the transitive branches don't repeat.
+          (direct, closure)
+            | wantReverse = (IS.delete i (directIn  ix i), ancestors   ix)
+            | otherwise   = (IS.delete i (directOut ix i), descendants ix)
+          -- provenance of the edge between neighbour j and the subject i
+          provOf j | wantReverse = edgeProv ix j i
+                   | otherwise   = edgeProv ix i j
+          set
+            -- Transitive + provenance: apply the filter to the *first
+            -- hop* only — the frontier of direct edges of the requested
+            -- kind — then take the closure of that frontier. Answers
+            -- "who term-depends on X, transitively" (body) vs. mere
+            -- type-level reachability.
+            | transitive, Just p <- mProv =
+                let frontier = IS.filter (\j -> provOf j == Just p) direct
+                in IS.delete i (IS.union frontier (closure frontier))
+            | transitive  = closure (IS.singleton i)
+            | otherwise   = direct
+          -- Direct (non-transitive) provenance filter; the transitive
+          -- case already folded the first-hop filter into 'set'.
+          set' = case (transitive, mProv) of
+            (False, Just p) -> IS.filter (\j -> provOf j == Just p) set
+            _               -> set
+          ds  = sortOn defName
+                  $ filter (modulePrefixPred mPrefix)
+                  $ defsOf ld set'
+          n   = length ds
+          what | wantReverse = if transitive then "transitive callers (depend on)" else "direct callers (use)"
+               | otherwise   = if transitive then "transitive dependencies (uses)" else "direct dependencies (uses)"
+          scopeNote = maybe "" (\p -> " under `" <> p <> "`") mPrefix
+          provNote  = case mProv of
+            Just p | transitive -> " via first-hop `" <> renderProv p
+                                     <> "` edges (then transitive)"
+                   | otherwise  -> " with `" <> renderProv p <> "` provenance"
+            Nothing             -> ""
+          -- annotate direct lines with their edge provenance
+          body
+            | byMod      = moduleSummary 20 ds
+            | transitive = bulletList ld lim ds
+            | otherwise  = provBulletList ld lim [ (dx, provOf (defId dx)) | dx <- ds ]
+      in if n == 0
+           then "`" <> name <> "` has no " <> what <> scopeNote <> provNote <> "."
+           else tshow n <> " " <> what <> scopeNote <> provNote <> " of `" <> name <> "`:\n" <> body
+
+-- | Like 'bulletList' but annotates each line with its edge provenance
+-- (when the graph carries tags). Used for direct callers/callees.
+provBulletList :: Loaded -> Int -> [(Definition, Maybe Provenance)] -> Text
+provBulletList ld lim xs =
+  let shown = take lim xs
+      extra = length xs - length shown
+      line (d, mp) = oneLine d <> ownerNote ld d
+                       <> maybe "" (\p -> "  {" <> renderProv p <> "}") mp
+  in T.intercalate "\n" (map line shown)
+       <> (if extra > 0 then "\n  …and " <> tshow extra <> " more" else "")
+
+queryImpact :: Loaded -> Int -> Text -> Text
+queryImpact ld lim name = case resolveDef ld name of
+  Nothing -> notFound ld name
+  Just d  ->
+    let ix     = ldIndex ld
+        i      = defId d
+        direct = IS.delete i (directIn ix i)
+        trans  = ancestors ix (IS.singleton i)
+        ds     = defsOf ld trans
+        byMod  = countByModule ds
+        topMods = take 12 (sortBy (comparing (Down . snd)) byMod)
+    in if IS.null trans
+         then "Changing `" <> name <> "` is safe: nothing depends on it."
+         else T.unlines $
+           [ "Changing `" <> name <> "` (its type/signature) could affect:"
+           , "  " <> tshow (IS.size trans) <> " definition(s) transitively, "
+                  <> tshow (IS.size direct) <> " directly."
+           , ""
+           , "Affected definitions by module (top " <> tshow (length topMods) <> "):"
+           ] ++
+           [ "  " <> m <> "  (" <> tshow n <> ")" | (m, n) <- topMods ] ++
+           [ "", "Definitions:", bulletList ld lim (sortOn defName ds) ]
+
+-- ---------------------------------------------------------------------
+-- path  (why does A depend on B?)
+-- ---------------------------------------------------------------------
+
+-- | Shortest dependency chain(s) @from ⇝ to@ along forward (uses) edges:
+-- the sequence @A → … → B@ that shows /why/ A transitively depends on B.
+-- Each hop is annotated with its edge provenance, so
+-- the chain reads e.g. @A —{body}→ H —{where}→ B@. With @k > 1@, up to
+-- @k@ distinct shortest paths are returned (handy when the first runs
+-- through a helper you don't care about); a non-positive @k@ is clamped
+-- to 1 with an explicit note. @mPrefix@ constrains the
+-- intermediate nodes to a module subtree.
+queryPath :: Loaded -> Int -> Maybe Text -> Text -> Text -> Text
+queryPath ld k mPrefix fromName toName =
+  case (resolveDef ld fromName, resolveDef ld toName) of
+    (Nothing, _) -> notFound ld fromName
+    (_, Nothing) -> notFound ld toName
+    (Just a, Just b)
+      | defId a == defId b ->
+          "`" <> defName a <> "` and `" <> defName b <> "` are the same definition."
+      | otherwise ->
+          let ix    = ldIndex ld
+              allow n = maybe True (`T.isPrefixOf` defModule (defAt ix n)) mPrefix
+              paths = kShortestPathsVia ix allow (defId a) (defId b) kEff
+              scope = maybe "" (\p -> " staying within `" <> p <> "`") mPrefix
+          in kNote <> case paths of
+            []       -> "No dependency path from `" <> defName a <> "` to `"
+                          <> defName b <> "`" <> scope <> ": it does not "
+                          <> "transitively use it" <> maybe "" (const " under that prefix") mPrefix
+                          <> ".\n(Try `path` with the arguments swapped, "
+                          <> (if mPrefix == Nothing then "or `impact`.)"
+                                                    else "without `module_prefix`, or `impact`.)")
+            (p0 : _) ->
+              let multi  = length paths > 1
+                  header = tshow (length p0 - 1) <> "-step shortest path"
+                             <> (if multi then " (" <> tshow (length paths)
+                                                    <> " distinct shown)" else "")
+                             <> scope <> " (`" <> defName a <> "` uses … uses `"
+                             <> defName b <> "`):\n"
+              in header <> T.intercalate "\n\n"
+                   [ (if multi then "[" <> tshow (j :: Int) <> "]\n" else "")
+                       <> renderChain ix p
+                   | (j, p) <- zip [1 ..] paths ]
+  where
+    kEff  = max 1 k
+    kNote = if k < 1 then "(k=" <> tshow k <> " ≤ 0; clamped to 1)\n" else ""
+
+-- | Render a node-id path as an indented chain. Hops after the first are
+-- prefixed with the provenance of the edge that justifies them
+-- (@{body}@/@{where}@/@{signature}@/@{with}@/@?@ when untagged). Consecutive
+-- @(source, target)@ pairs are taken once via @zip path (drop 1 path)@.
+renderChain :: Index -> [Int] -> Text
+renderChain ix path = case map (defAt ix) path of
+  []         -> ""
+  (d0 : drest) ->
+    let provs = zipWith (\s t -> maybe "?" renderProv (edgeProv ix s t))
+                        path (drop 1 path)
+        first = "  `" <> defName d0 <> "`  " <> loc d0
+        rest  = zipWith (\pv d -> "  —{" <> pv <> "}→ `" <> defName d <> "`  " <> loc d)
+                        provs drest
+    in T.intercalate "\n" (first : rest)
+
+-- | Forward BFS distances from a single source, expanding only into
+-- nodes the @ok@ predicate admits (pass @const True@ for an unfiltered walk).
+bfsDistFiltered :: IM.IntMap IS.IntSet -> (Int -> Bool) -> Int -> IM.IntMap Int
+bfsDistFiltered adj ok src = go (IM.singleton src 0) (Seq.singleton src)
+  where
+    go !acc q = case Seq.viewl q of
+      EmptyL      -> acc
+      cur :< rest ->
+        let d            = IM.findWithDefault 0 cur acc
+            nbrs         = IM.findWithDefault IS.empty cur adj
+            (acc', next) = IS.foldl' step (acc, rest) nbrs
+            step (!m, !qq) n
+              | IM.member n m = (m, qq)
+              | not (ok n)    = (m, qq)
+              | otherwise     = (IM.insert n (d + 1) m, qq |> n)
+        in go acc' next
+
+-- | Forward BFS from @src@ returning a predecessor map (each reachable
+-- node to its parent on a shortest path; @src@ maps to itself). One pass
+-- serves many shortest-path reconstructions that share the source — see
+-- 'queryRoots', which witnesses every root from a single tree.
+bfsParents :: IM.IntMap IS.IntSet -> Int -> IM.IntMap Int
+bfsParents adj src = go (IM.singleton src src) (Seq.singleton src)
+  where
+    go !parent q = case Seq.viewl q of
+      EmptyL      -> parent
+      cur :< rest ->
+        let nbrs            = IM.findWithDefault IS.empty cur adj
+            (parent', next) = IS.foldl' step (parent, rest) nbrs
+            step (!p, !qq) n
+              | IM.member n p = (p, qq)
+              | otherwise     = (IM.insert n cur p, qq |> n)
+        in go parent' next
+
+-- | Reconstruct the shortest path @src ⇝ dst@ from a 'bfsParents' map.
+-- 'Nothing' when @dst@ wasn't reached.
+tracePath :: IM.IntMap Int -> Int -> Int -> Maybe [Int]
+tracePath parent src dst
+  | dst == src           = Just [src]
+  | IM.member dst parent = Just (reverse (walk dst))
+  | otherwise            = Nothing
+  where
+    walk n | n == src  = [src]
+           | otherwise = n : walk (parent IM.! n)
+
+-- | Up to @k@ distinct shortest paths @src ⇝ dst@, restricted to
+-- intermediate nodes satisfying @allow@ (the endpoints are always
+-- admitted). Enumerated by DFS over the BFS distance layers — only
+-- following edges that advance exactly one layer toward @dst@ — so every
+-- returned path is of minimal length; 'take k' bounds the lazy
+-- enumeration. Powers @path@'s @k@ + @module_prefix@; @[]@ when
+-- @dst@ is unreachable within @allow@.
+kShortestPathsVia :: Index -> (Int -> Bool) -> Int -> Int -> Int -> [[Int]]
+kShortestPathsVia ix allow src dst k =
+  let okNode n = n == src || n == dst || allow n
+      dist     = bfsDistFiltered (idxForward ix) okNode src
+  in case IM.lookup dst dist of
+       Nothing -> []
+       Just l  -> take k (go dist l 0 src [src])
+  where
+    go dist l depth u acc
+      | depth == l = [reverse acc | u == dst]
+      | otherwise  =
+          let nbrs = IM.findWithDefault IS.empty u (idxForward ix)
+              next = [ w | w <- IS.toList nbrs
+                         , IM.lookup w dist == Just (depth + 1) ]
+          in concat [ go dist l (depth + 1) w (w : acc) | w <- next ]
+
+-- ---------------------------------------------------------------------
+-- roots  (which assumptions does T rest on?)
+-- ---------------------------------------------------------------------
+
+-- | The "assumptions" a definition ultimately rests on: its transitive
+-- dependencies (callees) that are postulates / primitives — or that
+-- match a supplied @kind@/@state@ — each with a shortest witnessing
+-- chain. Turns "which axioms does theorem T depend
+-- on?" into one call instead of hand-filtering @callees --transitive@
+-- against the postulate list.
+queryRoots :: Loaded -> Int -> Bool -> Bool -> Maybe Text -> Maybe Text -> Maybe Text -> Text -> Text
+queryRoots ld lim byMod chains mModPrefix mKindTxt mStateTxt name =
+  case filterError mKindTxt mStateTxt of
+    Just err -> err
+    Nothing  -> case resolveDef ld name of
+      Nothing -> notFound ld name
+      Just d  ->
+        let ix    = ldIndex ld
+            i     = defId d
+            reach = descendants ix (IS.singleton i)
+            roots = sortOn defName
+                      [ dx | j <- IS.toList reach
+                           , let dx = defAt ix j
+                           , isRoot dx
+                           , modulePrefixPred mModPrefix dx ]
+            n     = length roots
+            descr = filterDescr mKindTxt mStateTxt mModPrefix
+            -- One forward BFS from the subject builds the shortest-path
+            -- tree; every root's witness chain is then a cheap backtrace
+            -- through it, instead of a fresh BFS per root.
+            parents = bfsParents (idxForward ix) i
+            -- shortest forward chain i ⇝ root, backtraced through the
+            -- shared BFS tree, indented under its bullet.
+            witness ri = case tracePath parents i ri of
+              Just p  -> "\n  " <> T.replace "\n" "\n  " (renderChain ix p)
+              Nothing -> ""
+            -- A per-module summary (byMod) and a chains-off list
+            -- both trade the witness chains for a faster scan; chains
+            -- are the default.
+            body
+              | byMod      = moduleSummary 25 roots
+              | not chains = bulletList ld lim roots
+              | otherwise  =
+                  T.intercalate "\n\n"
+                    [ "- `" <> defName r <> "`  [" <> renderKind (defKind r) <> "/"
+                        <> renderState (defState r) <> "]  " <> loc r
+                        <> witness (defId r)
+                    | r <- take lim roots ]
+                  <> (if n > lim then "\n\n  …and " <> tshow (n - lim) <> " more" else "")
+            -- The per-module view leads with the grand total and
+            -- the module count so the summary is self-contained.
+            across = if byMod
+                       then " across " <> tshow (length (countByModule roots)) <> " module(s)"
+                       else ""
+            tail'
+              | n == 0    = "`" <> name <> "` transitively rests on no " <> descr <> "."
+              | otherwise = tshow n <> " " <> descr <> across <> " under `" <> name
+                              <> "` (transitive)"
+                              <> (if byMod || not chains then ":"
+                                                         else ", each with a witnessing chain:")
+                              <> "\n" <> body
+        in selfNote d <> tail'
+  where
+    mKind  = mKindTxt  >>= parseKind
+    mState = mStateTxt >>= parseState
+    -- default predicate (no filters): paper-level assumptions.
+    isRoot dx = case (mKind, mState) of
+      (Nothing, Nothing) ->
+        defState dx == Postulate || defKind dx `elem` [KPostulate, KPrimitive]
+      _ -> maybe True (== defKind dx) mKind && maybe True (== defState dx) mState
+    filterDescr mk ms mp =
+      let core = case (mk, ms) of
+            (Nothing, Nothing) -> "assumption(s) (postulate/primitive)"
+            _ -> T.intercalate " " $ filter (not . T.null)
+                   [ maybe "" ("kind=" <>) mk, maybe "" ("state=" <>) ms, "definition(s)" ]
+      in core <> maybe "" (\p -> " in `" <> p <> "`") mp
+    -- Flag when the queried node itself matches the assumption
+    -- predicate — it won't appear among its own roots (a node is not its
+    -- own transitive dependency), which would otherwise read oddly.
+    selfNote d
+      | isRoot d  = "(note: `" <> defName d <> "` is itself ["
+                      <> renderKind (defKind d) <> "/" <> renderState (defState d)
+                      <> "]; a definition is not its own transitive dependency.)\n"
+      | otherwise = ""
+
+-- ---------------------------------------------------------------------
+-- similar_types / similar_bodies
+-- ---------------------------------------------------------------------
+
+-- | Definitions whose type-signature /shape/ resembles the subject's,
+-- ranked by weighted Jaccard of their Weisfeiler–Leman signature
+-- fingerprints. The fingerprints are 'ldSigBodyFp' — the very same core
+-- ('AgdaGraph.Similarity.buildSigBodyFingerprints') the batch @silhouette@
+-- analysis clusters on — so a high-similarity pair here is exactly a
+-- structural-twin candidate there (an equal fingerprint scores 1.0).
+querySimilarTypes :: Loaded -> Int -> Double -> Text -> Text
+querySimilarTypes ld lim minSim name = case resolveDef ld name of
+  Nothing -> notFound ld name
+  Just d  ->
+    let ix   = ldIndex ld
+        sbf  = ldSigBodyFp ld
+        i    = defId d
+        mine = sbfSig sbf V.! i
+        size = fingerprintSize mine
+    in if size < 2
+         then "`" <> name <> "` has too small a type-signature footprint ("
+                <> tshow size <> " WL-fingerprint node(s)) for a meaningful "
+                <> "type-similarity comparison."
+         else
+           let cands = [ (s, dj)
+                       | j <- [0 .. idxRealCount ix - 1], j /= i
+                       , let dj = defAt ix j
+                       , defKind dj /= KOther
+                       , let s = weightedJaccard mine (sbfSig sbf V.! j)
+                       , s >= minSim ]
+               ranked = take lim (sortBy (comparing (Down . fst)) cands)
+               provNote = if sbfHasProvenance sbf then ""
+                          else "\n(note: graph lacks edge provenance, so the "
+                               <> "signature/body split is unavailable — fingerprints "
+                               <> "cover all edges, like `silhouette`'s fallback)"
+           in if null ranked
+                then "No definitions with signature-shape similarity ≥ "
+                       <> tshow minSim <> " for `" <> name <> "`." <> provNote
+                else "Definitions with a similar type-signature shape to `" <> name
+                       <> "` (Weisfeiler–Leman signature fingerprint — the `silhouette` "
+                       <> "metric):\n"
+                       <> rankedList lim ranked <> provNote
+
+-- | Definitions whose elaborated body shares canonical subterms with the
+-- subject's, ranked by occurrence-weighted Jaccard of their subterm-hash
+-- multisets. The multisets are 'ldSubtermFp' — the same per-def view the
+-- batch @term-cluster@ analysis buckets over — so counting occurrences
+-- (not mere membership) matches @term-cluster@'s notion of body structure.
+querySimilarBodies :: Loaded -> Int -> Double -> Text -> Text
+querySimilarBodies ld lim minSim name = case resolveDef ld name of
+  Nothing -> notFound ld name
+  Just d  -> case ldSubtermFp ld of
+    Nothing ->
+      "This graph carries no AST term-hashes, so body similarity is unavailable.\n"
+        <> "Rebuild with term hashes enabled (the daemon does this by default; if you "
+        <> "loaded a fixed --graph, regenerate it with `agda-deps --with-term-hashes`)."
+    Just fps ->
+      let ix = ldIndex ld
+          i  = defId d
+      in if i >= idxRealCount ix
+           then "`" <> name <> "` is a referenced-only / synthetic node, so it has no "
+                  <> "body to compare."
+           else
+             let mine = fps V.! i
+                 size = fingerprintSize mine
+             in if size < 2
+                  then "`" <> name <> "` has too few hashed subterms ("
+                         <> tshow size <> ") for a meaningful body comparison "
+                         <> "(it may be a postulate, a trivial def, or below --min-term-depth)."
+                  else
+                    let cands = [ (s, defAt ix j)
+                                | j <- [0 .. idxRealCount ix - 1], j /= i
+                                , let s = weightedJaccard mine (fps V.! j)
+                                , s >= minSim ]
+                        ranked = take lim (sortBy (comparing (Down . fst)) cands)
+                    in if null ranked
+                         then "No definitions with AST-body overlap ≥ " <> tshow minSim
+                                <> " for `" <> name <> "`."
+                         else "Definitions with structurally similar bodies to `" <> name
+                                <> "` (occurrence-weighted Jaccard of canonical subterm "
+                                <> "hashes — the `term-cluster` view):\n"
+                                <> rankedList lim ranked
+
+rankedList :: Int -> [(Double, Definition)] -> Text
+rankedList lim xs =
+  T.intercalate "\n"
+    [ "- " <> pct s <> "  `" <> defName d <> "`  ["
+            <> renderKind (defKind d) <> "]  " <> loc d
+    | (s, d) <- take lim xs ]
+  where pct s = T.pack (show (fromIntegral (round (s * 1000) :: Int) / 10 :: Double)) <> "%"
+
+-- ---------------------------------------------------------------------
+-- search / stats
+-- ---------------------------------------------------------------------
+
+-- | Substring search with optional structural filters. @q@ may be empty
+-- when at least one of @mKind@ / @mState@ is given — that lists every
+-- definition of a kind/state. @topLevelOnly@ drops @where@-/anonymous
+-- locals. Bad kind/state filter values produce an explicit error.
+querySearch :: Loaded -> Bool -> Maybe Text -> Maybe Text -> Maybe Text -> Int -> Text -> Text
+querySearch ld topLevelOnly mModPrefix mKindTxt mStateTxt lim q =
+  case filterError mKindTxt mStateTxt of
+    Just err -> err
+    Nothing
+      | T.null q && mKind == Nothing && mState == Nothing && mModPrefix == Nothing ->
+          "Provide a `query` substring, or a `kind`/`state`/`module_prefix` filter to list by."
+      | otherwise ->
+          let base   = if T.null q then realDefs ld else rankedMatches ld q
+              kept   = filter keep base
+              keep d = (not topLevelOnly || not (isLocalName d))
+                         && maybe True (== defKind d)  mKind
+                         && maybe True (== defState d) mState
+                         && modulePrefixPred mModPrefix d
+              notes  = T.concat
+                         [ if topLevelOnly then " (top-level only)" else ""
+                         , maybe "" (\p -> " module_prefix=" <> p) mModPrefix
+                         , maybe "" (\k -> " kind=" <> k) mKindTxt
+                         , maybe "" (\s -> " state=" <> s) mStateTxt ]
+              subj   = if T.null q then "definitions" <> notes
+                                   else "match(es)" <> notes <> " for `" <> q <> "`"
+          in case kept of
+               [] -> "No definitions" <> (if T.null q then "" else " matching `" <> q <> "`")
+                       <> notes <> "."
+               _  -> tshow (length kept) <> " " <> subj <> ":\n" <> bulletList ld lim kept
+  where
+    mKind  = mKindTxt  >>= parseKind
+    mState = mStateTxt >>= parseState
+
+-- | Group definitions by their defining module, with a count each.
+-- Shared by 'queryImpact' and 'moduleSummary'.
+countByModule :: [Definition] -> [(Text, Int)]
+countByModule ds =
+  M.toList $ foldl' (\m dx -> M.insertWith (+) (defModule dx) (1 :: Int) m) M.empty ds
+
+-- | Per-module count summary (the navigable view for large fan-out),
+-- highest-count modules first. Used on request by 'queryCallers' /
+-- 'queryCallees'.
+moduleSummary :: Int -> [Definition] -> Text
+moduleSummary topN ds =
+  let byMod = countByModule ds
+      tops  = take topN (sortBy (comparing (Down . snd)) byMod)
+      extra = length byMod - length tops
+  in T.intercalate "\n" [ "  " <> m <> "  (" <> tshow n <> ")" | (m, n) <- tops ]
+       <> (if extra > 0 then "\n  …and " <> tshow extra <> " more module(s)" else "")
+
+queryStats :: Loaded -> Text
+queryStats ld =
+  let ix      = ldIndex ld
+      rds     = realDefs ld
+      n       = length rds
+      synth   = idxSyntheticCount ix
+      nEdges  = sum (map IS.size (IM.elems (idxForward ix)))
+      mods    = length (egModules (ldGraph ld))
+      cnt p   = length (filter p rds)
+      byState s = cnt ((== s) . defState)
+      byKind  k = cnt ((== k) . defKind)
+  in T.unlines
+       [ "Graph statistics:"
+       , "  modules:      " <> tshow mods
+       , "  definitions:  " <> tshow n <> " (+" <> tshow synth <> " referenced-only)"
+       , "  edges:        " <> tshow nEdges
+       , "  by state:     Defined " <> tshow (byState Defined)
+                        <> ", Postulate " <> tshow (byState Postulate)
+                        <> ", Hole " <> tshow (byState Hole)
+                        <> ", Failed " <> tshow (byState Failed)
+       , "  by kind:      function " <> tshow (byKind KFunction)
+                        <> ", datatype " <> tshow (byKind KDatatype)
+                        <> ", record " <> tshow (byKind KRecord)
+                        <> ", constructor " <> tshow (byKind KConstructor)
+                        <> ", projection " <> tshow (byKind KProjection)
+                        <> ", postulate " <> tshow (byKind KPostulate)
+       , "  failed mods:  " <> (if null (ldFailed ld) then "none"
+                                 else T.intercalate ", " (ldFailed ld))
+       ]
+
+-- ---------------------------------------------------------------------
+-- type_of  (reads source at the recorded line)
+-- ---------------------------------------------------------------------
+
+-- | A definition's type signature. By default returns the elaborated
+-- type the producer reified into the graph (@--with-signatures@, the
+-- daemon's default); @preferSource@ forces the as-written source text
+-- instead (useful when the reified form expands numeric literals
+-- and instance dictionaries). When no reified type is recorded we fall
+-- back to source either way. @normalised@ / @showImplicit@ describe how
+-- the reified type was built (daemon-level — they're baked into the
+-- graph, so the disclaimer reports the mode rather than re-reifying).
+readSignature :: Loaded -> Bool -> Bool -> Bool -> Text -> IO (Either Text Text)
+readSignature ld preferSource normalised showImplicit name = case resolveDef ld name of
+  -- "Name not found" is a normal lookup outcome, not a tool error —
+  -- return it as ordinary output so `type_of` matches `locate`. The
+  -- genuine failures below (no source file, unreadable, no isolable
+  -- signature) stay as 'Left'.
+  Nothing -> pure (Right (notFound ld name))
+  Just d  -> case if preferSource then Nothing else defSig d of
+    -- Authoritative path: the producer emitted the reified type. The
+    -- disclaimer reflects the daemon's signature settings.
+    Just t0 ->
+      let t       = desugarLiterals t0
+          locTxt  = defModule d <> maybe "" ((":" <>) . tshow) (defLine d)
+          normTxt = if normalised then "normalised (semantic form)"
+                                  else "not normalised, shown as-written"
+          impTxt  = if showImplicit then "implicit arguments shown"
+                                    else "implicit arguments hidden (Agda default)"
+          litTxt  = if t /= t0 then ", numeric literals de-sugared" else ""
+      in pure (Right $ "`" <> defName d <> "`  (" <> locTxt <> ")\n\n" <> t
+                        <> "\n\n(elaborated type: reified from the type-checker, "
+                        <> normTxt <> ", " <> impTxt <> litTxt
+                        <> "; pass `source=true` for the as-written signature)")
+    -- Source path: forced by @preferSource@, or the fallback when no
+    -- reified type was recorded. The disclaimer distinguishes the two.
+    Nothing -> case M.lookup (defModule d) (ldModFiles ld) of
+      Nothing -> pure (Left ("No source file recorded for module " <> defModule d <> "."))
+      Just fp -> do
+        e <- try (readFile fp) :: IO (Either SomeException String)
+        case e of
+          Left err -> pure (Left ("Cannot read " <> T.pack fp <> ": " <> T.pack (show err)))
+          Right contents ->
+            let ls    = lines contents
+                baseS = T.unpack (lastComp (stripLineTag (defName d)))
+                hdr   = "`" <> defName d <> "`  (" <> T.pack fp
+                          <> maybe "" ((":" <>) . tshow) (defLine d) <> ")"
+                note  = if preferSource
+                          then "\n\n(as-written from source; omit `source` for the "
+                                 <> "elaborated type)"
+                          else "\n\n(source-derived, best-effort; rebuild the graph with "
+                                 <> "--with-signatures for the elaborated type)"
+            in case extractSignature ls (defLine d) baseS of
+                 Just sig -> pure (Right (hdr <> "\n\n" <> sig <> note))
+                 Nothing  -> pure (Left
+                   (hdr <> "\nCould not isolate a type signature from source"
+                        <> " (it may be a generated projection/constructor, or a"
+                        <> " definition without an explicit signature)."))
+
+-- | Pull the signature block out of the file's lines. @mline@ is the
+-- 1-based start line the producer recorded (may be 'Nothing').
+extractSignature :: [String] -> Maybe Int -> String -> Maybe Text
+extractSignature ls mline baseS =
+  let arr        = V.fromList ls
+      n          = V.length arr
+      atIdx k    = arr V.!? k
+      isSig l    = sigLineMatches baseS l
+      -- candidate start indices: near the recorded line first, else scan all
+      candidates = case mline of
+        Just l  -> let i0 = l - 1
+                   in [i0, i0 - 1, i0 + 1, i0 - 2, i0 + 2]
+        Nothing -> [0 .. n - 1]
+      starts     = [ k | k <- candidates, Just l <- [atIdx k], isSig l ]
+  in case starts of
+       (s : _) -> Just (grab arr n s)
+       []      -> case [ k | k <- [0 .. n - 1], Just l <- [atIdx k], isSig l ] of
+                    (s : _) -> Just (grab arr n s)
+                    []      -> Nothing
+  where
+    grab arr n s =
+      let startLine = arr V.! s
+          ind0      = indentOf startLine
+          body      = takeWhile (\k -> k == s || moreIndented arr ind0 k)
+                                [s .. min (n - 1) (s + 40)]
+          block     = [ arr V.! k | k <- body ]
+      in T.stripEnd (T.pack (unlines block))
+    moreIndented arr ind0 k =
+      let l = arr V.! k
+      in not (null (dropWhile isSpace l)) && indentOf l > ind0
+
+indentOf :: String -> Int
+indentOf = length . takeWhile (== ' ')
+
+-- | Does this source line begin the signature for @baseS@?
+-- Matches @name : …@, @data name …@, and @record name …@.
+sigLineMatches :: String -> String -> Bool
+sigLineMatches baseS line =
+  let t = dropWhile isSpace line
+  in nameThenColon t
+       || ("data "   ++ baseS) `isPrefixOf` t
+       || ("record " ++ baseS) `isPrefixOf` t
+  where
+    nameThenColon t = case stripPrefix' baseS t of
+      Just rest -> let rest' = dropWhile (== ' ') rest
+                   in ":" `isPrefixOf` rest' && not ("::" `isPrefixOf` rest')
+      Nothing   -> False
+    stripPrefix' p s = if p `isPrefixOf` s then Just (drop (length p) s) else Nothing
+
+-- ---------------------------------------------------------------------
+-- Literal de-sugaring for the elaborated type_of view
+-- ---------------------------------------------------------------------
+
+-- | Collapse @Number@-instance literal expansions in a reified type back
+-- to the numeral. The elaborated printer renders @1@ as e.g.
+-- @Fromℕ.fromℕ (mkFromℕ′ (fromℕ∶ id)) 1@; this rewrites that whole
+-- application back to @1@.
+--
+-- Deliberately conservative and heuristic (no parser): it works over
+-- space-separated /atoms/ (balanced @()@\/@{}@\/@[]@ groups kept whole),
+-- and only rewrites a @…fromℕ@\/@…fromNat@\/@…fromInt@ head applied to a
+-- few argument atoms terminating in a digit literal. Anything it doesn't
+-- recognise is returned byte-for-byte unchanged, so a false negative is
+-- the worst case.
+desugarLiterals :: Text -> Text
+desugarLiterals = T.pack . desugarStr . T.unpack
+
+desugarStr :: String -> String
+desugarStr = unwords . rewrite . map recurse . atomize
+  where
+    -- Recurse into balanced groups so a nested @(… fromℕ … 3)@ is
+    -- de-sugared too; drop the now-redundant parens around a bare
+    -- numeral so @(3)@ collapses to @3@.
+    recurse a = case a of
+      ('(' : r) | not (null r), last r == ')' -> wrap '(' ')' (init r)
+      ('{' : r) | not (null r), last r == '}' -> wrap '{' '}' (init r)
+      ('[' : r) | not (null r), last r == ']' -> wrap '[' ']' (init r)
+      _                                        -> a
+    wrap op cl inner =
+      let inner' = desugarStr inner
+      in if op == '(' && isNum inner' then inner' else op : inner' ++ [cl]
+    rewrite [] = []
+    rewrite (a : as)
+      | isFromNat a = case collapse (0 :: Int) as of
+          Just (numAtom, rest) -> numAtom : rewrite rest
+          Nothing              -> a : rewrite as
+      | otherwise   = a : rewrite as
+    -- Consume up to a few argument atoms, terminating at a digit literal.
+    collapse n xs
+      | n > 4     = Nothing
+      | otherwise = case xs of
+          (y : ys) | isNum y   -> Just (y, ys)
+                   | isArg y   -> collapse (n + 1) ys
+                   | otherwise -> Nothing
+          []                   -> Nothing
+    isFromNat s = s `elem` ["fromℕ", "fromNat", "fromInt"]
+                    || any (`isSuffixOf` s) [".fromℕ", ".fromNat", ".fromInt"]
+    isNum s = not (null s) && all isDigit s
+    isArg s = case s of
+      (c : _) -> c `elem` ("({[" :: String) || isIdentStart c
+      []      -> False
+    -- An identifier-ish leading char: not a bracket, operator, space or
+    -- digit. Operators (e.g. ≥, →, |) abort the collapse — we never eat
+    -- across them.
+    isIdentStart c = c == '_'
+      || not (c `elem` (opChars ++ "({[)}]") || isSpace c || isDigit c)
+    opChars = "=<>:;,|→≥≤" :: String
+
+-- | Split a string on spaces while keeping balanced @()@\/@{}@\/@[]@
+-- groups together as single atoms. Input is already single-space
+-- normalised by the producer, so re-joining atoms with 'unwords' is
+-- faithful.
+atomize :: String -> [String]
+atomize = go (0 :: Int) ""
+  where
+    go _ acc [] = [reverse acc | not (null acc)]
+    go d acc (c : cs)
+      | c == ' ' && d <= 0 = (if null acc then id else (reverse acc :)) (go 0 "" cs)
+      | otherwise          = go (d + delta c) (c : acc) cs
+    delta c | c `elem` ("({[" :: String) =  1
+            | c `elem` (")}]" :: String) = -1
+            | otherwise                  =  0

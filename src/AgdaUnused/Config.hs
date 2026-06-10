@@ -1,0 +1,177 @@
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RecordWildCards     #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+-- | YAML configuration for @agda-unused@.
+--
+-- The shape mirrors the CLI: every CLI long flag has a matching
+-- kebab-case YAML field, plus a @roots:@ list for what would
+-- otherwise be positional arguments.
+--
+-- Discovery order (first match wins):
+--
+--   1. @--config=PATH@ (explicit CLI).
+--   2. @$AGDA_UNUSED_CONFIG@.
+--   3. @./.agda-unused.yml@ or @./.agda-unused.yaml@ in cwd.
+--   4. Walk up from cwd; first directory containing a @*.agda-lib@
+--      file is the project root — look there.
+--   5. None found.
+--
+-- The resulting 'Config' is folded over 'Options' via 'applyConfig'
+-- BEFORE CLI parsing, so explicit CLI flags always win.
+module AgdaUnused.Config
+  ( Config(..)
+  , loadConfig
+  , discoverConfigPath
+  , applyConfig
+  , ConfigTarget(..)
+  , parseKindsToken
+  ) where
+
+import           Control.Exception   ( IOException, catch )
+import           Data.Aeson          ( FromJSON(..), (.:?), withObject, withText )
+import qualified Data.Aeson.Types    as A
+import           Data.Foldable       ( toList )
+import           Data.List           ( isSuffixOf )
+import qualified Data.Text           as T
+import qualified Data.Yaml           as Y
+
+import           System.Directory    ( doesFileExist, getCurrentDirectory, listDirectory )
+import           System.Environment  ( lookupEnv )
+import           System.FilePath     ( (</>), takeDirectory )
+
+import           AgdaUnused.Analysis ( FindingKind(..) )
+
+-- | Externally-supplied configuration. Every field is 'Maybe' so a
+-- partial config only overrides what the user actually set.
+data Config = Config
+  { cfgJson    :: !(Maybe FilePath)
+  , cfgRelTo   :: !(Maybe FilePath)
+  , cfgJsonOut :: !(Maybe Bool)
+  , cfgKinds   :: !(Maybe [FindingKind])
+  , cfgRoots   :: !(Maybe [FilePath])
+  , cfgExclude :: !(Maybe [String])
+  } deriving (Show)
+
+-- | Drop-target for 'applyConfig'. We don't import the @Options@
+-- type from "MainUnused" because that would create a cyclic
+-- dependency; the caller threads in field-setters via this record.
+data ConfigTarget a = ConfigTarget
+  { ctSetJson    :: FilePath      -> a -> a
+  , ctSetRelTo   :: FilePath      -> a -> a
+  , ctSetJsonOut :: Bool          -> a -> a
+  , ctSetKinds   :: [FindingKind] -> a -> a
+  , ctSetRoots   :: [FilePath]    -> a -> a
+  , ctSetExclude :: [String]      -> a -> a
+  }
+
+-- | Apply a 'Config' to an arbitrary @Options@-shaped value using
+-- the supplied setters. Each field is only touched when the
+-- corresponding 'Maybe' is 'Just'.
+applyConfig :: ConfigTarget a -> Config -> a -> a
+applyConfig ConfigTarget{..} Config{..} = id
+  . maybe id ctSetJson    cfgJson
+  . maybe id ctSetRelTo   cfgRelTo
+  . maybe id ctSetJsonOut cfgJsonOut
+  . maybe id ctSetKinds   cfgKinds
+  . maybe id ctSetRoots   cfgRoots
+  . maybe id ctSetExclude cfgExclude
+
+-- | 'FromJSON' for the 'cfgKinds' field. Accepts EITHER a YAML
+-- scalar (@kinds: "using,blanket"@) or a YAML list
+-- (@kinds: [using, blanket]@). Each token is expanded via
+-- 'parseKindsToken' so aliases like @\"defined\"@ still work in a
+-- list element.
+instance FromJSON Config where
+  parseJSON = withObject "agda-unused config" $ \o -> do
+    cfgJson    <- o .:? "json"
+    cfgRelTo   <- o .:? "rel-to"
+    cfgJsonOut <- o .:? "json-out"
+    rawKinds   <- o .:? "kinds"
+    cfgKinds   <- traverse parseKindsField rawKinds
+    cfgRoots   <- o .:? "roots"
+    cfgExclude <- o .:? "exclude"
+    return Config{..}
+    where
+      parseKindsField :: A.Value -> A.Parser [FindingKind]
+      parseKindsField = \case
+        A.String t -> case parseKindsCSV (T.unpack t) of
+          Left e   -> fail e
+          Right ks -> return ks
+        A.Array xs -> do
+          parts <- mapM (withText "kind" (return . T.unpack)) (toList xs)
+          case mapM parseKindsToken parts of
+            Left e   -> fail e
+            Right ks -> return (concat ks)
+        v -> A.typeMismatch "String or [String] for 'kinds'" v
+
+-- | Parse a comma-separated kind list (CLI / scalar-YAML form).
+parseKindsCSV :: String -> Either String [FindingKind]
+parseKindsCSV = fmap concat . mapM parseKindsToken . splitComma
+  where
+    splitComma s = case break (== ',') s of
+      (a, "")     -> [trim a]
+      (a, _:rest) -> trim a : splitComma rest
+    trim = dropWhile (== ' ') . reverse . dropWhile (== ' ') . reverse
+
+-- | Parse a single kind token. Mirrors 'MainUnused.parseKinds' one-arm.
+parseKindsToken :: String -> Either String [FindingKind]
+parseKindsToken "using"         = Right [UnusedInUsing]
+parseKindsToken "blanket"       = Right [UnusedBlanketOpen]
+parseKindsToken "defined"       = Right [DefinedDead, DefinedInternalOnly]
+parseKindsToken "dead"          = Right [DefinedDead]
+parseKindsToken "internal-only" = Right [DefinedInternalOnly]
+parseKindsToken "public"        = Right [PublicWithoutDownstream]
+parseKindsToken "duplicate"     = Right [DuplicateUsingForModule]
+parseKindsToken "all"           = Right
+  [ UnusedInUsing, UnusedBlanketOpen
+  , DefinedDead, DefinedInternalOnly
+  , PublicWithoutDownstream, DuplicateUsingForModule
+  ]
+parseKindsToken s = Left $ "unknown kind: " ++ s
+
+-- | Locate a config file. Returns the first hit in the discovery
+-- order documented at the module header, or 'Nothing' if no config
+-- can be found.
+discoverConfigPath :: Maybe FilePath -> IO (Maybe FilePath)
+discoverConfigPath explicit = case explicit of
+  Just p  -> return (Just p)
+  Nothing -> lookupEnv "AGDA_UNUSED_CONFIG" >>= \case
+    Just p | not (null p) -> return (Just p)
+    _ -> do
+      cwd <- getCurrentDirectory
+      tryDir cwd >>= \case
+        Just p  -> return (Just p)
+        Nothing -> walkUp cwd
+  where
+    tryDir d = firstExisting
+      [ d </> ".agda-unused.yml"
+      , d </> ".agda-unused.yaml"
+      ]
+
+    walkUp d = do
+      hasLib <- dirHasAgdaLib d
+      if hasLib
+        then tryDir d
+        else let parent = takeDirectory d
+             in if parent == d
+                  then return Nothing  -- hit filesystem root
+                  else walkUp parent
+
+    firstExisting []     = return Nothing
+    firstExisting (p:ps) = do
+      ok <- doesFileExist p
+      if ok then return (Just p) else firstExisting ps
+
+    dirHasAgdaLib d =
+      (any (".agda-lib" `isSuffixOf`) <$> listDirectory d)
+        `catch` \(_ :: IOException) -> return False
+
+-- | Load and parse the config file. Returns @Left@ with a clean,
+-- single-line error on parse failure.
+loadConfig :: FilePath -> IO (Either String Config)
+loadConfig p = do
+  res <- Y.decodeFileEither p
+  return $ case res of
+    Left err -> Left (Y.prettyPrintParseException err)
+    Right c  -> Right c

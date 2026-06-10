@@ -1,0 +1,80 @@
+# CI for agda-graph-explorer.
+#
+# Unlike the agda-deps repo, NOTHING here links Agda — every tool is a
+# pure consumer of agda-deps' v2 graph.json. So there is no
+# source-repository-package pin, no Agda-from-source build, and no
+# git-submodule dance: a clean `cabal build` resolves entirely from
+# Hackage and finishes in minutes.
+#
+# Smoke + acceptance over the committed expanded-JSON fixtures
+# (test/deps.json, .agda-explore/deps.json) — no agda-deps / Agda binary
+# is needed in CI. The agda-goals live drive (which shells out to
+# `agda`) and agda-explore's live graph regeneration (which shells out
+# to `agda-deps`) are intentionally NOT exercised here.
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Check out the repository
+      uses: actions/checkout@v4
+
+    - name: Set up Haskell (GHC 9.14.1 + cabal 3.16)
+      uses: haskell-actions/setup@v2
+      with:
+        ghc-version: '9.14.1'
+        cabal-version: '3.16'
+
+    - name: Cache cabal store
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cabal/store
+          ~/.cabal/packages
+          dist-newstyle
+        key: ${{ runner.os }}-ghc9.14.1-${{ hashFiles('cabal.project', 'agda-graph-explorer.cabal') }}
+        restore-keys: |
+          ${{ runner.os }}-ghc9.14.1-
+
+    - name: Update Hackage index
+      run: cabal update
+
+    - name: Dependency drift check
+      run: cabal build --dry-run
+
+    - name: Build all targets (library + 4 executables)
+      run: cabal build
+
+    - name: agda-optimization — smoke over the fixture
+      run: |
+        cabal run -v0 agda-optimization -- motif        test/deps.json
+        cabal run -v0 agda-optimization -- load-bearing test/deps.json
+        cabal run -v0 agda-optimization -- basket       test/deps.json
+
+    - name: agda-optimization — determinism (-N1 == -N4, human + JSON)
+      # Byte-identical output between +RTS -N1 and +RTS -N4 is the
+      # acceptance invariant for the multicore sibling binaries.
+      run: |
+        for sub in motif basket fingerprint; do
+          cabal run -v0 agda-optimization -- "$sub" test/deps.json +RTS -N1 -RTS > "/tmp/$sub.n1"
+          cabal run -v0 agda-optimization -- "$sub" test/deps.json +RTS -N4 -RTS > "/tmp/$sub.n4"
+          diff "/tmp/$sub.n1" "/tmp/$sub.n4" || { echo "NON-DETERMINISTIC: $sub"; exit 1; }
+          cabal run -v0 agda-optimization -- "$sub" test/deps.json --json +RTS -N1 -RTS > "/tmp/$sub.j1"
+          cabal run -v0 agda-optimization -- "$sub" test/deps.json --json +RTS -N4 -RTS > "/tmp/$sub.j4"
+          diff "/tmp/$sub.j1" "/tmp/$sub.j4" || { echo "NON-DETERMINISTIC (json): $sub"; exit 1; }
+        done
+        echo "determinism OK"
+
+    - name: agda-unused — smoke over the fixture
+      run: cabal run -v0 agda-unused -- --json=test/deps.json --json-out .
+
+    - name: agda-explore — binary smoke
+      run: cabal run -v0 agda-explore -- --version

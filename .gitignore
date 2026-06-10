@@ -1,0 +1,13 @@
+_build
+dist
+dist-newstyle
+*~
+*.hi
+*.o
+*.bak
+
+# Local Claude Code agent definitions
+.claude/
+
+# Note: .agda-explore/deps.json IS tracked here as a query/test fixture
+# (it is not this project's own generated graph — this repo links no Agda).

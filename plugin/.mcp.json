@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "agda-explore": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/agda-explore-launch.sh",
+      "args": [],
+      "env": {}
+    }
+  }
+}

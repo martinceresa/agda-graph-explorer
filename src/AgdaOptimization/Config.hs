@@ -1,0 +1,251 @@
+{-# LANGUAGE BangPatterns      #-}
+{-# LANGUAGE LambdaCase        #-}
+{-# LANGUAGE OverloadedStrings #-}
+-- | YAML configuration support for @agda-optimization@.
+--
+-- A config file holds per-subcommand defaults that override
+-- 'defaultOptions' but are themselves overridden by CLI flags. The
+-- merge order, executed in 'AgdaOptimization.CLI.runSubcommand', is:
+--
+--   1. @<Subcmd>.defaultOptions@
+--   2. config's @<subcmd>:@ section (each present key overrides)
+--   3. argv parsed by @<Subcmd>.parseOptions seed argv@
+--
+-- The config file's wire schema is documented in @README.md@ and the
+-- per-subcommand @applyConfig@ helpers; this module is purely the
+-- discovery / load / route plumbing.
+--
+-- Discovery order, computed by 'discoverConfigPath':
+--
+--   1. Explicit @--config=PATH@ (passed in as @Just p@).
+--   2. @$AGDA_OPTIMIZATION_CONFIG@.
+--   3. @./.agda-optimization.yml@ or @./.agda-optimization.yaml@.
+--   4. Walk up from cwd until a @*.agda-lib@ file is found; look for
+--      the config in that directory.
+--   5. 'Nothing' — no config applied.
+module AgdaOptimization.Config
+  ( -- * Loaded configuration
+    Config(..)
+    -- * Discovery / load
+  , discoverConfigPath
+  , loadConfig
+    -- * Subcommand routing
+  , subSectionFor
+  , globalSection
+  , applyGlobal
+    -- * Helpers re-used by per-subcommand 'applyConfig'
+  , lookupKey
+  , lookupKeyEnum
+  , lookupKeyTextList
+  ) where
+
+import           Control.Exception       ( IOException, try )
+import qualified Data.Aeson              as A
+import qualified Data.Aeson.KeyMap       as KM
+import qualified Data.Aeson.Key          as K
+import           Data.Aeson.Types        ( parseEither )
+import qualified Data.ByteString         as BS
+import           Data.Text               ( Text )
+import qualified Data.Text               as T
+import qualified Data.Yaml               as Y
+import           System.Directory        ( doesDirectoryExist, doesFileExist
+                                         , getCurrentDirectory, listDirectory )
+import           System.Environment      ( lookupEnv )
+import           System.FilePath         ( takeDirectory, takeExtension, (</>) )
+
+import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..) )
+
+----------------------------------------------------------------------
+-- Loaded shape
+----------------------------------------------------------------------
+
+-- | A successfully-loaded YAML config. The top-level value MUST decode
+-- as an 'A.Object' — a YAML scalar / list at the top is rejected by
+-- 'loadConfig' with a clean error.
+--
+-- 'cfgSource' is the absolute path the YAML came from, used purely for
+-- diagnostics (so the user sees the file/section/key triple when a
+-- per-subcommand 'applyConfig' rejects a bad value type).
+data Config = Config
+  { cfgSource :: !FilePath
+  , cfgRoot   :: !A.Object
+  } deriving (Show)
+
+----------------------------------------------------------------------
+-- Discovery
+----------------------------------------------------------------------
+
+-- | Resolve the config path according to the documented discovery
+-- order. The optional 'Just p' argument is the @--config=PATH@ value;
+-- when supplied we honour it verbatim — a missing file at that path is
+-- a hard error reported by 'loadConfig', not by the discovery layer.
+discoverConfigPath :: Maybe FilePath -> IO (Maybe FilePath)
+discoverConfigPath (Just p) = pure (Just p)
+discoverConfigPath Nothing  = do
+  envOnly <- lookupEnv "AGDA_OPTIMIZATION_CONFIG"
+  case envOnly of
+    Just p | not (null p) -> pure (Just p)
+    _ -> do
+      cwd <- getCurrentDirectory
+      mLocal <- firstExisting [cwd </> ".agda-optimization.yml"
+                              , cwd </> ".agda-optimization.yaml"]
+      case mLocal of
+        Just p  -> pure (Just p)
+        Nothing -> findAtAgdaLib cwd
+
+-- | Walk up from 'startDir' looking for a directory that contains a
+-- @*.agda-lib@ file; once found, look for the config there.
+findAtAgdaLib :: FilePath -> IO (Maybe FilePath)
+findAtAgdaLib startDir = loop startDir
+  where
+    loop dir = do
+      hasLib <- hasAgdaLib dir
+      if hasLib
+        then firstExisting [dir </> ".agda-optimization.yml"
+                           , dir </> ".agda-optimization.yaml"]
+        else do
+          let parent = takeDirectory dir
+          if parent == dir
+            then pure Nothing
+            else loop parent
+
+-- | 'True' iff @dir@ exists and contains at least one @*.agda-lib@ entry.
+hasAgdaLib :: FilePath -> IO Bool
+hasAgdaLib dir = do
+  exists <- doesDirectoryExist dir
+  if not exists
+    then pure False
+    else do
+      entries <- try (listDirectory dir) :: IO (Either IOException [FilePath])
+      case entries of
+        Left _   -> pure False
+        Right es -> pure (any ((== ".agda-lib") . takeExtension) es)
+
+-- | Return the first path in the list that exists as a regular file.
+firstExisting :: [FilePath] -> IO (Maybe FilePath)
+firstExisting []     = pure Nothing
+firstExisting (p:ps) = do
+  ok <- doesFileExist p
+  if ok then pure (Just p) else firstExisting ps
+
+----------------------------------------------------------------------
+-- Load
+----------------------------------------------------------------------
+
+-- | Read and parse the file at the given path. Returns:
+--
+--   * @Right (Just cfg)@ — success.
+--   * @Right Nothing@    — no path was given (no config to apply).
+--   * @Left err@         — file unreadable, YAML invalid, or root not
+--     an object. Message starts with the path for easy grepping.
+loadConfig :: Maybe FilePath -> IO (Either String (Maybe Config))
+loadConfig Nothing  = pure (Right Nothing)
+loadConfig (Just p) = do
+  result <- try (BS.readFile p) :: IO (Either IOException BS.ByteString)
+  case result of
+    Left ioe -> pure $ Left (p <> ": cannot read config: " <> show ioe)
+    Right bs -> case Y.decodeEither' bs of
+      Left perr -> pure $ Left (p <> ": YAML parse error: "
+                                <> Y.prettyPrintParseException perr)
+      Right v -> case v of
+        A.Object obj -> pure $ Right (Just (Config p obj))
+        _            -> pure $ Left (p <> ": expected a YAML mapping at the top level")
+
+----------------------------------------------------------------------
+-- Routing
+----------------------------------------------------------------------
+
+-- | Look up the kebab-case section for the given subcommand name (e.g.
+-- @"load-bearing"@). Returns 'Nothing' if the section is absent OR the
+-- value present is not itself a mapping (silently ignored — a YAML
+-- scalar in that slot would already have been a strange user error).
+subSectionFor :: Config -> String -> Maybe A.Object
+subSectionFor cfg sub =
+  case KM.lookup (K.fromString sub) (cfgRoot cfg) of
+    Just (A.Object o) -> Just o
+    _                 -> Nothing
+
+-- | Look up the @global:@ section.
+globalSection :: Config -> Maybe A.Object
+globalSection cfg = case KM.lookup "global" (cfgRoot cfg) of
+  Just (A.Object o) -> Just o
+  _                 -> Nothing
+
+----------------------------------------------------------------------
+-- Helpers re-used by per-subcommand applyConfig
+----------------------------------------------------------------------
+
+-- | Read @obj.key@ as a typed value. Returns:
+--
+--   * @Right Nothing@      — key absent (no override).
+--   * @Right (Just a)@     — key present and decoded.
+--   * @Left err@           — key present but the value's JSON type
+--     does not match 'a'. Error message names the section and key so
+--     the user can find the offending line in the YAML file.
+lookupKey :: A.FromJSON a => String -> A.Object -> Text -> Either String (Maybe a)
+lookupKey section obj key =
+  case KM.lookup (K.fromText key) obj of
+    Nothing -> Right Nothing
+    Just v  -> case parseEither A.parseJSON v of
+      Right a  -> Right (Just a)
+      Left err -> Left (section <> "." <> T.unpack key <> ": " <> err)
+
+-- | As 'lookupKey' but funnels the decoded 'String' through a parser
+-- closure — perfect for the @--direction=outgoing|incoming|both@-style
+-- enum flags, which already have a hand-written parser in the
+-- subcommand module.
+lookupKeyEnum :: String -> A.Object -> Text
+              -> (String -> Either String a)
+              -> Either String (Maybe a)
+lookupKeyEnum section obj key parseEnum = do
+  ms <- lookupKey section obj key :: Either String (Maybe String)
+  case ms of
+    Nothing -> Right Nothing
+    Just s  -> case parseEnum s of
+      Right a  -> Right (Just a)
+      Left err -> Left (section <> "." <> T.unpack key <> ": " <> err)
+
+-- | YAML supports both @key: foo@ (a single string) and @key: [foo, bar]@
+-- (a list of strings). 'lookupKeyTextList' accepts either spelling — a
+-- single scalar is treated as a one-element list. This matches the
+-- convention used by repeatable CLI flags
+-- (e.g. @--axiom-module-prefix=A --axiom-module-prefix=B@).
+lookupKeyTextList :: String -> A.Object -> Text -> Either String (Maybe [Text])
+lookupKeyTextList section obj key =
+  case KM.lookup (K.fromText key) obj of
+    Nothing -> Right Nothing
+    Just (A.String t) -> Right (Just [t])
+    Just v -> case parseEither A.parseJSON v of
+      Right xs -> Right (Just xs)
+      Left err -> Left (section <> "." <> T.unpack key
+                        <> ": expected string or list of strings: " <> err)
+
+----------------------------------------------------------------------
+-- Global section overlay
+----------------------------------------------------------------------
+
+-- | Apply the @global:@ section over a seed 'GlobalOpts'. Recognised
+-- keys:
+--
+--   * @json: true|false@ — sets 'gOutFormat'. (When @false@, falls back
+--     to 'OutHuman'; preserves what the seed already had if absent.)
+--   * @out: PATH@        — sets 'gOutPath'.
+--
+-- Unknown keys are silently ignored (forward-compatible).
+applyGlobal :: Maybe A.Object -> GlobalOpts -> Either String GlobalOpts
+applyGlobal Nothing    g = Right g
+applyGlobal (Just obj) g0 = do
+  let section = "global"
+  g1 <- do
+    mJson <- lookupKey section obj "json" :: Either String (Maybe Bool)
+    pure $ case mJson of
+      Just True  -> g0 { gOutFormat = OutJson }
+      Just False -> g0 { gOutFormat = OutHuman }
+      Nothing    -> g0
+  g2 <- do
+    mOut <- lookupKey section obj "out" :: Either String (Maybe FilePath)
+    pure $ case mOut of
+      Just p  -> g1 { gOutPath = Just p }
+      Nothing -> g1
+  pure g2
+

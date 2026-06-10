@@ -1,0 +1,147 @@
+---
+name: agda-explore
+description: >-
+  Explore an Agda library by querying its dependency graph instead of
+  grepping. Use when working in an Agda project (.agda / .lagda.md) and you
+  need to locate a definition, find who calls or uses it, see what it
+  depends on, gauge the blast radius of changing it, read its type, find
+  structurally or type-similar definitions, or hunt unused imports / dead
+  code. Backed by the `agda-explore` MCP server (from the agda-explore
+  plugin).
+---
+
+# Exploring an Agda library with agda-explore
+
+This project ships an MCP server, **`agda-explore`**, that holds the Agda
+library's dependency graph in memory and answers point queries over it. It
+is built from `agda-deps` (the Agda compiler backend that elaborates the
+project) and its sibling analyses, so its answers come from Agda's real
+elaborated graph — not a text scan.
+
+**Prefer these tools over `grep`/`rg`/`Glob` for structural questions.** A
+grep over an Agda corpus is slow, misses references that flow through
+`with`/instance resolution, and re-reads files every time. The graph is
+elaborated once and reused; queries are instant.
+
+## The graph stays live
+
+The server regenerates the graph on the fly: before answering, it checks
+whether any source file changed and, if so, re-runs `agda-deps` (reusing
+Agda's `.agdai` cache, so only edited modules re-elaborate) and hot-swaps
+the in-memory graph. You normally never need to think about this — just
+query. After a large edit you can call **`rebuild`** to force it, or
+**`status`** to see freshness and graph statistics. `status` also reports
+the running binary (path + mtime) and warns with a `⚠` line if a newer
+`agda-explore` build is on disk — a live daemon can't swap its own
+executable, so reconnect (`/mcp`) to pick it up.
+
+If a query reports "no entry configured", the project wasn't auto-detected:
+set `AGDA_EXPLORE_ENTRY` (the entry module, e.g. `agda-src/Main.lagda.md`)
+and `AGDA_EXPLORE_INCLUDE` (the include dir) in the environment, or pass a
+fixed graph with `--graph`.
+
+## Which tool for which question
+
+| You want to know…                                   | Use            |
+|-----------------------------------------------------|----------------|
+| Where is `X` defined? (module, file:line, kind)     | `locate`       |
+| Who calls / uses `X`?                                | `callers`      |
+| What does `X` depend on?                             | `callees`      |
+| What breaks if I change `X`'s type? (blast radius)   | `impact`       |
+| *Why* does `X` depend on `Y`? (shortest chain)       | `path`         |
+| Which axioms/postulates does `X` rest on?            | `roots`        |
+| What's the type of `X`?                              | `type_of`      |
+| What else has a type like `X`'s?                     | `similar_types` |
+| What else is *implemented* like `X`?                 | `similar_bodies` |
+| What's the exact name? List all postulates/holes?    | `search`       |
+| Which imports are unused / what's dead?              | `unused`       |
+| Graph size / freshness / config                     | `status`       |
+| Force a fresh rebuild                                | `rebuild`      |
+
+Names are fully-qualified (`Module.Sub.name`), but any *unique dotted suffix*
+resolves on its own — `roundLeader`, or `Theorem3.liveness′` when the bare
+name is ambiguous; you only need more of the path to disambiguate. If you
+don't know the name at all, run `search` first. `search` also takes `kind`
+(`function`/`datatype`/`record`/`postulate`/…) and `state`
+(`defined`/`postulate`/`hole`/`failed`) filters: pass them with an *empty*
+query to **list** every definition of that kind/state (e.g. audit all
+postulates or open holes), and a `module_prefix` filter to scope the list to
+a module subtree (e.g. every `datatype` under `Pkg.Sub`). Set
+`top_level_only: true` to drop where-block / anonymous-module locals that
+otherwise crowd out importable definitions.
+
+Each `where`/anonymous helper is its own node, named with its binding-site
+line (`Mod._.QED@388`) so distinct same-named helpers don't merge. `locate`
+reports their enclosing top-level `owner`, and `callers`/`callees` annotate
+helper lines with `(in `owner`)`.
+
+`callers` and `callees` take `transitive: true` to walk the whole cone
+rather than one hop. On a large fan-out, narrow with
+`module_prefix: "Pkg.Sub"`, pass `by_module: true` for a per-module count
+summary, or pass `provenance: body` (vs `signature`/`where`/`with`) to keep
+only genuine term-level uses and drop in-scope/type-level mentions — direct
+lines are annotated with their provenance either way. With `transitive: true`
+the provenance filter applies to the **first hop** (e.g. who *term*-depends
+on `X`, then transitively), not type-level reachability. `impact` is the
+transitive-callers query phrased as a change-risk summary (counts + affected
+modules) — reach for it before editing a widely-used signature. `path
+from=A to=B` returns the shortest dependency chain showing *why* A reaches
+B, with each hop annotated by its edge provenance (`—{body}→`/`—{where}→`/…);
+pass `k: N` for several distinct shortest chains, or `module_prefix` to keep
+the chain inside a subtree. `roots name=T` answers the proof-engineering
+question "what assumptions does theorem T ultimately rest on?" — its
+transitive postulates/primitives (or a given `kind`/`state`), each with a
+witnessing chain. When a project's axioms live in **record fields** rather
+than postulates, scope them with `roots T kind=projection
+module_prefix=<the Assumptions module>`; pass `by_module: true` for a
+per-module count or `chains: false` for a bare list when the root set is
+large. `locate` also reports a `blast radius` line (transitive caller /
+dependency counts), so it often answers the load-bearingness question
+without a follow-up call.
+
+`type_of` returns the *elaborated* type by default (reified from the
+type-checker — precise; numeric literals are de-sugared back to numerals,
+though instance dictionaries may still show). Pass `source=true` for the
+signature exactly as written in the file when the elaborated form is too
+noisy.
+
+`similar_types` compares the set of names a definition mentions *in its
+signature*; `similar_bodies` compares canonical hashes of elaborated
+subterms (true structural similarity). They are fast pairwise proxies for
+the `agda-optimization` `silhouette` / `term-cluster` analyses — use those
+batch tools when you want a whole-project clustering rather than "what
+resembles this one definition".
+
+## Interpreting `unused` (important caveats)
+
+`unused` runs `agda-unused`. Its findings are not all equal:
+
+- **High-signal:** `using` (a name in a `using (…)` list that's never
+  referenced) and `duplicate` (the same module opened twice).
+- **Best-effort / noisy:** `blanket`, `defined`, `public`. These over-report
+  on `open import X public` re-exporters and on record-field projections in
+  anonymous modules.
+- **Known false positives:** instance methods, and names used *only* through
+  `with` / `with ←` chains, can be reported as dead when they are not.
+
+So: treat a `using`/`duplicate` finding as actionable, but **grep-verify any
+deletion candidate** (and walk one call-graph hop with `callers`) before
+removing it.
+
+Scope and noise control: `scope` accepts a directory, a file, or a *module
+name* (e.g. `Prelude.Init`) — a relative path resolves against the project
+root, and a scope covering no module is rejected loudly rather than
+returning a misleading "0 findings". To silence a known re-export hub
+without narrowing scope, pass `exclude` one or more comma-separated globs
+matched against the file path or module name (`**/Init.agda`, `Prelude.*`;
+`**` spans directories, `*` stops at `/`). The response header echoes the
+resolved scope, effective kinds, and any excludes, so a "0 findings" result
+is always self-describing — never silently mis-scoped.
+
+## Good habits
+
+- Lead with `locate`/`type_of` to orient, `callers`/`impact` before editing,
+  `similar_bodies`/`similar_types` when looking for a lemma to reuse or a
+  pattern to factor.
+- Only fall back to reading files or grepping when you need the *prose*
+  around a definition, or to verify an `unused` finding.
