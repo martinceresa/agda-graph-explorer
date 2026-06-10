@@ -3,8 +3,9 @@
 Consumers of the dependency graph emitted by
 [`agda-deps`](https://github.com/input-output-hk/agda-dependencies) — a
 shared library plus four executables that read `agda-deps`' v2
-`graph.json` and answer questions over it. **Nothing here links Agda**,
-so the whole repo builds from Hackage in minutes.
+`graph.json` and answer questions over it.
+
+**Nothing here links Agda**, so the whole repo builds from Hackage in minutes.
 
 | Tool | What it does |
 |------|--------------|
@@ -133,14 +134,17 @@ agda-explore --project /path/to/agda/project    # stdio MCP server
   (`signature | body | where | with | unknown`) and, under the
   producer's `--with-signatures`, an optional per-definition `"type"`.
 
-For the full schema (including the `packed` form and the `--lazy`
+A machine-readable JSON Schema (draft 2020-12) for the expanded form
+lives in the producer repo at `schema/graph-v2-expanded.schema.json`;
+validate any `deps.json` (including the fixtures here) against it with
+`pipx run check-jsonschema --schemafile <path>/graph-v2-expanded.schema.json test/deps.json`.
+For the full schema prose (including the `packed` form and the `--lazy`
 split-file layout used only by `agda-deps`' HTML views), see the
 `agda-deps` repo.
 
 ## Relevant links
 
 - Producer / Agda backend: <https://github.com/input-output-hk/agda-dependencies>
-- HTML-view inspiration: <https://unimath.github.io/agda-unimath/VISUALIZATION.html>
 
 ## AI Disclaimer
 

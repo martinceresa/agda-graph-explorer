@@ -59,7 +59,12 @@ committed expanded-JSON fixtures for the analyses and for the
 The single coupling to `agda-deps` is the **v2 `graph.json` schema**
 (expanded form) plus `nodeKeyVersion`. `agda-deps` is the *producer*
 and the canonical source of truth for the wire shape; this repo's
-`AgdaGraph.Schema` is the *consumer* mirror and must track it.
+`AgdaGraph.Schema` is the *consumer* mirror and must track it. A
+machine-readable JSON Schema (draft 2020-12) for the expanded form
+lives in the producer repo at `schema/graph-v2-expanded.schema.json` —
+the fixtures here (`test/deps.json`, `.agda-explore/deps.json`)
+validate against it. When `AgdaGraph.Schema` drifts from a decode
+failure, check it against that schema first.
 
 - **Schema version.** Every payload starts with `"v": 2`; expanded form
   also emits `"schemaVersion": 2` and `"mode": "expanded"`. Refuse a
