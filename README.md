@@ -19,6 +19,12 @@ The single coupling to `agda-deps` is the **v2 `graph.json` wire
 schema** — `agda-deps` produces it, this repo consumes it. See
 [The wire contract](#the-wire-contract).
 
+For runnable recipes (one per subcommand, with empirical defaults
+explained) see [Examples.md](Examples.md). For forward-looking work see
+[TODO.md](TODO.md); for deferred / refused ideas see
+[Backlog.md](Backlog.md) and [Deferred.md](Deferred.md); for shipped work
+see [Changelog.md](Changelog.md).
+
 ## Prerequisites
 
 - GHC 9.14.x + cabal 3.16 (older GHC ≥ 9.6 should work; CI pins 9.14.1).
