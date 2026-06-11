@@ -28,18 +28,12 @@ module AgdaUnused.Config
   , parseKindsToken
   ) where
 
-import           Control.Exception   ( IOException, catch )
 import           Data.Aeson          ( FromJSON(..), (.:?), withObject, withText )
 import qualified Data.Aeson.Types    as A
 import           Data.Foldable       ( toList )
-import           Data.List           ( isSuffixOf )
 import qualified Data.Text           as T
-import qualified Data.Yaml           as Y
 
-import           System.Directory    ( doesFileExist, getCurrentDirectory, listDirectory )
-import           System.Environment  ( lookupEnv )
-import           System.FilePath     ( (</>), takeDirectory )
-
+import           AgdaGraph.ConfigCore ( DiscoverSpec(..), discoverWith, loadYamlConfig )
 import           AgdaUnused.Analysis ( FindingKind(..) )
 
 -- | Externally-supplied configuration. Every field is 'Maybe' so a
@@ -132,46 +126,14 @@ parseKindsToken s = Left $ "unknown kind: " ++ s
 
 -- | Locate a config file. Returns the first hit in the discovery
 -- order documented at the module header, or 'Nothing' if no config
--- can be found.
+-- can be found. A thin wrapper over "AgdaGraph.ConfigCore".
 discoverConfigPath :: Maybe FilePath -> IO (Maybe FilePath)
-discoverConfigPath explicit = case explicit of
-  Just p  -> return (Just p)
-  Nothing -> lookupEnv "AGDA_UNUSED_CONFIG" >>= \case
-    Just p | not (null p) -> return (Just p)
-    _ -> do
-      cwd <- getCurrentDirectory
-      tryDir cwd >>= \case
-        Just p  -> return (Just p)
-        Nothing -> walkUp cwd
-  where
-    tryDir d = firstExisting
-      [ d </> ".agda-unused.yml"
-      , d </> ".agda-unused.yaml"
-      ]
-
-    walkUp d = do
-      hasLib <- dirHasAgdaLib d
-      if hasLib
-        then tryDir d
-        else let parent = takeDirectory d
-             in if parent == d
-                  then return Nothing  -- hit filesystem root
-                  else walkUp parent
-
-    firstExisting []     = return Nothing
-    firstExisting (p:ps) = do
-      ok <- doesFileExist p
-      if ok then return (Just p) else firstExisting ps
-
-    dirHasAgdaLib d =
-      (any (".agda-lib" `isSuffixOf`) <$> listDirectory d)
-        `catch` \(_ :: IOException) -> return False
+discoverConfigPath = discoverWith DiscoverSpec
+  { dsEnvVar    = "AGDA_UNUSED_CONFIG"
+  , dsBaseNames = [ ".agda-unused.yml", ".agda-unused.yaml" ]
+  }
 
 -- | Load and parse the config file. Returns @Left@ with a clean,
 -- single-line error on parse failure.
 loadConfig :: FilePath -> IO (Either String Config)
-loadConfig p = do
-  res <- Y.decodeFileEither p
-  return $ case res of
-    Left err -> Left (Y.prettyPrintParseException err)
-    Right c  -> Right c
+loadConfig = loadYamlConfig

@@ -34,11 +34,11 @@ import           Control.Exception (SomeException, displayException, try)
 import           Data.Aeson        (FromJSON (..), withObject, (.:?))
 import           Data.Maybe        (fromMaybe)
 import qualified Data.Yaml         as Y
-import           System.Directory  (doesDirectoryExist, doesFileExist,
-                                    getCurrentDirectory, listDirectory)
+import           System.Directory  (doesFileExist, getCurrentDirectory)
 import           System.Environment (lookupEnv)
 import           System.Exit       (die)
-import           System.FilePath   (takeDirectory, takeExtension, (</>))
+
+import           AgdaGraph.ConfigCore (DiscoverSpec (..), discoverInDir)
 
 -- ---------------------------------------------------------------------
 -- The Opts record the CLI parser fills.
@@ -183,33 +183,17 @@ discoverConfigPath Nothing = do
       exists <- doesFileExist p
       if exists then pure (Just p)
                 else die ("agda-explore: $AGDA_EXPLORE_CONFIG: file not found: " ++ p)
-    _ -> do
-      cwd  <- getCurrentDirectory
-      mCwd <- findConfigIn cwd
-      case mCwd of
-        Just p  -> pure (Just p)
-        Nothing -> walkUp cwd
-  where
-    walkUp d = do
-      hit <- hasAgdaLib d
-      if hit
-        then findConfigIn d
-        else let up = takeDirectory d
-             in if up == d then pure Nothing else walkUp up
+    _ -> getCurrentDirectory >>= discoverInDir discoverSpec
 
-    hasAgdaLib d = do
-      isDir <- doesDirectoryExist d
-      if isDir
-        then any ((== ".agda-lib") . takeExtension) <$> listDirectory d
-        else pure False
-
-    findConfigIn d =
-      firstExisting [d </> ".agda-explore.yml", d </> ".agda-explore.yaml"]
-
-    firstExisting []       = pure Nothing
-    firstExisting (p : ps) = do
-      e <- doesFileExist p
-      if e then pure (Just p) else firstExisting ps
+-- | The cwd / walk-up tail of discovery, shared with the other
+-- binaries via "AgdaGraph.ConfigCore". The MCP daemon layers its own
+-- @die@-on-missing handling of @--config@ / @$AGDA_EXPLORE_CONFIG@ on
+-- top (above).
+discoverSpec :: DiscoverSpec
+discoverSpec = DiscoverSpec
+  { dsEnvVar    = "AGDA_EXPLORE_CONFIG"
+  , dsBaseNames = [ ".agda-explore.yml", ".agda-explore.yaml" ]
+  }
 
 -- | Parse a YAML config file; dies with a diagnostic naming the path on
 -- a read or parse failure.

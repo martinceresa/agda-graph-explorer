@@ -31,6 +31,7 @@
 module AgdaOptimization.Fiedler
   ( Options(..)
   , defaultOptions
+  , flagSpecs
   , parseOptions
   , applyConfig
   , run
@@ -67,11 +68,12 @@ import qualified Data.ByteString.Lazy        as BL
 import           AgdaGraph.Index             ( Index(..), defAt )
 import           AgdaGraph.Schema            ( Definition(..) )
 
-import           AgdaOptimization.CLIParse   ( splitFlag, valueFor, readInt )
-import           AgdaOptimization.Config     ( lookupKey )
+import           AgdaOptimization.FlagSpec   ( FlagSpec(..)
+                                             , parseFlags, applyFlagConfig )
+import           AgdaOptimization.Common     ( lastSegment )
 import           AgdaOptimization.Report     ( GlobalOpts(..), OutFormat(..)
                                              , renderTable, emitJsonReport
-                                             , withHumanOutput )
+                                             , showD3, withHumanOutput )
 
 import qualified Paths_agda_graph_explorer   as Paths
 
@@ -106,51 +108,32 @@ defaultOptions = Options
 instance NFData Options where
   rnf (Options a b c d) = rnf a `seq` rnf b `seq` rnf c `seq` rnf d
 
+-- | Declarative flag spec for the @fiedler@ subcommand. Drives both
+-- 'parseOptions' and 'applyConfig'. Each help line is verbatim from
+-- 'AgdaOptimization.CLI.subFlags'.
+--
+-- @--helper@ / @--python@ are 'StrFlag's: the value is taken verbatim
+-- and the YAML key decodes as a 'FilePath'.
+flagSpecs :: [FlagSpec Options]
+flagSpecs =
+  [ IntFlag "top-n" "--top-n=N      rows to keep per section (default 50)"
+      (\n o -> o { optTopN = n })
+  , IntFlag "eig-k" "--eig-k=N      number of eigenpairs above lambda_1 (default 5)"
+      (\n o -> o { optEigK = n })
+  , StrFlag "helper" "--helper=PATH  path to fiedler_helper.py (default scripts/fiedler_helper.py)"
+      (\p o -> o { optHelper = p })
+  , StrFlag "python" "--python=PATH  python interpreter (default python3); needs scipy + numpy"
+      (\p o -> o { optPython = p })
+  ]
+
 -- | Hand-rolled CLI parser. Same shape as the rest of the
 -- agda-optimization subcommands.
 parseOptions :: Options -> [String] -> Either String Options
-parseOptions = go
-  where
-    sub = "fiedler"
-    intK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      n <- readInt sub k v
-      go (upd o n) rest
-    strK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      go (upd o v) rest
-
-    go :: Options -> [String] -> Either String Options
-    go !o []     = Right o
-    go !o (a:as) = case splitFlag a of
-      Left err                        -> Left (sub <> ": " <> err)
-      Right ("--top-n",   mv)         ->
-        intK "--top-n" (\o' n -> o' { optTopN = n }) mv as o
-      Right ("--eig-k",   mv)         ->
-        intK "--eig-k" (\o' n -> o' { optEigK = n }) mv as o
-      Right ("--helper",  mv)         ->
-        strK "--helper" (\o' p -> o' { optHelper = p }) mv as o
-      Right ("--python",  mv)         ->
-        strK "--python" (\o' p -> o' { optPython = p }) mv as o
-      Right (k, _)                    ->
-        Left (sub <> ": unknown flag: " <> k)
+parseOptions = parseFlags "fiedler" flagSpecs
 
 -- | Overlay the @fiedler:@ YAML section onto a seed 'Options'.
 applyConfig :: A.Object -> Options -> Either String Options
-applyConfig obj o0 = do
-  o1 <- updI "top-n"  (\v o -> o { optTopN   = v }) o0
-  o2 <- updI "eig-k"  (\v o -> o { optEigK   = v }) o1
-  o3 <- updS "helper" (\v o -> o { optHelper = v }) o2
-  o4 <- updS "python" (\v o -> o { optPython = v }) o3
-  pure o4
-  where
-    section = "fiedler"
-    updI k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Int)
-      pure $ maybe o (`f` o) mv
-    updS k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe FilePath)
-      pure $ maybe o (`f` o) mv
+applyConfig obj o0 = applyFlagConfig "fiedler" flagSpecs obj o0
 
 ----------------------------------------------------------------------
 -- Helper path resolution.
@@ -725,10 +708,7 @@ topModulesLabel m =
 sampleNodes :: Index -> IntSet -> Text
 sampleNodes ix s =
   let sampled = take 3 (IS.toList s)
-      lastSeg t = case T.breakOnEnd "." t of
-        (_, suf) | T.null suf -> t
-                 | otherwise  -> suf
-  in T.intercalate ", " [ lastSeg (defName (defAt ix i)) | i <- sampled ]
+  in T.intercalate ", " [ lastSegment (defName (defAt ix i)) | i <- sampled ]
 
 ----------------------------------------------------------------------
 -- Header / stats rendering.
@@ -811,18 +791,3 @@ clusterJson ix c = A.object
                    | i <- take 5 (IS.toList (clNodes c))
                    ]
   ]
-
-----------------------------------------------------------------------
--- Display helpers.
-
--- | Fixed-precision rendering to 3 decimals. Avoids dragging in
--- 'printf' for one function (matches the style elsewhere in
--- agda-optimization).
-showD3 :: Double -> String
-showD3 x =
-  let n      = round (x * 1000) :: Integer
-      sign   = if n < 0 then "-" else ""
-      s      = show (abs n)
-      padded = replicate (max 0 (4 - length s)) '0' ++ s
-      (intP, fracP) = splitAt (length padded - 3) padded
-  in sign ++ intP ++ "." ++ fracP

@@ -49,9 +49,10 @@ import           Control.Monad        (filterM, forM, forever, void)
 import           Data.Aeson           (eitherDecode)
 import qualified Data.ByteString.Lazy as BL
 import           Data.IORef
+import qualified Data.IntMap.Strict   as IM
 import           Data.List            (isInfixOf, isSuffixOf, maximumBy)
 import qualified Data.Map.Strict      as M
-import           Data.Maybe           (catMaybes, isJust)
+import           Data.Maybe           (catMaybes, isJust, mapMaybe)
 import           Data.Ord             (comparing)
 import           Data.Text            (Text)
 import qualified Data.Text            as T
@@ -70,8 +71,8 @@ import           System.IO            (hPutStrLn, stderr)
 import           System.Process       (CreateProcess (..), proc,
                                        readCreateProcessWithExitCode)
 
-import           AgdaGraph.Index      (Index, buildIndex)
-import           AgdaGraph.Schema     (ExpandedGraph (..))
+import           AgdaGraph.Index      (Index, buildIndex, idxDefs, idxRealCount)
+import           AgdaGraph.Schema     (Definition (..), ExpandedGraph (..))
 import           AgdaGraph.Similarity (SigBodyFingerprints,
                                        buildSigBodyFingerprints,
                                        silhouetteDefaultWlK, subtermMultisetsVec)
@@ -137,6 +138,17 @@ data Loaded = Loaded
   , ldFailed    :: ![Text]                -- ^ modules that failed to type-check.
   , ldProducer  :: !(Maybe Text)          -- ^ build fingerprint that emitted this graph.
   , ldNodeKeyV  :: !Int                   -- ^ node-key format version of this graph.
+  , ldRealDefs  :: ![Definition]
+    -- ^ The real (non-synthetic) defs as a list, materialised once at
+    -- snapshot construction. The point queries rescan this many times per
+    -- request; the snapshot is immutable, so it is built once here instead.
+  , ldOwnerMap  :: !(IM.IntMap Definition)
+    -- ^ Precomputed enclosing-owner lookup for @where@-/anonymous-module
+    -- locals: a local def's id ('defId') to its owning top-level def (see
+    -- 'AgdaMcp.Query.ownerOf'). Built once so the per-result-line owner
+    -- annotation is O(log n) instead of a full linear scan of all defs.
+    -- Absent key ⇒ no owner (the def is non-local, has no line, or has no
+    -- enclosing top-level def above it).
     -- Lazy similarity caches (forced on the first @similar_*@ query, then
     -- reused for the life of the snapshot). Deliberately non-strict so a
     -- plain rebuild doesn't pay the WL / subterm-multiset cost up front.
@@ -341,6 +353,13 @@ loadLoaded includes graphFile = do
       Right (eg :: ExpandedGraph) -> do
         let !ix = buildIndex eg
         _   <- evaluate (force ix)
+        -- Materialise the real-def list and the owner lookup once. Both
+        -- are forced (the queries rescan them per request and the snapshot
+        -- never changes); the similarity caches below stay lazy by design.
+        let !rds      = V.toList (V.take (idxRealCount ix) (idxDefs ix))
+            !ownerMap = buildOwnerMap rds
+        _   <- evaluate (force (length rds))
+        _   <- evaluate (force (IM.size ownerMap))
         now <- getCurrentTime
         sig <- scanSources includes
         let nkv = egNodeKeyVersion eg
@@ -360,9 +379,44 @@ loadLoaded includes graphFile = do
           , ldFailed   = egFailedModules eg
           , ldProducer = egProducer eg
           , ldNodeKeyV = nkv
+          , ldRealDefs = rds
+          , ldOwnerMap = ownerMap
           , ldSigBodyFp = buildSigBodyFingerprints silhouetteDefaultWlK ix
           , ldSubtermFp = subtermMultisetsVec ix
           }
+
+-- | Precompute the @where@-/anonymous-module owner lookup consumed by
+-- 'AgdaMcp.Query.ownerOf'. For every /local/ def with a known line, find
+-- its enclosing top-level def — the nearest non-local def at or above the
+-- helper's start line, in the helper's own module or an enclosing one —
+-- and key it by the local def's 'defId'. A local def with no such owner
+-- (or no line) is simply absent from the map, matching the old 'Nothing'.
+--
+-- Equivalent, by construction, to the per-call scan + @maximumBy (comparing
+-- defLine)@ the query used to run for each rendered result line; folded
+-- once here so a query touching N lines is O(N log n) rather than
+-- O(N · nDefs). The non-local candidates are pulled out once and shared
+-- across all locals.
+buildOwnerMap :: [Definition] -> IM.IntMap Definition
+buildOwnerMap rds =
+  IM.fromList (mapMaybe owner locals)
+  where
+    locals     = filter isLocalName' rds
+    nonLocals  = filter (not . isLocalName') rds
+    owner d = do
+      ln <- defLine d
+      case [ o | o <- nonLocals
+               , enclosingModule (defModule o) (defModule d)
+               , maybe False (<= ln) (defLine o) ] of
+        [] -> Nothing
+        os -> Just (defId d, maximumBy (comparing defLine) os)
+    -- A where-block / anonymous-module local carries the @._.@ marker
+    -- Agda inserts for such scopes (mirrors 'AgdaMcp.Query.isLocalName').
+    isLocalName' d = "._." `T.isInfixOf` defName d
+    -- @outer@ is @inner@ or a (segment-aligned) module prefix of it
+    -- (mirrors the @enclosingModule@ in 'AgdaMcp.Query.ownerOf').
+    enclosingModule outer inner =
+      outer == inner || (outer <> ".") `T.isPrefixOf` inner
 
 -- | Run @agda-deps@ to regenerate the graph, then parse and index it.
 runBuild :: Config -> IO (Either String Loaded)

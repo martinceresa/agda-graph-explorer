@@ -49,6 +49,7 @@
 module AgdaOptimization.ConceptBundle
   ( Options(..)
   , defaultOptions
+  , flagSpecs
   , parseOptions
   , applyConfig
   , run
@@ -74,12 +75,13 @@ import           Data.Aeson              ( (.=) )
 
 import           AgdaGraph.Index         ( Index(..), defAt )
 import           AgdaGraph.Schema        ( Definition(..), Provenance(..) )
-import           AgdaOptimization.CLIParse ( splitFlag, valueFor, readDbl, readInt )
-import           AgdaOptimization.Config ( lookupKey )
+import           AgdaOptimization.Common ( lastSegment )
 import           AgdaOptimization.FamilyFilter ( isForcedByFamily )
+import           AgdaOptimization.FlagSpec ( FlagSpec(..), SwitchVal(..)
+                                           , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , renderTable, emitJsonReport
-                                         , withHumanOutput )
+                                         , showD3, withHumanOutput )
 
 ----------------------------------------------------------------------
 -- Options.
@@ -136,58 +138,48 @@ defaultOptions = Options
   , optMaxBasketSize  = 64
   }
 
-parseOptions :: Options -> [String] -> Either String Options
-parseOptions = go
-  where
-    sub = "concept-bundle"
-    intK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      x <- readInt sub k v
-      go (upd o x) rest
-    dblK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      x <- readDbl sub k v
-      go (upd o x) rest
+-- | Declarative flag table for the @concept-bundle@ subcommand. Drives
+-- the argv parser ('parseOptions') and the YAML overlay ('applyConfig'),
+-- and is the single source of truth the help-derivation stage reads.
+-- Each help line is verbatim from 'AgdaOptimization.CLI.subFlags'.
+--
+-- @--forced-suppress@ / @--no-forced-suppress@ are 'SwitchIgnoreValue'
+-- switches (an attached @=value@ is ignored). They share a single YAML
+-- key (@forced-suppress@), carried by the @--forced-suppress@ entry; the
+-- @--no-forced-suppress@ entry takes no part in the overlay ('Nothing').
+-- The declaration order matches the former hand-rolled @applyConfig@
+-- overlay sequence.
+flagSpecs :: [FlagSpec Options]
+flagSpecs =
+  [ IntFlag "min-support" "--min-support=N                 absolute support count (default 3)"
+      (\x o -> o { optMinSupport = x })
+  , DblFlag "min-lift" "--min-lift=F                    lift threshold (default 2.0)"
+      (\x o -> o { optMinLift = x })
+  , IntFlag "min-span" "--min-span=N                    min distinct modules a bundle must span (default 3)"
+      (\x o -> o { optMinSpan = x })
+  , IntFlag "top-n" "--top-n=N                       rows to keep (default 50)"
+      (\x o -> o { optTopN = x })
+  , IntFlag "k-max" "--k-max=N                       max itemset size; 2-4 (default 4)"
+      (\x o -> o { optKMax = x })
+  , DblFlag "exclude-top-frequency" "--exclude-top-frequency=F       drop bundles with top-pct% items; 0 = disabled (default 5.0)"
+      (\x o -> o { optExcludeTopFreq = x })
+  , SwitchFlag "no-forced-suppress" "--no-forced-suppress            disable the per-case-unfold-family suppressor"
+      SwitchIgnoreValue (\o -> o { optForcedSuppress = False })
+      Nothing (\_ o -> o)
+  , SwitchFlag "forced-suppress" "--forced-suppress               re-enable the suppressor (default on)"
+      SwitchIgnoreValue (\o -> o { optForcedSuppress = True })
+      (Just "forced-suppress") (\v o -> o { optForcedSuppress = v })
+  , DblFlag "forced-fraction" "--forced-fraction=F             bundle-fraction gate for the suppressor (default 0.5)"
+      (\x o -> o { optForcedFraction = x })
+  , IntFlag "max-basket-size" "--max-basket-size=N             drop baskets exceeding N items before counting; 0 = disabled (default 64)"
+      (\x o -> o { optMaxBasketSize = x })
+  ]
 
-    go :: Options -> [String] -> Either String Options
-    go !o []     = Right o
-    go !o (a:as) = case splitFlag a of
-      Left err -> Left (sub <> ": " <> err)
-      Right ("--min-support",          mv) -> intK "--min-support"          (\o' x -> o' { optMinSupport     = x }) mv as o
-      Right ("--min-lift",             mv) -> dblK "--min-lift"             (\o' x -> o' { optMinLift        = x }) mv as o
-      Right ("--min-span",             mv) -> intK "--min-span"             (\o' x -> o' { optMinSpan        = x }) mv as o
-      Right ("--top-n",                mv) -> intK "--top-n"                (\o' x -> o' { optTopN           = x }) mv as o
-      Right ("--k-max",                mv) -> intK "--k-max"                (\o' x -> o' { optKMax           = x }) mv as o
-      Right ("--exclude-top-frequency", mv) -> dblK "--exclude-top-frequency" (\o' x -> o' { optExcludeTopFreq = x }) mv as o
-      Right ("--no-forced-suppress",  _ ) -> go (o { optForcedSuppress = False }) as
-      Right ("--forced-suppress",     _ ) -> go (o { optForcedSuppress = True  }) as
-      Right ("--forced-fraction",     mv) -> dblK "--forced-fraction"      (\o' x -> o' { optForcedFraction = x }) mv as o
-      Right ("--max-basket-size",     mv) -> intK "--max-basket-size"      (\o' x -> o' { optMaxBasketSize  = x }) mv as o
-      Right (k, _) -> Left (sub <> ": unknown flag: " <> k)
+parseOptions :: Options -> [String] -> Either String Options
+parseOptions = parseFlags "concept-bundle" flagSpecs
 
 applyConfig :: A.Object -> Options -> Either String Options
-applyConfig obj o0 = do
-  o1 <- updI "min-support"           (\v o -> o { optMinSupport     = v }) o0
-  o2 <- updD "min-lift"              (\v o -> o { optMinLift        = v }) o1
-  o3 <- updI "min-span"              (\v o -> o { optMinSpan        = v }) o2
-  o4 <- updI "top-n"                 (\v o -> o { optTopN           = v }) o3
-  o5 <- updI "k-max"                 (\v o -> o { optKMax           = v }) o4
-  o6 <- updD "exclude-top-frequency" (\v o -> o { optExcludeTopFreq = v }) o5
-  o7 <- updB "forced-suppress"       (\v o -> o { optForcedSuppress = v }) o6
-  o8 <- updD "forced-fraction"       (\v o -> o { optForcedFraction = v }) o7
-  o9 <- updI "max-basket-size"       (\v o -> o { optMaxBasketSize  = v }) o8
-  pure o9
-  where
-    section = "concept-bundle"
-    updI k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Int)
-      pure $ maybe o (`f` o) mv
-    updD k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Double)
-      pure $ maybe o (`f` o) mv
-    updB k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Bool)
-      pure $ maybe o (`f` o) mv
+applyConfig obj o0 = applyFlagConfig "concept-bundle" flagSpecs obj o0
 
 ----------------------------------------------------------------------
 -- Internal types.
@@ -760,22 +752,10 @@ renderBundleRow ix (rank, b) =
   ]
 
 shortName :: Index -> Int -> T.Text
-shortName ix i =
-  let nm = defName (defAt ix i)
-      (_, tl) = T.breakOnEnd "." nm
-  in if T.null tl then nm else tl
+shortName ix i = lastSegment (defName (defAt ix i))
 
 showD :: Double -> String
 showD = show
-
-showD3 :: Double -> String
-showD3 d =
-  let n  = round (d * 1000) :: Integer
-      s  = show (abs n)
-      sn = if n < 0 then "-" else ""
-      padded = replicate (max 0 (4 - length s)) '0' ++ s
-      (intPart, fracPart) = splitAt (length padded - 3) padded
-  in sn ++ intPart ++ "." ++ fracPart
 
 ----------------------------------------------------------------------
 -- JSON output.

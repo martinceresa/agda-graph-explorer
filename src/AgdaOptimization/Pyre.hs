@@ -78,6 +78,7 @@
 module AgdaOptimization.Pyre
   ( Options(..)
   , defaultOptions
+  , flagSpecs
   , parseOptions
   , applyConfig
   , run
@@ -94,7 +95,7 @@ import qualified Data.HashMap.Strict         as HM
 import qualified Data.IntMap.Strict          as IM
 import qualified Data.IntSet                 as IS
 import           Data.List                   ( sortBy )
-import           Data.Maybe                  ( fromMaybe )
+import           Data.Maybe                  ( fromMaybe, isNothing )
 import           Data.Ord                    ( Down(..), comparing )
 import           Data.Text                   ( Text )
 import qualified Data.Text                   as T
@@ -110,10 +111,9 @@ import qualified Data.Aeson.KeyMap           as KM
 import           AgdaGraph.Index             ( Index(..), defAt )
 import           AgdaGraph.Schema            ( Definition(..), Kind(..)
                                              , State(..) )
-import           AgdaOptimization.CLIParse   ( splitFlag, valueFor
-                                             , readInt, readDbl )
+import           AgdaOptimization.FlagSpec   ( FlagSpec(..), SwitchVal(..)
+                                             , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Common     ( computeExcludedSet )
-import           AgdaOptimization.Config     ( lookupKey )
 import           AgdaOptimization.Report     ( GlobalOpts(..), OutFormat(..)
                                              , emitJsonReport, renderTable
                                              , withHumanOutput )
@@ -167,79 +167,47 @@ defaultOptions = Options
   , optLevers           = False
   }
 
+-- | Declarative flag spec for the @pyre@ subcommand. Drives both
+-- 'parseOptions' and 'applyConfig'. Each help line is verbatim from
+-- 'AgdaOptimization.CLI.subFlags'.
+--
+-- @--calibrate@ and @--levers@ are bare switches that ignore an
+-- attached @=value@ on the argv side ('SwitchIgnoreValue'); the YAML
+-- overlay reads each as a boolean.
+flagSpecs :: [FlagSpec Options]
+flagSpecs =
+  [ IntFlag "top-n" "--top-n=N                      rows to keep (default 50)"
+      (\n o -> o { optTopN = n })
+  , DblFlag "w1" "--w1=F                         |reach+| coefficient (default 1.0)"
+      (\x o -> o { optW1 = x })
+  , DblFlag "w2" "--w2=F                         Σ fanIn·fanOut coefficient (default 0.5)"
+      (\x o -> o { optW2 = x })
+  , DblFlag "w3" "--w3=F                         Σ wKind coefficient (default 2.0)"
+      (\x o -> o { optW3 = x })
+  , DblFlag "w4" "--w4=F                         depthRank coefficient (default 10.0)"
+      (\x o -> o { optW4 = x })
+  , TextFlag "exclude-name-regex" "--exclude-name-regex=PATTERN   POSIX-ERE on unqualified name"
+      (\p o -> o { optExcludeNameRegex = p })
+  , StrFlag "profile" "--profile=PATH                 JSON profile {qname: cost}; emit calibration report"
+      (\p o -> o { optProfilePath = Just p })
+  , SwitchFlag "calibrate" "--calibrate                    apply ridge-fitted weights to the ranking (needs --profile)"
+      SwitchIgnoreValue (\o -> o { optCalibrate = True })
+      (Just "calibrate") (\v o -> o { optCalibrate = v })
+  , DblFlag "ridge-lambda" "--ridge-lambda=F               L2 regularisation for the fit (default 1.0)"
+      (\x o -> o { optRidgeLambda = x })
+  , SwitchFlag "levers" "--levers                       emit the lever table (aggregate downstream cost)"
+      SwitchIgnoreValue (\o -> o { optLevers = True })
+      (Just "levers") (\v o -> o { optLevers = v })
+  ]
+
 -- | Hand-rolled CLI parser for @pyre@. Same shape as the other
 -- subcommands (see 'AgdaOptimization.LoadBearing.parseOptions').
 parseOptions :: Options -> [String] -> Either String Options
-parseOptions = go
-  where
-    sub = "pyre"
-    intK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      n         <- readInt sub k v
-      go (upd o n) rest
-    dblK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      x         <- readDbl sub k v
-      go (upd o x) rest
-    textK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      go (upd o (T.pack v)) rest
-    pathK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      go (upd o (Just v)) rest
-
-    go :: Options -> [String] -> Either String Options
-    go !o []     = Right o
-    go !o (a:as) = case splitFlag a of
-      Left err                    -> Left (sub <> ": " <> err)
-      Right ("--top-n", mv)       -> intK  "--top-n" (\o' n -> o' { optTopN = n }) mv as o
-      Right ("--w1",    mv)       -> dblK  "--w1"    (\o' x -> o' { optW1   = x }) mv as o
-      Right ("--w2",    mv)       -> dblK  "--w2"    (\o' x -> o' { optW2   = x }) mv as o
-      Right ("--w3",    mv)       -> dblK  "--w3"    (\o' x -> o' { optW3   = x }) mv as o
-      Right ("--w4",    mv)       -> dblK  "--w4"    (\o' x -> o' { optW4   = x }) mv as o
-      Right ("--exclude-name-regex", mv) ->
-        textK "--exclude-name-regex"
-              (\o' p -> o' { optExcludeNameRegex = p }) mv as o
-      Right ("--profile", mv)     -> pathK "--profile"
-                                       (\o' p -> o' { optProfilePath = p }) mv as o
-      Right ("--ridge-lambda", mv) -> dblK "--ridge-lambda"
-                                       (\o' x -> o' { optRidgeLambda = x }) mv as o
-      Right ("--calibrate", _)    -> go (o { optCalibrate = True }) as
-      Right ("--levers", _)       -> go (o { optLevers     = True }) as
-      Right (k, _)                -> Left (sub <> ": unknown flag: " <> k)
+parseOptions = parseFlags "pyre" flagSpecs
 
 -- | Overlay the @pyre:@ YAML section onto a seed 'Options'.
 applyConfig :: A.Object -> Options -> Either String Options
-applyConfig obj o0 = do
-  o1 <- updI "top-n" (\v o -> o { optTopN = v }) o0
-  o2 <- updD "w1"    (\v o -> o { optW1   = v }) o1
-  o3 <- updD "w2"    (\v o -> o { optW2   = v }) o2
-  o4 <- updD "w3"    (\v o -> o { optW3   = v }) o3
-  o5 <- updD "w4"    (\v o -> o { optW4   = v }) o4
-  o6 <- updT "exclude-name-regex"
-                     (\v o -> o { optExcludeNameRegex = v }) o5
-  o7 <- updS "profile"      (\v o -> o { optProfilePath = Just v }) o6
-  o8 <- updD "ridge-lambda" (\v o -> o { optRidgeLambda = v }) o7
-  o9 <- updB "calibrate"    (\v o -> o { optCalibrate   = v }) o8
-  oA <- updB "levers"       (\v o -> o { optLevers      = v }) o9
-  pure oA
-  where
-    section = "pyre"
-    updI k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Int)
-      pure $ maybe o (`f` o) mv
-    updD k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Double)
-      pure $ maybe o (`f` o) mv
-    updT k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Text)
-      pure $ maybe o (`f` o) mv
-    updS k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe FilePath)
-      pure $ maybe o (`f` o) mv
-    updB k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Bool)
-      pure $ maybe o (`f` o) mv
+applyConfig obj o0 = applyFlagConfig "pyre" flagSpecs obj o0
 
 ------------------------------------------------------------------------
 -- SCC condensation (same shape as LoadBearing's; kept private here to
@@ -708,7 +676,7 @@ data ProfileReport = ProfileReport
 -- to stdout (or @--out FILE@) as text or JSON.
 run :: Index -> GlobalOpts -> Options -> IO ()
 run !ix !gOpts !opts = do
-  when (optCalibrate opts && isNothingPath (optProfilePath opts)) $ do
+  when (optCalibrate opts && isNothing (optProfilePath opts)) $ do
     hPutStrLn stderr "pyre: --calibrate requires --profile=PATH."
     exitFailure
 
@@ -878,12 +846,6 @@ run !ix !gOpts !opts = do
       putStr (renderTable header rows)
       mapM_ (printCalibration ix calibratedApplied) mReport
       mapM_ (printLevers ix sccOfNode opts (maybe False (const True) mProf)) mLevers
-
--- | 'True' iff no @--profile@ path was supplied. Avoids an 'Eq'
--- constraint on the loaded profile map.
-isNothingPath :: Maybe FilePath -> Bool
-isNothingPath Nothing = True
-isNothingPath _       = False
 
 -- | Render the calibration section under the cost table.
 printCalibration :: Index -> Bool -> ProfileReport -> IO ()

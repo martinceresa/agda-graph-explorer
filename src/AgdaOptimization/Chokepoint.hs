@@ -47,6 +47,7 @@
 module AgdaOptimization.Chokepoint
   ( Options(..)
   , defaultOptions
+  , flagSpecs
   , parseOptions
   , applyConfig
   , run
@@ -78,9 +79,9 @@ import           AgdaGraph.Index           ( Index(..), ancestors, defAt
 import           AgdaGraph.Schema          ( Access(..), Definition(..)
                                            , Kind(..), State(..) )
 
-import           AgdaOptimization.CLIParse ( splitFlag, valueFor, readInt )
+import           AgdaOptimization.FlagSpec ( FlagSpec(..), EnumErr(..)
+                                           , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Common ( computeExcludedSet, isFoundationalModule )
-import           AgdaOptimization.Config   ( lookupKey, lookupKeyEnum )
 import           AgdaOptimization.Report   ( GlobalOpts(..), OutFormat(..)
                                            , emitJsonReport, renderTable
                                            , withHumanOutput )
@@ -142,48 +143,6 @@ defaultOptions = Options
   , optExcludeNameRegex = T.empty
   }
 
--- | Hand-rolled CLI parser for the @chokepoint@ subcommand.
---
--- Flags:
---
---   * @--top-n=N@                   — rank cutoff (default 50)
---   * @--sources=exported|public|terminals@ (default @exported@)
---   * @--sinks=postulates-axioms|terminal-leaves@ (default
---     @postulates-axioms@)
---   * @--exclude-name-regex=PATTERN@ — POSIX-ERE excludes by short
---     name; empty disables.
-parseOptions :: Options -> [String] -> Either String Options
-parseOptions = go
-  where
-    sub = "chokepoint"
-    intK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      n <- readInt sub k v
-      go (upd o n) rest
-    enumK k upd parseEnum mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      r <- parseEnum v
-      go (upd o r) rest
-    textK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      go (upd o (T.pack v)) rest
-
-    go :: Options -> [String] -> Either String Options
-    go !o []     = Right o
-    go !o (a:as) = case splitFlag a of
-      Left err                              -> Left (sub <> ": " <> err)
-      Right ("--top-n",   mv)               ->
-        intK  "--top-n"  (\o' n -> o' { optTopN = n }) mv as o
-      Right ("--sources", mv)               ->
-        enumK "--sources" (\o' r -> o' { optSources = r }) parseSrc mv as o
-      Right ("--sinks",   mv)               ->
-        enumK "--sinks"   (\o' r -> o' { optSinks   = Just r }) parseSink mv as o
-      Right ("--exclude-name-regex", mv)    ->
-        textK "--exclude-name-regex"
-              (\o' p -> o' { optExcludeNameRegex = p }) mv as o
-      Right (k, _)                          ->
-        Left (sub <> ": unknown flag: " <> k)
-
 parseSrc :: String -> Either String SrcMode
 parseSrc "exported"  = Right ExportedTheorems
 parseSrc "public"    = Right AllPublic
@@ -197,29 +156,43 @@ parseSink "terminal-leaves"   = Right TerminalLeaves
 parseSink v                   = Left $
   "expected one of postulates-axioms|terminal-leaves, got " <> show v
 
--- | Overlay the @chokepoint:@ YAML section onto a seed 'Options'.
+-- | Declarative flag spec for the @chokepoint@ subcommand. Drives both
+-- 'parseOptions' and 'applyConfig'. Each help line is verbatim from
+-- 'AgdaOptimization.CLI.subFlags'.
 --
--- A YAML-provided @sinks@ sets 'optSinks' to @Just _@, matching the
--- "user explicitly chose" semantics — the empty-set fallback to
--- 'TerminalLeaves' is suppressed.
+-- @--sources@ / @--sinks@ are enum flags whose parser @Left@ is a bare
+-- @"expected one of …"@, surfaced verbatim on the argv side
+-- ('EnumVerbatim'). A YAML-provided @sinks@ sets 'optSinks' to
+-- @Just _@, matching the "user explicitly chose" semantics — the
+-- empty-set fallback to 'TerminalLeaves' is suppressed.
+flagSpecs :: [FlagSpec Options]
+flagSpecs =
+  [ IntFlag "top-n" "--top-n=N                                    rows to keep (default 50)"
+      (\n o -> o { optTopN = n })
+  , EnumFlag "sources" "--sources=exported|public|terminals          source-set selector (default exported)"
+      parseSrc EnumVerbatim (\r o -> o { optSources = r })
+  , EnumFlag "sinks" "--sinks=postulates-axioms|terminal-leaves    sink-set selector (default postulates-axioms)"
+      parseSink EnumVerbatim (\r o -> o { optSinks = Just r })
+  , TextFlag "exclude-name-regex" "--exclude-name-regex=PATTERN                 POSIX-ERE on unqualified name"
+      (\p o -> o { optExcludeNameRegex = p })
+  ]
+
+-- | Hand-rolled CLI parser for the @chokepoint@ subcommand.
+--
+-- Flags:
+--
+--   * @--top-n=N@                   — rank cutoff (default 50)
+--   * @--sources=exported|public|terminals@ (default @exported@)
+--   * @--sinks=postulates-axioms|terminal-leaves@ (default
+--     @postulates-axioms@)
+--   * @--exclude-name-regex=PATTERN@ — POSIX-ERE excludes by short
+--     name; empty disables.
+parseOptions :: Options -> [String] -> Either String Options
+parseOptions = parseFlags "chokepoint" flagSpecs
+
+-- | Overlay the @chokepoint:@ YAML section onto a seed 'Options'.
 applyConfig :: A.Object -> Options -> Either String Options
-applyConfig obj o0 = do
-  o1 <- updI    "top-n"             (\v o -> o { optTopN = v }) o0
-  o2 <- updEnum "sources" parseSrc  (\v o -> o { optSources = v }) o1
-  o3 <- updEnum "sinks"   parseSink (\v o -> o { optSinks   = Just v }) o2
-  o4 <- updT    "exclude-name-regex" (\v o -> o { optExcludeNameRegex = v }) o3
-  pure o4
-  where
-    section = "chokepoint"
-    updI k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Int)
-      pure $ maybe o (`f` o) mv
-    updT k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Text)
-      pure $ maybe o (`f` o) mv
-    updEnum k parser f o = do
-      mv <- lookupKeyEnum section obj k parser
-      pure $ maybe o (`f` o) mv
+applyConfig obj o0 = applyFlagConfig "chokepoint" flagSpecs obj o0
 
 ------------------------------------------------------------------------
 -- Condensation (shape shared with LoadBearing, kept independent here).

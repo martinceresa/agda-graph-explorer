@@ -49,6 +49,7 @@ module AgdaOptimization.TermCluster
   ( Options(..)
   , SortBy(..)
   , defaultOptions
+  , flagSpecs
   , parseOptions
   , applyConfig
   , run
@@ -81,8 +82,8 @@ import           Text.Regex.TDFA      ( Regex, makeRegex, matchTest )
 import           AgdaGraph.Index      ( Index(..), defAt )
 import           AgdaGraph.Schema     ( Definition(..) )
 
-import           AgdaOptimization.CLIParse ( splitFlag, valueFor, readInt, readDbl )
-import           AgdaOptimization.Config   ( lookupKey )
+import           AgdaOptimization.FlagSpec ( FlagSpec(..), EnumErr(..)
+                                           , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Report   ( GlobalOpts(..), OutFormat(..)
                                            , renderTable, emitJsonReport
                                            , withHumanOutput )
@@ -154,71 +155,40 @@ parseSortBy "log-score" = Right SortLogScore
 parseSortBy s           =
   Left $ "expected one of: size, score, log-score (got " ++ show s ++ ")"
 
-parseOptions :: Options -> [String] -> Either String Options
-parseOptions = go
-  where
-    sub = "term-cluster"
-    intK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      n <- readInt sub k v
-      go (upd o n) rest
-    dblK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      x <- readDbl sub k v
-      go (upd o x) rest
-    textK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      go (upd o (T.pack v)) rest
-    enumK k parser upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      case parser v of
-        Right e -> go (upd o e) rest
-        Left e  -> Left (sub <> ": " <> k <> ": " <> e)
+-- | Declarative flag table for the @term-cluster@ subcommand. Drives the
+-- argv parser ('parseOptions') and the YAML overlay ('applyConfig'), and
+-- is the single source of truth the help-derivation stage reads. Each
+-- help line is verbatim from 'AgdaOptimization.CLI.subFlags'.
+--
+-- @--sort@ is an 'EnumWrapped' enum (a rejected token is wrapped as
+-- @term-cluster: --sort: …@). The declaration order matches the former
+-- hand-rolled @applyConfig@ overlay sequence.
+flagSpecs :: [FlagSpec Options]
+flagSpecs =
+  [ IntFlag "min-cluster" "--min-cluster=N                 minimum occurrences for a cluster to be reported (default 2)"
+      (\n o -> o { optMinCluster = n })
+  , IntFlag "top-n" "--top-n=N                       rows to keep (default 50)"
+      (\n o -> o { optTopN = n })
+  , IntFlag "max-defs" "--max-defs=N                    top-defs shown per cluster row (default 3)"
+      (\n o -> o { optMaxDefs = n })
+  , IntFlag "span-modules" "--span-modules=N                minimum distinct modules a cluster's defs must span (default 1)"
+      (\n o -> o { optSpanModules = n })
+  , EnumFlag "sort" "--sort=score|log-score|size     ranking criterion (default score = size*meanDepth*(1+diversity);"
+      parseSortBy EnumWrapped (\e o -> o { optSortBy = e })
+  , IntFlag "min-mean-depth" "--min-mean-depth=N              minimum mean AST subterm depth for a cluster (default 0)"
+      (\n o -> o { optMinMeanDepth = n })
+  , DblFlag "min-diversity" "--min-diversity=F               minimum module-distribution Shannon entropy (default 0.0; try 0.7)"
+      (\x o -> o { optMinDiversity = x })
+  , TextFlag "exclude-module-regex" "--exclude-module-regex=PATTERN  POSIX-ERE on declared module; drop matching defs before counting"
+      (\t o -> o { optExcludeModuleRegex = t })
+  ]
 
-    go :: Options -> [String] -> Either String Options
-    go !o []     = Right o
-    go !o (a:as) = case splitFlag a of
-      Left err                                  -> Left (sub <> ": " <> err)
-      Right ("--min-cluster",         mv)       -> intK  "--min-cluster"  (\o' n -> o' { optMinCluster         = n }) mv as o
-      Right ("--top-n",               mv)       -> intK  "--top-n"        (\o' n -> o' { optTopN               = n }) mv as o
-      Right ("--max-defs",            mv)       -> intK  "--max-defs"     (\o' n -> o' { optMaxDefs            = n }) mv as o
-      Right ("--span-modules",        mv)       -> intK  "--span-modules" (\o' n -> o' { optSpanModules        = n }) mv as o
-      Right ("--sort",                mv)       -> enumK "--sort" parseSortBy (\o' e -> o' { optSortBy           = e }) mv as o
-      Right ("--min-mean-depth",      mv)       -> intK  "--min-mean-depth" (\o' n -> o' { optMinMeanDepth     = n }) mv as o
-      Right ("--min-diversity",       mv)       -> dblK  "--min-diversity"  (\o' x -> o' { optMinDiversity = x }) mv as o
-      Right ("--exclude-module-regex", mv)      -> textK "--exclude-module-regex" (\o' t -> o' { optExcludeModuleRegex = t }) mv as o
-      Right (k, _)                              -> Left (sub <> ": unknown flag: " <> k)
+parseOptions :: Options -> [String] -> Either String Options
+parseOptions = parseFlags "term-cluster" flagSpecs
 
 -- | Overlay the @term-cluster:@ YAML section onto a seed 'Options'.
 applyConfig :: A.Object -> Options -> Either String Options
-applyConfig obj o0 = do
-  o1 <- updI "min-cluster"  (\v o -> o { optMinCluster  = v }) o0
-  o2 <- updI "top-n"        (\v o -> o { optTopN        = v }) o1
-  o3 <- updI "max-defs"     (\v o -> o { optMaxDefs     = v }) o2
-  o4 <- updI "span-modules" (\v o -> o { optSpanModules = v }) o3
-  o5 <- updEnum "sort" parseSortBy (\v o -> o { optSortBy = v }) o4
-  o6 <- updI "min-mean-depth" (\v o -> o { optMinMeanDepth = v }) o5
-  o7 <- updD "min-diversity" (\v o -> o { optMinDiversity = v }) o6
-  o8 <- updT "exclude-module-regex" (\v o -> o { optExcludeModuleRegex = v }) o7
-  pure o8
-  where
-    section = "term-cluster"
-    updI k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Int)
-      pure $ maybe o (`f` o) mv
-    updD k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Double)
-      pure $ maybe o (`f` o) mv
-    updT k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Text)
-      pure $ maybe o (`f` o) mv
-    updEnum k parser f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe String)
-      case mv of
-        Nothing -> pure o
-        Just s  -> case parser s of
-          Right e -> pure (f e o)
-          Left e  -> Left (section <> "." <> T.unpack k <> ": " <> e)
+applyConfig obj o0 = applyFlagConfig "term-cluster" flagSpecs obj o0
 
 -- ---------------------------------------------------------------------------
 -- Analysis

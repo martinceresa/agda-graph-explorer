@@ -34,6 +34,7 @@
 module AgdaOptimization.Motif
   ( Options(..)
   , defaultOptions
+  , flagSpecs
   , parseOptions
   , applyConfig
   , run
@@ -63,9 +64,9 @@ import           System.IO           ( hPutStrLn, stderr )
 
 import           AgdaGraph.Index     ( Index(..), defAt )
 import           AgdaGraph.Schema    ( Definition(..), Kind, State )
-import           AgdaOptimization.CLIParse ( splitFlag, valueFor, readInt, readDbl )
+import           AgdaOptimization.FlagSpec ( FlagSpec(..), SwitchVal(..)
+                                           , parseFlags, applyFlagConfig )
 import qualified Data.Aeson           as A
-import           AgdaOptimization.Config ( lookupKey )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , renderTable, emitJsonReport
                                          , withHumanOutput )
@@ -120,6 +121,37 @@ defaultOptions = Options
   , optMinLabelDistinct = 2
   }
 
+-- | Declarative flag spec for the @motif@ subcommand. Drives both the
+-- argv parser ('parseOptions') and the YAML overlay ('applyConfig'), and
+-- is the single source of truth the help-derivation stage reads. Each
+-- help line is verbatim from 'AgdaOptimization.CLI.subFlags'.
+--
+-- @--per-module@ is a 'SwitchPreGuard' switch: matched against the raw
+-- token before 'splitFlag', so @--per-module=x@ falls through to the
+-- unknown-flag path.
+flagSpecs :: [FlagSpec Options]
+flagSpecs =
+  [ IntFlag "min-support" "--min-support=N         minimum embedding count (default 3)"
+      (\n o -> o { optMinSupport = n })
+  , IntFlag "min-size" "--min-size=N            minimum motif size in nodes (default 2)"
+      (\n o -> o { optMinSize = n })
+  , IntFlag "max-size" "--max-size=N            maximum motif size in nodes (default 3)"
+      (\n o -> o { optMaxSize = n })
+  , SwitchFlag "per-module" "--per-module            mine per-module (currently warns + falls back to global)"
+      SwitchPreGuard (\o -> o { optPerModule = True })
+      (Just "per-module") (\v o -> o { optPerModule = v })
+  , DblFlag "exclude-hub-pct" "--exclude-hub-pct=F     drop top-pct% hub nodes by fan-in"
+      (\x o -> o { optExcludeHubPct = x })
+  , IntFlag "top-n" "--top-n=N               rows to keep (default 50)"
+      (\n o -> o { optTopN = n })
+  , IntFlag "max-fan-out" "--max-fan-out=N         skip seeds whose fan-out exceeds N"
+      (\n o -> o { optMaxFanOut = n })
+  , DblFlag "budget" "--budget=F              wall-clock seconds; 0 = unlimited (default)"
+      (\x o -> o { optBudgetSecs = x })
+  , IntFlag "min-label-distinct" "--min-label-distinct=N  require >= N distinct (kind, state) labels (default 2)"
+      (\n o -> o { optMinLabelDistinct = n })
+  ]
+
 -- | Hand-rolled CLI parser for the @motif@ subcommand.
 --
 -- Accepts both @--flag=value@ and @--flag value@ forms. Boolean flags
@@ -127,59 +159,12 @@ defaultOptions = Options
 -- @Left@ with a per-subcommand error message. Folds over the argv
 -- with a strict accumulator.
 parseOptions :: Options -> [String] -> Either String Options
-parseOptions = go
-  where
-    sub = "motif"
-    intK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      n <- readInt sub k v
-      go (upd o n) rest
-    dblK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      x <- readDbl sub k v
-      go (upd o x) rest
-
-    go :: Options -> [String] -> Either String Options
-    go !o []     = Right o
-    go !o (a:as)
-      | a == "--per-module" = go o { optPerModule = True } as
-      | otherwise = case splitFlag a of
-          Left err                       -> Left (sub <> ": " <> err)
-          Right ("--min-support",     mv) -> intK "--min-support"     (\o' n -> o' { optMinSupport    = n }) mv as o
-          Right ("--min-size",        mv) -> intK "--min-size"        (\o' n -> o' { optMinSize       = n }) mv as o
-          Right ("--max-size",        mv) -> intK "--max-size"        (\o' n -> o' { optMaxSize       = n }) mv as o
-          Right ("--top-n",           mv) -> intK "--top-n"           (\o' n -> o' { optTopN          = n }) mv as o
-          Right ("--max-fan-out",     mv) -> intK "--max-fan-out"     (\o' n -> o' { optMaxFanOut     = n }) mv as o
-          Right ("--exclude-hub-pct", mv) -> dblK "--exclude-hub-pct" (\o' x -> o' { optExcludeHubPct = x }) mv as o
-          Right ("--budget",          mv) -> dblK "--budget"          (\o' x -> o' { optBudgetSecs    = x }) mv as o
-          Right ("--min-label-distinct", mv) -> intK "--min-label-distinct" (\o' n -> o' { optMinLabelDistinct = n }) mv as o
-          Right (k, _)                    -> Left (sub <> ": unknown flag: " <> k)
+parseOptions = parseFlags "motif" flagSpecs
 
 -- | Overlay the @motif:@ YAML section onto a seed 'Options'. Each key
 -- mirrors the kebab-case CLI flag minus the @--@ prefix.
 applyConfig :: A.Object -> Options -> Either String Options
-applyConfig obj o0 = do
-  o1 <- updI "min-support"        (\v o -> o { optMinSupport     = v }) o0
-  o2 <- updI "min-size"           (\v o -> o { optMinSize        = v }) o1
-  o3 <- updI "max-size"           (\v o -> o { optMaxSize        = v }) o2
-  o4 <- updB "per-module"         (\v o -> o { optPerModule      = v }) o3
-  o5 <- updD "exclude-hub-pct"    (\v o -> o { optExcludeHubPct  = v }) o4
-  o6 <- updI "top-n"              (\v o -> o { optTopN           = v }) o5
-  o7 <- updI "max-fan-out"        (\v o -> o { optMaxFanOut      = v }) o6
-  o8 <- updD "budget"             (\v o -> o { optBudgetSecs     = v }) o7
-  o9 <- updI "min-label-distinct" (\v o -> o { optMinLabelDistinct = v }) o8
-  pure o9
-  where
-    section = "motif"
-    updI k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Int)
-      pure $ maybe o (`f` o) mv
-    updD k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Double)
-      pure $ maybe o (`f` o) mv
-    updB k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Bool)
-      pure $ maybe o (`f` o) mv
+applyConfig obj o0 = applyFlagConfig "motif" flagSpecs obj o0
 
 -- | The node label drives both isomorphism and motif-key.
 type Label = (Kind, State)
@@ -591,7 +576,7 @@ canonicalize ix labelOf emb =
       stabilize 0 c = c
       stabilize !k c =
         let c' = step c
-        in if eqColourClasses c c'
+        in if c == c'
              then c'
              else stabilize (k - 1) c'
 
@@ -603,12 +588,6 @@ canonicalize ix labelOf emb =
       -- Node multiset, as sentinel edges (-1, colour).
       nodeKey = sort [ (-1, c) | c <- V.toList final ]
   in MotifKey (nodeKey ++ edgeKey)
-
--- | Two colour vectors induce the same equivalence partition?
--- Comparing the partitions directly is overkill; instead we just
--- check that the vectors are pointwise equal as a fixpoint signal.
-eqColourClasses :: V.Vector Int -> V.Vector Int -> Bool
-eqColourClasses a b = a == b
 
 -- | Cheap commutative-but-position-aware hash. We avoid bringing in
 -- @hashable@ for label hashing because the kind/state values have a

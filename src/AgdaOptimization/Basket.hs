@@ -34,6 +34,7 @@
 module AgdaOptimization.Basket
   ( Options(..)
   , defaultOptions
+  , flagSpecs
   , parseOptions
   , applyConfig
   , run
@@ -62,12 +63,13 @@ import           Data.Aeson              ( (.=) )
 
 import           AgdaGraph.Index         ( Index(..), defAt )
 import           AgdaGraph.Schema        ( Definition(..), Kind(..) )
-import           AgdaOptimization.CLIParse ( splitFlag, valueFor, readDbl, readInt )
-import           AgdaOptimization.Config ( lookupKey )
+import           AgdaOptimization.Common ( lastSegment )
 import           AgdaOptimization.FamilyFilter ( isForcedByFamily )
+import           AgdaOptimization.FlagSpec ( FlagSpec(..), SwitchVal(..)
+                                           , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , renderTable, emitJsonReport
-                                         , withHumanOutput )
+                                         , showD3, withHumanOutput )
 
 ----------------------------------------------------------------------
 -- Options.
@@ -124,60 +126,48 @@ defaultOptions = Options
   , optForcedFraction = 0.5
   }
 
+-- | Declarative flag spec for the @basket@ subcommand. Drives both the
+-- argv parser ('parseOptions') and the YAML overlay ('applyConfig'), and
+-- is the single source of truth the help-derivation stage reads. Each
+-- help line is verbatim from 'AgdaOptimization.CLI.subFlags'.
+--
+-- @--forced-suppress@ / @--no-forced-suppress@ are 'SwitchIgnoreValue'
+-- switches (an attached @=value@ is ignored). They share a single YAML
+-- key (@forced-suppress@), carried by the @--forced-suppress@ entry; the
+-- @--no-forced-suppress@ entry takes no part in the overlay ('Nothing').
+flagSpecs :: [FlagSpec Options]
+flagSpecs =
+  [ DblFlag "min-support" "--min-support=F             min support (default 0.05)"
+      (\x o -> o { optMinSupport = x })
+  , DblFlag "min-confidence" "--min-confidence=F          min confidence (default 0.5)"
+      (\x o -> o { optMinConfidence = x })
+  , DblFlag "min-lift" "--min-lift=F                min lift (default 1.5)"
+      (\x o -> o { optMinLift = x })
+  , DblFlag "exclude-top-frequency" "--exclude-top-frequency=F   drop rules with top-pct% items; 0 = disabled (default 5.0)"
+      (\x o -> o { optExcludeTopFreq = x })
+  , IntFlag "top-n" "--top-n=N                   rules to keep after sort (default 100)"
+      (\x o -> o { optTopN = x })
+  , DblFlag "budget" "--budget=F                  wall-clock seconds; 0 = unlimited (default)"
+      (\x o -> o { optBudgetSecs = x })
+  , SwitchFlag "no-forced-suppress" "--no-forced-suppress        disable the per-case-unfold-family suppressor"
+      SwitchIgnoreValue (\o -> o { optForcedSuppress = False })
+      Nothing (\_ o -> o)
+  , SwitchFlag "forced-suppress" "--forced-suppress           re-enable the suppressor (default on)"
+      SwitchIgnoreValue (\o -> o { optForcedSuppress = True })
+      (Just "forced-suppress") (\v o -> o { optForcedSuppress = v })
+  , DblFlag "forced-fraction" "--forced-fraction=F         bundle-fraction gate for the suppressor (default 0.5)"
+      (\x o -> o { optForcedFraction = x })
+  ]
+
 -- | Hand-rolled CLI parser for the @basket@ subcommand. Each value is
 -- a 'Double'. See 'AgdaOptimization.Motif.parseOptions' for the
 -- shape; strict fold over the argv.
 parseOptions :: Options -> [String] -> Either String Options
-parseOptions = go
-  where
-    sub = "basket"
-    dblK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      x <- readDbl sub k v
-      go (upd o x) rest
-    intK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      x <- readInt sub k v
-      go (upd o x) rest
-
-    go :: Options -> [String] -> Either String Options
-    go !o []     = Right o
-    go !o (a:as) = case splitFlag a of
-      Left err                            -> Left (sub <> ": " <> err)
-      Right ("--min-support",         mv) -> dblK "--min-support"          (\o' x -> o' { optMinSupport     = x }) mv as o
-      Right ("--min-confidence",      mv) -> dblK "--min-confidence"       (\o' x -> o' { optMinConfidence  = x }) mv as o
-      Right ("--min-lift",            mv) -> dblK "--min-lift"             (\o' x -> o' { optMinLift        = x }) mv as o
-      Right ("--exclude-top-frequency", mv) -> dblK "--exclude-top-frequency" (\o' x -> o' { optExcludeTopFreq = x }) mv as o
-      Right ("--top-n",               mv) -> intK "--top-n"                (\o' x -> o' { optTopN           = x }) mv as o
-      Right ("--budget",              mv) -> dblK "--budget"               (\o' x -> o' { optBudgetSecs     = x }) mv as o
-      Right ("--no-forced-suppress",  _ ) -> go (o { optForcedSuppress = False }) as
-      Right ("--forced-suppress",     _ ) -> go (o { optForcedSuppress = True  }) as
-      Right ("--forced-fraction",     mv) -> dblK "--forced-fraction"      (\o' x -> o' { optForcedFraction = x }) mv as o
-      Right (k, _)                        -> Left (sub <> ": unknown flag: " <> k)
+parseOptions = parseFlags "basket" flagSpecs
 
 -- | Overlay the @basket:@ YAML section onto a seed 'Options'.
 applyConfig :: A.Object -> Options -> Either String Options
-applyConfig obj o0 = do
-  o1 <- updD "min-support"          (\v o -> o { optMinSupport     = v }) o0
-  o2 <- updD "min-confidence"       (\v o -> o { optMinConfidence  = v }) o1
-  o3 <- updD "min-lift"             (\v o -> o { optMinLift        = v }) o2
-  o4 <- updD "exclude-top-frequency" (\v o -> o { optExcludeTopFreq = v }) o3
-  o5 <- updI "top-n"                (\v o -> o { optTopN           = v }) o4
-  o6 <- updD "budget"               (\v o -> o { optBudgetSecs     = v }) o5
-  o7 <- updB "forced-suppress"      (\v o -> o { optForcedSuppress = v }) o6
-  o8 <- updD "forced-fraction"      (\v o -> o { optForcedFraction = v }) o7
-  pure o8
-  where
-    section = "basket"
-    updI k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Int)
-      pure $ maybe o (`f` o) mv
-    updD k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Double)
-      pure $ maybe o (`f` o) mv
-    updB k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Bool)
-      pure $ maybe o (`f` o) mv
+applyConfig obj o0 = applyFlagConfig "basket" flagSpecs obj o0
 
 ----------------------------------------------------------------------
 -- Internal types.
@@ -340,8 +330,10 @@ run ix gOpts opts = do
                                  bonferroniKept
             else (bonferroniKept, 0)
 
-        ranked = sortOn (Down . specificity)
-               $ sortOn (Down . rConfidence) forcedKept
+        -- Specificity primary, confidence secondary (one stable pass,
+        -- equivalent to the former sortOn-after-sortOn).
+        ranked = sortOn (\r -> (Down (specificity r), Down (rConfidence r)))
+                        forcedKept
 
         !cap       = max 0 (optTopN opts)
         !keptRules = take cap ranked
@@ -866,23 +858,10 @@ renderRuleRow ix (rank, r) =
 -- | Last dot-component of the QName — basket rules need the short
 -- form, full QNames blow the table up.
 shortName :: Index -> Int -> T.Text
-shortName ix i =
-  let nm = defName (defAt ix i)
-      (_, tl) = T.breakOnEnd "." nm
-  in if T.null tl then nm else tl
+shortName ix i = lastSegment (defName (defAt ix i))
 
 showD :: Double -> String
 showD = show
-
-showD3 :: Double -> String
-showD3 d =
-  -- Three decimals; avoid bringing in a printf dep.
-  let n  = round (d * 1000) :: Integer
-      s  = show (abs n)
-      sn = if n < 0 then "-" else ""
-      padded = replicate (max 0 (4 - length s)) '0' ++ s
-      (intPart, fracPart) = splitAt (length padded - 3) padded
-  in sn ++ intPart ++ "." ++ fracPart
 
 ----------------------------------------------------------------------
 -- Near-miss flagger.

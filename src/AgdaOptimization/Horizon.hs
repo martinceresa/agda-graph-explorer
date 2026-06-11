@@ -54,6 +54,7 @@ module AgdaOptimization.Horizon
   , LeavesMode(..)
   , RootsMode(..)
   , defaultOptions
+  , flagSpecs
   , parseOptions
   , applyConfig
   , run
@@ -80,9 +81,10 @@ import           AgdaGraph.Schema          ( Access(..), Definition(..)
                                            , ExternalsSummary(..)
                                            , Kind(..), State(..) )
 
-import           AgdaOptimization.CLIParse ( splitFlag, valueFor, readInt )
+import           AgdaOptimization.FlagSpec ( FlagSpec(..), EnumErr(..)
+                                           , SwitchVal(..)
+                                           , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Common ( computeExcludedSet, notFoundational )
-import           AgdaOptimization.Config   ( lookupKey, lookupKeyEnum )
 import           AgdaOptimization.Report   ( GlobalOpts(..), OutFormat(..)
                                            , renderTable, emitJsonReport
                                            , withHumanOutput )
@@ -148,46 +150,41 @@ defaultOptions = Options
   , optExcludeNameRegex = T.empty
   }
 
+-- | Declarative flag spec for the @horizon@ subcommand. Drives both
+-- 'parseOptions' and 'applyConfig'. Each help line is verbatim from
+-- 'AgdaOptimization.CLI.subFlags'.
+--
+-- @--leaves@ / @--roots@ are enum flags whose parser @Left@ is a bare
+-- @"expected one of …"@, surfaced verbatim on the argv side
+-- ('EnumVerbatim'). A @--leaves@ value (from CLI or YAML) also flips
+-- 'optLeavesExplicit' to 'True', matching the "user explicitly chose"
+-- semantics — the empty-set fallback to 'LvTerminalLeaves' is
+-- suppressed.
+--
+-- @--no-module-hist@ is a 'SwitchPreGuard' switch (matched against the
+-- raw token before 'splitFlag', so @--no-module-hist=x@ falls through
+-- to the unknown-flag path); its YAML key is @module-hist@ and matches
+-- the underlying field, not the negated CLI flag.
+flagSpecs :: [FlagSpec Options]
+flagSpecs =
+  [ EnumFlag "leaves" "--leaves=postulates-axioms|terminal-leaves    forward-leaf set (default postulates-axioms)"
+      parseLeaves EnumVerbatim
+      (\r o -> o { optLeaves = r, optLeavesExplicit = True })
+  , EnumFlag "roots" "--roots=public-theorems|terminals             backward-root set (default public-theorems)"
+      parseRoots EnumVerbatim (\r o -> o { optRoots = r })
+  , SwitchFlag "no-module-hist" "--no-module-hist                              suppress per-module epsilon+ histogram"
+      SwitchPreGuard (\o -> o { optModuleHist = False })
+      (Just "module-hist") (\v o -> o { optModuleHist = v })
+  , IntFlag "top-n" "--top-n=N                                     rows to keep (default 50)"
+      (\n o -> o { optTopN = n })
+  , TextFlag "exclude-name-regex" "--exclude-name-regex=PATTERN                  POSIX-ERE on unqualified name"
+      (\p o -> o { optExcludeNameRegex = p })
+  ]
+
 -- | Hand-rolled CLI parser for the @horizon@ subcommand. Mirrors the
 -- style used by every other 'AgdaOptimization' analysis.
 parseOptions :: Options -> [String] -> Either String Options
-parseOptions = go
-  where
-    sub = "horizon"
-
-    intK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      n <- readInt sub k v
-      go (upd o n) rest
-
-    enumK k upd parseEnum mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      r <- parseEnum v
-      go (upd o r) rest
-
-    textK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      go (upd o (T.pack v)) rest
-
-    go :: Options -> [String] -> Either String Options
-    go !o []     = Right o
-    go !o (a:as)
-      | a == "--no-module-hist" = go o { optModuleHist = False } as
-      | otherwise = case splitFlag a of
-          Left err                       -> Left (sub <> ": " <> err)
-          Right ("--top-n", mv)          ->
-            intK "--top-n" (\o' n -> o' { optTopN = n }) mv as o
-          Right ("--leaves", mv)         ->
-            enumK "--leaves"
-                  (\o' r -> o' { optLeaves = r, optLeavesExplicit = True })
-                  parseLeaves mv as o
-          Right ("--roots", mv)          ->
-            enumK "--roots" (\o' r -> o' { optRoots = r }) parseRoots mv as o
-          Right ("--exclude-name-regex", mv) ->
-            textK "--exclude-name-regex"
-                  (\o' p -> o' { optExcludeNameRegex = p }) mv as o
-          Right (k, _)                   ->
-            Left (sub <> ": unknown flag: " <> k)
+parseOptions = parseFlags "horizon" flagSpecs
 
 parseLeaves :: String -> Either String LeavesMode
 parseLeaves "postulates-axioms" = Right LvPostulatesAxioms
@@ -207,31 +204,7 @@ parseRoots v                 =
 -- matching the "user explicitly chose" semantics — the empty-set
 -- fallback to 'LvTerminalLeaves' is suppressed.
 applyConfig :: A.Object -> Options -> Either String Options
-applyConfig obj o0 = do
-  o1 <- updI    "top-n" (\v o -> o { optTopN       = v }) o0
-  o2 <- updEnum "leaves" parseLeaves
-                        (\v o -> o { optLeaves     = v
-                                   , optLeavesExplicit = True }) o1
-  o3 <- updEnum "roots"  parseRoots
-                        (\v o -> o { optRoots      = v }) o2
-  o4 <- updB    "module-hist" (\v o -> o { optModuleHist = v }) o3
-  o5 <- updT    "exclude-name-regex"
-                        (\v o -> o { optExcludeNameRegex = v }) o4
-  pure o5
-  where
-    section = "horizon"
-    updI k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Int)
-      pure $ maybe o (`f` o) mv
-    updB k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Bool)
-      pure $ maybe o (`f` o) mv
-    updT k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Text)
-      pure $ maybe o (`f` o) mv
-    updEnum k parser f o = do
-      mv <- lookupKeyEnum section obj k parser
-      pure $ maybe o (`f` o) mv
+applyConfig obj o0 = applyFlagConfig "horizon" flagSpecs obj o0
 
 ------------------------------------------------------------------------
 -- Condensation

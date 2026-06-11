@@ -41,6 +41,7 @@ module AgdaOptimization.Fingerprint
   ( Options(..)
   , Direction(..)
   , defaultOptions
+  , flagSpecs
   , parseOptions
   , applyConfig
   , run
@@ -54,8 +55,6 @@ import qualified Data.IntMap.Strict   as IM
 import qualified Data.IntSet          as IS
 import           Data.List            ( sortBy, sortOn )
 import           Data.Ord             ( Down(..), comparing )
-import qualified Data.Sequence        as Seq
-import           Data.Sequence        ( ViewL(..), (|>) )
 import qualified Data.Text            as T
 import qualified Data.Vector          as V
 import           Data.Vector          ( Vector )
@@ -68,11 +67,12 @@ import           AgdaGraph.Index      ( Index(..), defAt, descendants, ancestors
 import           AgdaGraph.Schema     ( Definition(..), Kind(..), State(..) )
 import           Data.Text            ( Text )
 
-import           AgdaOptimization.CLIParse ( splitFlag, valueFor, readInt, readDbl )
-import           AgdaOptimization.UnionFind ( emptyUF, ufClusters, ufInsert, ufUnion )
+import           AgdaOptimization.FlagSpec ( FlagSpec(..), EnumErr(..)
+                                           , parseFlags, applyFlagConfig )
+import           AgdaOptimization.Cluster ( SimEdge, bfsBoundedLayers, bfsUnbounded
+                                          , clustersOfSize2, clusterAvgSim )
 import           AgdaGraph.WL         ( ColorVec, Fingerprint, fingerprintAt
                                       , initialColors, refine, weightedJaccard )
-import           AgdaOptimization.Config ( lookupKey, lookupKeyEnum )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , emitJsonReport, withHumanOutput )
 
@@ -135,59 +135,39 @@ readDirection _ v = case v of
   _               -> Left $
     "fingerprint: --direction: expected outgoing|incoming|both, got " <> v
 
+-- | Declarative flag spec for the @fingerprint@ subcommand. Drives both
+-- 'parseOptions' and 'applyConfig'. Each help line is verbatim from
+-- 'AgdaOptimization.CLI.subFlags'.
+--
+-- @--direction@ is an enum flag parsed by 'readDirection', whose @Left@
+-- already embeds the @fingerprint: --direction: …@ prefix, so the argv
+-- side surfaces it verbatim ('EnumVerbatim'). 'readDirection' ignores
+-- its first argument, so the same partial application serves both the
+-- argv and YAML-overlay sides identically.
+flagSpecs :: [FlagSpec Options]
+flagSpecs =
+  [ DblFlag "jaccard" "--jaccard=F                          weighted-Jaccard threshold (default 0.8)"
+      (\x o -> o { optJaccardThreshold = x })
+  , IntFlag "min-size" "--min-size=N                         min candidate subtree size (default 3)"
+      (\n o -> o { optMinSize = n })
+  , IntFlag "wl-k" "--wl-k=N                             WL refinement depth (default 2)"
+      (\n o -> o { optWlK = n })
+  , IntFlag "wl-depth" "--wl-depth=N                         per-candidate subtree hop bound; 0 = unbounded (default)"
+      (\n o -> o { optWlDepth = n })
+  , EnumFlag "direction" "--direction=outgoing|incoming|both   which graph drives WL (default incoming)"
+      (readDirection "direction") EnumVerbatim (\d o -> o { optDirection = d })
+  , IntFlag "top-n" "--top-n=N                            clusters to keep (default 20)"
+      (\n o -> o { optTopN = n })
+  ]
+
 -- | Hand-rolled CLI parser for the @fingerprint@ subcommand. See
 -- 'AgdaOptimization.Motif.parseOptions' for the dispatch shape.
 parseOptions :: Options -> [String] -> Either String Options
-parseOptions = go
-  where
-    sub = "fingerprint"
-    intK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      n <- readInt sub k v
-      go (upd o n) rest
-    dblK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      x <- readDbl sub k v
-      go (upd o x) rest
-    dirK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      d <- readDirection k v
-      go (upd o d) rest
-
-    go :: Options -> [String] -> Either String Options
-    go !o []     = Right o
-    go !o (a:as) = case splitFlag a of
-      Left err                     -> Left (sub <> ": " <> err)
-      Right ("--jaccard",   mv)    -> dblK "--jaccard"   (\o' x -> o' { optJaccardThreshold = x }) mv as o
-      Right ("--min-size",  mv)    -> intK "--min-size"  (\o' n -> o' { optMinSize          = n }) mv as o
-      Right ("--wl-k",      mv)    -> intK "--wl-k"      (\o' n -> o' { optWlK              = n }) mv as o
-      Right ("--wl-depth",  mv)    -> intK "--wl-depth"  (\o' n -> o' { optWlDepth          = n }) mv as o
-      Right ("--direction", mv)    -> dirK "--direction" (\o' d -> o' { optDirection        = d }) mv as o
-      Right ("--top-n",     mv)    -> intK "--top-n"     (\o' n -> o' { optTopN             = n }) mv as o
-      Right (k, _)                 -> Left (sub <> ": unknown flag: " <> k)
+parseOptions = parseFlags "fingerprint" flagSpecs
 
 -- | Overlay the @fingerprint:@ YAML section onto a seed 'Options'.
 applyConfig :: A.Object -> Options -> Either String Options
-applyConfig obj o0 = do
-  o1 <- updD    "jaccard"  (\v o -> o { optJaccardThreshold = v }) o0
-  o2 <- updI    "min-size" (\v o -> o { optMinSize          = v }) o1
-  o3 <- updI    "wl-k"     (\v o -> o { optWlK              = v }) o2
-  o4 <- updI    "wl-depth" (\v o -> o { optWlDepth          = v }) o3
-  o5 <- updEnum "direction" (readDirection "direction")
-                            (\v o -> o { optDirection       = v }) o4
-  o6 <- updI    "top-n"    (\v o -> o { optTopN             = v }) o5
-  pure o6
-  where
-    section = "fingerprint"
-    updI k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Int)
-      pure $ maybe o (`f` o) mv
-    updD k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Double)
-      pure $ maybe o (`f` o) mv
-    updEnum k parser f o = do
-      mv <- lookupKeyEnum section obj k parser
-      pure $ maybe o (`f` o) mv
+applyConfig obj o0 = applyFlagConfig "fingerprint" flagSpecs obj o0
 
 --------------------------------------------------------------------------------
 -- WL adjacency for this analysis
@@ -207,46 +187,19 @@ neighboursOf ix dir i = case dir of
              (IM.findWithDefault IS.empty i (idxReverse ix))
 
 -- | Subtree limited to @maxDepth@ hops from @root@ under @dir@.
--- @maxDepth <= 0@ is treated as "unbounded" and falls through to
--- 'descendants' / 'ancestors' for the directional cases.  For
--- 'Bidirectional' we always BFS locally.  The returned set always
--- includes the root.
+-- @maxDepth <= 0@ is treated as "unbounded" and falls through to the
+-- library 'descendants' / 'ancestors' for the directional cases.  For
+-- 'Bidirectional' we always BFS locally (the shared 'bfsUnbounded' /
+-- 'bfsBoundedLayers').  The returned set always includes the root.
 rootedSubtree :: Index -> Direction -> Int -> Int -> IS.IntSet
 rootedSubtree ix dir maxDepth root
   | maxDepth <= 0 = case dir of
       Outgoing      -> IS.insert root (descendants ix (IS.singleton root))
       Incoming      -> IS.insert root (ancestors   ix (IS.singleton root))
-      Bidirectional -> bfsUnbounded
-  | otherwise     = bfsBounded
+      Bidirectional -> bfsUnbounded nbrs root
+  | otherwise     = bfsBoundedLayers nbrs maxDepth root
   where
     nbrs = neighboursOf ix dir
-
-    -- Unbounded BFS, used only when both endpoints (forward+reverse)
-    -- need to be followed simultaneously.
-    bfsUnbounded =
-      let go !seen !q = case Seq.viewl q of
-            EmptyL    -> seen
-            x :< rest ->
-              let !ns       = nbrs x
-                  !newOnes  = IS.difference ns seen
-                  !seen'    = IS.union seen newOnes
-                  !q'       = IS.foldl' (|>) rest newOnes
-              in go seen' q'
-      in go (IS.singleton root) (Seq.singleton root)
-
-    -- BFS by layers, decrementing depth at each frontier expansion.
-    -- @seen@ accumulates everything reached so far (including root);
-    -- @frontier@ is the most-recently-added layer.
-    bfsBounded =
-      let step !d !seen !frontier
-            | d <= 0 || IS.null frontier = seen
-            | otherwise =
-                let !nextRaw   = IS.foldl' (\acc x -> IS.union acc (nbrs x))
-                                            IS.empty frontier
-                    !nextLayer = IS.difference nextRaw seen
-                    !seen'     = IS.union seen nextLayer
-                in step (d - 1) seen' nextLayer
-      in step maxDepth (IS.singleton root) (IS.singleton root)
 
 --------------------------------------------------------------------------------
 -- Candidate selection
@@ -385,10 +338,6 @@ qnameFallbackId ix nm self =
 -- Cluster construction
 --------------------------------------------------------------------------------
 
--- | An edge of the similarity graph: @(uIdx, vIdx, similarity)@ where
--- the indices reference the candidate list, not the global node ids.
-type SimEdge = (Int, Int, Double)
-
 -- | Result of pair scoring: the surviving similarity edges, plus the
 -- count of pairs skipped because both endpoints share an owner.
 data ScoreResult = ScoreResult
@@ -436,39 +385,6 @@ scorePairs thr cs owners =
       !allEdges = concatMap snd (reverse chunks)
   in ScoreResult allEdges totSkip
 
--- | Group candidate indices into clusters via union-find over the
--- supplied edge set.  Only clusters with >= 2 members are returned.
-clusterize :: Int -> [SimEdge] -> [[Int]]
-clusterize n edges =
-  let -- seed every candidate so singletons can be filtered out later
-      seeded = foldl' (flip ufInsert) emptyUF [0 .. n - 1]
-      uf'    = foldl' (\uf (a, b, _) -> ufUnion a b uf) seeded edges
-  in [ ks | ks <- ufClusters uf', length ks >= 2 ]
-
--- | Average pairwise similarity within a cluster.  Uses the precomputed
--- edge list; pairs missing from it are below threshold (we treat their
--- similarity as @optJaccardThreshold@ to avoid double-counting noise —
--- the average stays informative).
-clusterAvgSim :: Double -> [(Int, Int, Double)] -> [Int] -> Double
-clusterAvgSim thr edges members =
-  let memberSet = IS.fromList members
-      contrib (a, b, s)
-        | IS.member a memberSet && IS.member b memberSet = Just s
-        | otherwise                                      = Nothing
-      sims   = [ s | Just s <- map contrib edges ]
-      nMems  = length members
-      nPairs = nMems * (nMems - 1) `div` 2
-  in case (sims, nPairs) of
-       ([], _)   -> thr
-       (_,  0)   -> thr
-       (xs, np)  ->
-         -- Sum collected sims; any uncounted pairs treated as the
-         -- threshold (lower bound).
-         let !sumKnown   = sum xs
-             !missing    = np - length xs
-             !sumMissing = fromIntegral missing * thr
-         in (sumKnown + sumMissing) / fromIntegral np
-
 --------------------------------------------------------------------------------
 -- Entry point
 --------------------------------------------------------------------------------
@@ -492,7 +408,7 @@ run ix gOpts opts@Options{..} = do
       !nTotal    = nCand * (nCand - 1) `div` 2
       !nPairs    = nTotal - nSkipped
       !nScored   = length edges
-      !clusters  = clusterize nCand edges
+      !clusters  = clustersOfSize2 nCand edges
       !nClus     = length clusters
       !largest   = if null clusters then 0 else maximum (map length clusters)
       -- Sort clusters by size desc; cap at --top-n.

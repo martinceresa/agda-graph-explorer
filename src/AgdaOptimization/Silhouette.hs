@@ -37,6 +37,7 @@
 module AgdaOptimization.Silhouette
   ( Options(..)
   , defaultOptions
+  , flagSpecs
   , parseOptions
   , applyConfig
   , run
@@ -44,7 +45,7 @@ module AgdaOptimization.Silhouette
 
 import           Control.Monad        ( forM_, when )
 import           Data.Foldable        ( foldl' )
-import           Data.List            ( sortBy )
+import           Data.List            ( sortBy, tails )
 import qualified Data.Map.Strict      as Map
 import           Data.Map.Strict      ( Map )
 import           Data.Ord             ( Down(..), comparing )
@@ -61,11 +62,11 @@ import           AgdaGraph.Index      ( Index(..), defAt )
 import           AgdaGraph.Schema     ( Definition(..), Kind(..), State(..) )
 import           Data.Text            ( Text )
 
-import           AgdaOptimization.CLIParse ( splitFlag, valueFor, readInt, readDbl )
+import           AgdaOptimization.FlagSpec ( FlagSpec(..)
+                                           , parseFlags, applyFlagConfig )
 import           AgdaGraph.WL         ( Fingerprint, weightedJaccard )
 import           AgdaGraph.Similarity ( SigBodyFingerprints(..)
                                       , buildSigBodyFingerprints, fingerprintSize )
-import           AgdaOptimization.Config ( lookupKey )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , emitJsonReport, withHumanOutput )
 
@@ -103,51 +104,33 @@ defaultOptions = Options
   , optLowOverlap     = 0.2
   }
 
+-- | Declarative flag spec for the @silhouette@ subcommand. Drives both
+-- 'parseOptions' and 'applyConfig'. Each help line is verbatim from
+-- 'AgdaOptimization.CLI.subFlags'.
+flagSpecs :: [FlagSpec Options]
+flagSpecs =
+  [ IntFlag "wl-k" "--wl-k=N              WL refinement depth (default 2)"
+      (\n o -> o { optWlK = n })
+  , IntFlag "min-size" "--min-size=N          min candidate subtree size (default 3)"
+      (\n o -> o { optMinSize = n })
+  , IntFlag "min-cluster-size" "--min-cluster-size=N  min twin-cluster size (default 2)"
+      (\n o -> o { optMinClusterSize = n })
+  , DblFlag "high-overlap" "--high-overlap=F      combinator-candidate threshold (default 0.5)"
+      (\x o -> o { optHighOverlap = x })
+  , DblFlag "low-overlap" "--low-overlap=F       copy-paste-reproof threshold (default 0.2)"
+      (\x o -> o { optLowOverlap = x })
+  , IntFlag "top-n" "--top-n=N             clusters to keep (default 50)"
+      (\n o -> o { optTopN = n })
+  ]
+
 -- | Hand-rolled CLI parser for the @silhouette@ subcommand. Shape mirrors
 -- 'AgdaOptimization.Fingerprint.parseOptions'.
 parseOptions :: Options -> [String] -> Either String Options
-parseOptions = go
-  where
-    sub = "silhouette"
-    intK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      n <- readInt sub k v
-      go (upd o n) rest
-    dblK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      x <- readDbl sub k v
-      go (upd o x) rest
-
-    go :: Options -> [String] -> Either String Options
-    go !o []     = Right o
-    go !o (a:as) = case splitFlag a of
-      Left err                              -> Left (sub <> ": " <> err)
-      Right ("--wl-k",             mv)      -> intK "--wl-k"             (\o' n -> o' { optWlK            = n }) mv as o
-      Right ("--min-size",         mv)      -> intK "--min-size"         (\o' n -> o' { optMinSize        = n }) mv as o
-      Right ("--top-n",            mv)      -> intK "--top-n"            (\o' n -> o' { optTopN           = n }) mv as o
-      Right ("--min-cluster-size", mv)      -> intK "--min-cluster-size" (\o' n -> o' { optMinClusterSize = n }) mv as o
-      Right ("--high-overlap",     mv)      -> dblK "--high-overlap"     (\o' x -> o' { optHighOverlap    = x }) mv as o
-      Right ("--low-overlap",      mv)      -> dblK "--low-overlap"      (\o' x -> o' { optLowOverlap     = x }) mv as o
-      Right (k, _)                          -> Left (sub <> ": unknown flag: " <> k)
+parseOptions = parseFlags "silhouette" flagSpecs
 
 -- | Overlay the @silhouette:@ YAML section onto a seed 'Options'.
 applyConfig :: A.Object -> Options -> Either String Options
-applyConfig obj o0 = do
-  o1 <- updI "wl-k"              (\v o -> o { optWlK            = v }) o0
-  o2 <- updI "min-size"          (\v o -> o { optMinSize        = v }) o1
-  o3 <- updI "top-n"             (\v o -> o { optTopN           = v }) o2
-  o4 <- updI "min-cluster-size"  (\v o -> o { optMinClusterSize = v }) o3
-  o5 <- updD "high-overlap"      (\v o -> o { optHighOverlap    = v }) o4
-  o6 <- updD "low-overlap"       (\v o -> o { optLowOverlap     = v }) o5
-  pure o6
-  where
-    section = "silhouette"
-    updI k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Int)
-      pure $ maybe o (`f` o) mv
-    updD k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Double)
-      pure $ maybe o (`f` o) mv
+applyConfig obj o0 = applyFlagConfig "silhouette" flagSpecs obj o0
 
 --------------------------------------------------------------------------------
 -- Candidate selection + cluster types
@@ -271,12 +254,6 @@ summariseCluster opts cs members =
        , csTag            = tag
        , csPairCount      = nPairs
        }
-
--- | tails for a list, like Data.List.tails — duplicated here so we
--- avoid an extra import for a 3-line helper.
-tails :: [a] -> [[a]]
-tails []         = [[]]
-tails xs@(_:xs') = xs : tails xs'
 
 -- | Pick the dominant tag in a list. Counts each tag; on tie, prefer
 -- combinator > mixed > copy-paste. Empty list => 'TagMixed' (the

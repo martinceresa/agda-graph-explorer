@@ -22,15 +22,9 @@ module AgdaGoals.Config
   , ConfigTarget(..)
   ) where
 
-import           Control.Exception   ( IOException, catch )
-import           Data.Aeson          ( FromJSON(..), (.:?), withObject )
-import qualified Data.Yaml           as Y
-import           Data.List           ( isSuffixOf )
+import           Data.Aeson           ( FromJSON(..), (.:?), withObject )
 
-import           System.Directory    ( doesFileExist, getCurrentDirectory
-                                     , listDirectory )
-import           System.Environment  ( lookupEnv )
-import           System.FilePath     ( (</>), takeDirectory )
+import           AgdaGraph.ConfigCore ( DiscoverSpec(..), discoverWith, loadYamlConfig )
 
 ----------------------------------------------------------------------
 -- Config shape.
@@ -90,40 +84,13 @@ instance FromJSON Config where
 ----------------------------------------------------------------------
 -- Discovery.
 
+-- | Thin wrapper over "AgdaGraph.ConfigCore" with @agda-goals@' env
+-- var and base filenames.
 discoverConfigPath :: Maybe FilePath -> IO (Maybe FilePath)
-discoverConfigPath explicit = case explicit of
-  Just p  -> pure (Just p)
-  Nothing -> lookupEnv "AGDA_GOALS_CONFIG" >>= \case
-    Just p | not (null p) -> pure (Just p)
-    _ -> do
-      cwd <- getCurrentDirectory
-      tryDir cwd >>= \case
-        Just p  -> pure (Just p)
-        Nothing -> walkUp cwd
-  where
-    tryDir d = firstExisting
-      [ d </> ".agda-goals.yml"
-      , d </> ".agda-goals.yaml"
-      ]
-    walkUp d = do
-      hasLib <- dirHasAgdaLib d
-      if hasLib
-        then tryDir d
-        else let parent = takeDirectory d
-             in if parent == d
-                  then pure Nothing
-                  else walkUp parent
-    firstExisting []     = pure Nothing
-    firstExisting (p:ps) = do
-      ok <- doesFileExist p
-      if ok then pure (Just p) else firstExisting ps
-    dirHasAgdaLib d =
-      (any (".agda-lib" `isSuffixOf`) <$> listDirectory d)
-        `catch` \(_ :: IOException) -> pure False
+discoverConfigPath = discoverWith DiscoverSpec
+  { dsEnvVar    = "AGDA_GOALS_CONFIG"
+  , dsBaseNames = [ ".agda-goals.yml", ".agda-goals.yaml" ]
+  }
 
 loadConfig :: FilePath -> IO (Either String Config)
-loadConfig p = do
-  res <- Y.decodeFileEither p
-  pure $ case res of
-    Left err -> Left (Y.prettyPrintParseException err)
-    Right c  -> Right c
+loadConfig = loadYamlConfig

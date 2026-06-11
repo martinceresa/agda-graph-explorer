@@ -18,7 +18,10 @@
 module Main where
 
 import           Control.Monad        ( forM_, when )
-import           Data.List            ( foldl', isPrefixOf )
+import qualified Data.Aeson           as A
+import           Data.Aeson           ( (.=) )
+import qualified Data.ByteString.Lazy.Char8 as BLC
+import           Data.List            ( foldl', isPrefixOf, stripPrefix )
 import qualified Data.Text            as T
 import           System.Environment   ( getArgs )
 import           System.Exit          ( exitFailure, exitSuccess, exitWith
@@ -117,25 +120,21 @@ parseArgs seed = go seed
       | a == "-i" = case as of
           (v:as') -> go (o { optIncludes = optIncludes o ++ [v] }) as'
           []      -> Left "-i requires a value"
-      | Just v <- prefix "--include=" a =
+      | Just v <- stripPrefix "--include=" a =
           go (o { optIncludes = optIncludes o ++ [v] }) as
-      | Just v <- prefix "--agda-bin=" a =
+      | Just v <- stripPrefix "--agda-bin=" a =
           go (o { optAgdaBin = v }) as
-      | Just v <- prefix "--agda-arg=" a =
+      | Just v <- stripPrefix "--agda-arg=" a =
           go (o { optAgdaArgs = optAgdaArgs o ++ [v] }) as
-      | Just v <- prefix "--format=" a = case v of
+      | Just v <- stripPrefix "--format=" a = case v of
           "human" -> go (o { optFormat = OutHuman }) as
           "json"  -> go (o { optFormat = OutJson  }) as
           _       -> Left $ "unknown --format value: " ++ v
-      | Just v <- prefix "--top-n=" a = case reads v of
+      | Just v <- stripPrefix "--top-n=" a = case reads v of
           [(n, "")] -> go (o { optTopN = n }) as
           _         -> Left $ "--top-n expects an integer, got: " ++ v
       | "--" `isPrefixOf` a = Left $ "unrecognised flag: " ++ a
       | otherwise           = go (o { optRoots = optRoots o ++ [a] }) as
-
-    prefix p s
-      | take (length p) s == p = Just (drop (length p) s)
-      | otherwise              = Nothing
 
 -- | Strip @--config=PATH@ (or @--config PATH@) before main CLI
 -- parsing.
@@ -144,14 +143,11 @@ extractConfigFlag = go []
   where
     go acc []                 = (Nothing, reverse acc)
     go acc (a:rest)
-      | Just v <- stripPrefix' "--config=" a = (Just v, reverse acc ++ rest)
+      | Just v <- stripPrefix "--config=" a = (Just v, reverse acc ++ rest)
       | a == "--config" = case rest of
           (v:rest') -> (Just v, reverse acc ++ rest')
           []        -> (Nothing, reverse acc)
       | otherwise = go (a : acc) rest
-    stripPrefix' p s
-      | take (length p) s == p = Just (drop (length p) s)
-      | otherwise              = Nothing
 
 ----------------------------------------------------------------------
 -- Config glue.
@@ -320,47 +316,34 @@ formatError = \case
   NoGoalsReply            -> "agda emitted no AllGoalsWarnings reply"
 
 ----------------------------------------------------------------------
--- Minimal hand-rolled JSON output.
+-- JSON output.
 
+-- | Emit the bucket/error report as a JSON object with @buckets@ and
+-- @errors@ arrays. Keys and value shapes mirror the human renderer;
+-- encoded via aeson so string escaping (and the goal-type unicode) is
+-- correct by construction.
 renderJson :: [Bucket] -> [(FilePath, DriverError)] -> IO ()
-renderJson buckets errs = putStrLn $
-  "{\n  \"buckets\": [\n"
-    ++ commaJoin "\n" (map bucketJ buckets)
-    ++ "\n  ],\n  \"errors\": [\n"
-    ++ commaJoin "\n" (map errJ errs)
-    ++ "\n  ]\n}"
+renderJson buckets errs = BLC.putStrLn $ A.encode $ A.object
+  [ "buckets" .= map bucketJ buckets
+  , "errors"  .= map errJ errs
+  ]
   where
-    bucketJ b =
-      "    { \"hash\": "       ++ show (bucketHash b)
-        ++ ", \"size\": "       ++ show (bucketSize b)
-        ++ ", \"canonical\": "  ++ jstring (T.unpack (unCanonical (bucketCanonical b)))
-        ++ ", \"centroid\": "   ++ jstring (case bucketOccurrences b of
-                                               (o:_) -> T.unpack (occRawType o)
-                                               []    -> "")
-        ++ ", \"occurrences\": [" ++ commaJoin "" (map occJ (bucketOccurrences b)) ++ "] }"
-    occJ o =
-      "{ \"module\": " ++ jstring (T.unpack (occModule o))
-        ++ ", \"line\": " ++ maybe "null" show (occLine o)
-        ++ ", \"raw\": "  ++ jstring (T.unpack (occRawType o))
-        ++ " }"
-    errJ (f, e) =
-      "    { \"file\": " ++ jstring f
-        ++ ", \"tag\": " ++ jstring (driverErrorTag e)
-        ++ ", \"detail\": " ++ jstring (formatError e)
-        ++ " }"
-    commaJoin _   []     = ""
-    commaJoin _   [x]    = x
-    commaJoin sep (x:xs) = x ++ "," ++ sep ++ commaJoin sep xs
-
--- | Conservative JSON string encoding. ASCII-only escaping; relies
--- on UTF-8 passthrough for the goal-type unicode (Agda emits
--- @→@, @⊥@, etc. directly).
-jstring :: String -> String
-jstring s = '"' : concatMap esc s ++ "\""
-  where
-    esc '"'  = "\\\""
-    esc '\\' = "\\\\"
-    esc '\n' = "\\n"
-    esc '\r' = "\\r"
-    esc '\t' = "\\t"
-    esc c    = [c]
+    bucketJ b = A.object
+      [ "hash"        .= bucketHash b
+      , "size"        .= bucketSize b
+      , "canonical"   .= unCanonical (bucketCanonical b)
+      , "centroid"    .= case bucketOccurrences b of
+                            (o:_) -> occRawType o
+                            []    -> T.empty
+      , "occurrences" .= map occJ (bucketOccurrences b)
+      ]
+    occJ o = A.object
+      [ "module" .= occModule o
+      , "line"   .= occLine o
+      , "raw"    .= occRawType o
+      ]
+    errJ (f, e) = A.object
+      [ "file"   .= f
+      , "tag"    .= driverErrorTag e
+      , "detail" .= formatError e
+      ]

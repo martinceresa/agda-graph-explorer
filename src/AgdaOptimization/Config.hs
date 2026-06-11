@@ -48,11 +48,8 @@ import qualified Data.ByteString         as BS
 import           Data.Text               ( Text )
 import qualified Data.Text               as T
 import qualified Data.Yaml               as Y
-import           System.Directory        ( doesDirectoryExist, doesFileExist
-                                         , getCurrentDirectory, listDirectory )
-import           System.Environment      ( lookupEnv )
-import           System.FilePath         ( takeDirectory, takeExtension, (</>) )
 
+import           AgdaGraph.ConfigCore    ( DiscoverSpec(..), discoverWith )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..) )
 
 ----------------------------------------------------------------------
@@ -79,54 +76,12 @@ data Config = Config
 -- order. The optional 'Just p' argument is the @--config=PATH@ value;
 -- when supplied we honour it verbatim — a missing file at that path is
 -- a hard error reported by 'loadConfig', not by the discovery layer.
+-- A thin wrapper over "AgdaGraph.ConfigCore".
 discoverConfigPath :: Maybe FilePath -> IO (Maybe FilePath)
-discoverConfigPath (Just p) = pure (Just p)
-discoverConfigPath Nothing  = do
-  envOnly <- lookupEnv "AGDA_OPTIMIZATION_CONFIG"
-  case envOnly of
-    Just p | not (null p) -> pure (Just p)
-    _ -> do
-      cwd <- getCurrentDirectory
-      mLocal <- firstExisting [cwd </> ".agda-optimization.yml"
-                              , cwd </> ".agda-optimization.yaml"]
-      case mLocal of
-        Just p  -> pure (Just p)
-        Nothing -> findAtAgdaLib cwd
-
--- | Walk up from 'startDir' looking for a directory that contains a
--- @*.agda-lib@ file; once found, look for the config there.
-findAtAgdaLib :: FilePath -> IO (Maybe FilePath)
-findAtAgdaLib startDir = loop startDir
-  where
-    loop dir = do
-      hasLib <- hasAgdaLib dir
-      if hasLib
-        then firstExisting [dir </> ".agda-optimization.yml"
-                           , dir </> ".agda-optimization.yaml"]
-        else do
-          let parent = takeDirectory dir
-          if parent == dir
-            then pure Nothing
-            else loop parent
-
--- | 'True' iff @dir@ exists and contains at least one @*.agda-lib@ entry.
-hasAgdaLib :: FilePath -> IO Bool
-hasAgdaLib dir = do
-  exists <- doesDirectoryExist dir
-  if not exists
-    then pure False
-    else do
-      entries <- try (listDirectory dir) :: IO (Either IOException [FilePath])
-      case entries of
-        Left _   -> pure False
-        Right es -> pure (any ((== ".agda-lib") . takeExtension) es)
-
--- | Return the first path in the list that exists as a regular file.
-firstExisting :: [FilePath] -> IO (Maybe FilePath)
-firstExisting []     = pure Nothing
-firstExisting (p:ps) = do
-  ok <- doesFileExist p
-  if ok then pure (Just p) else firstExisting ps
+discoverConfigPath = discoverWith DiscoverSpec
+  { dsEnvVar    = "AGDA_OPTIMIZATION_CONFIG"
+  , dsBaseNames = [ ".agda-optimization.yml", ".agda-optimization.yaml" ]
+  }
 
 ----------------------------------------------------------------------
 -- Load

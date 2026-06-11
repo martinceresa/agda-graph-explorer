@@ -21,6 +21,7 @@
 module AgdaOptimization.Polyglot
   ( Options(..)
   , defaultOptions
+  , flagSpecs
   , parseOptions
   , applyConfig
   , run
@@ -48,8 +49,8 @@ import           Data.Aeson           ( (.=) )
 import           AgdaGraph.Index      ( Index(..), ancestors, defAt )
 import           AgdaGraph.Schema     ( Definition(..) )
 
-import           AgdaOptimization.CLIParse ( splitFlag, valueFor, readInt, readDbl )
-import           AgdaOptimization.Config ( lookupKey )
+import           AgdaOptimization.FlagSpec ( FlagSpec(..)
+                                           , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , renderTable, emitJsonReport
                                          , withHumanOutput )
@@ -82,45 +83,27 @@ defaultOptions = Options
 lowQThreshold :: Double
 lowQThreshold = 0.1
 
+-- | Declarative flag spec for the @polyglot@ subcommand. Drives both
+-- 'parseOptions' and 'applyConfig'. Each help line is verbatim from
+-- 'AgdaOptimization.CLI.subFlags'.
+flagSpecs :: [FlagSpec Options]
+flagSpecs =
+  [ IntFlag "min-uses" "--min-uses=N    minimum consumer count to consider (default 2)"
+      (\n o -> o { optMinUses = n })
+  , DblFlag "threshold" "--threshold=F   entropy threshold (default 1.5)"
+      (\x o -> o { optDiversityThreshold = x })
+  , IntFlag "top-n" "--top-n=N       rows to keep (default 50)"
+      (\n o -> o { optTopN = n })
+  ]
+
 -- | Hand-rolled CLI parser for the @polyglot@ subcommand. See
 -- 'AgdaOptimization.Motif.parseOptions' for the dispatch shape.
 parseOptions :: Options -> [String] -> Either String Options
-parseOptions = go
-  where
-    sub = "polyglot"
-    intK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      n <- readInt sub k v
-      go (upd o n) rest
-    dblK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      x <- readDbl sub k v
-      go (upd o x) rest
-
-    go :: Options -> [String] -> Either String Options
-    go !o []     = Right o
-    go !o (a:as) = case splitFlag a of
-      Left err                       -> Left (sub <> ": " <> err)
-      Right ("--min-uses",  mv)      -> intK "--min-uses"  (\o' n -> o' { optMinUses            = n }) mv as o
-      Right ("--threshold", mv)      -> dblK "--threshold" (\o' x -> o' { optDiversityThreshold = x }) mv as o
-      Right ("--top-n",     mv)      -> intK "--top-n"     (\o' n -> o' { optTopN               = n }) mv as o
-      Right (k, _)                   -> Left (sub <> ": unknown flag: " <> k)
+parseOptions = parseFlags "polyglot" flagSpecs
 
 -- | Overlay the @polyglot:@ YAML section onto a seed 'Options'.
 applyConfig :: A.Object -> Options -> Either String Options
-applyConfig obj o0 = do
-  o1 <- updI "min-uses"  (\v o -> o { optMinUses            = v }) o0
-  o2 <- updD "threshold" (\v o -> o { optDiversityThreshold = v }) o1
-  o3 <- updI "top-n"     (\v o -> o { optTopN               = v }) o2
-  pure o3
-  where
-    section = "polyglot"
-    updI k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Int)
-      pure $ maybe o (`f` o) mv
-    updD k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Double)
-      pure $ maybe o (`f` o) mv
+applyConfig obj o0 = applyFlagConfig "polyglot" flagSpecs obj o0
 
 -- ---------------------------------------------------------------------------
 -- Public entry

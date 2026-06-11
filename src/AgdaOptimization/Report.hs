@@ -15,6 +15,8 @@ module AgdaOptimization.Report
   , defaultGlobalOpts
     -- * Tables
   , renderTable
+    -- * Formatting
+  , showD3
     -- * JSON output
   , writeJsonReport
   , emitJsonReport
@@ -62,6 +64,20 @@ renderTable header rows =
       padCell w s = s ++ replicate (w - length s) ' '
       renderRow r = unwords (zipWith padCell widths (pad (length header) r))
   in unlines (map renderRow allRows)
+
+-- | Format a 'Double' to exactly three decimal places without pulling
+-- in a @printf@ dependency. Negative values keep their sign; the
+-- integer part is never truncated. Shared by the analyses that emit
+-- fixed-precision score columns (basket, concept-bundle, entwine,
+-- fiedler) so they agree by construction.
+showD3 :: Double -> String
+showD3 d =
+  let n  = round (d * 1000) :: Integer
+      s  = show (abs n)
+      sn = if n < 0 then "-" else ""
+      padded = replicate (max 0 (4 - length s)) '0' ++ s
+      (intPart, fracPart) = splitAt (length padded - 3) padded
+  in sn ++ intPart ++ "." ++ fracPart
 
 -- | Pretty-print a JSON value to a file. Uses 'A.encode' (compact);
 -- consumers can pipe through 'jq' if they want indentation.

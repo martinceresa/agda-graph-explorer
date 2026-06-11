@@ -20,7 +20,11 @@ import           Control.Concurrent      ( getNumCapabilities )
 import           Control.Concurrent.Async ( mapConcurrently )
 import           Control.Exception ( IOException, catch )
 import           Control.Monad     ( foldM, when )
-import           Data.List         ( intercalate, isPrefixOf, isSuffixOf, sortOn )
+import qualified Data.Aeson           as A
+import           Data.Aeson           ( (.=) )
+import qualified Data.ByteString.Lazy.Char8 as BLC
+import           Data.List         ( intercalate, isPrefixOf, isSuffixOf, sortOn
+                                   , stripPrefix )
 import qualified Data.Text         as T
 import qualified Data.Text.IO      as TIO
 
@@ -33,6 +37,7 @@ import           System.IO ( hPutStrLn, stderr )
 import           AgdaUnused.Analysis
 import           AgdaUnused.Config   ( ConfigTarget(..)
                                      , applyConfig, discoverConfigPath, loadConfig
+                                     , parseKindsToken
                                      )
 import           AgdaUnused.Json     ( loadExpandedGraph )
 
@@ -113,10 +118,10 @@ parseArgs seed = go ParseState { psOpts = seed, psCliRoots = [], psHadRoots = Fa
           else o
     go !st []      = finish st
     go !st (a:rest)
-      | Just v <- prefix "--json="    a = go st { psOpts = (psOpts st) { optJsonPath = v } } rest
-      | Just v <- prefix "--rel-to="  a = go st { psOpts = (psOpts st) { optRelTo    = Just v } } rest
-      | Just v <- prefix "--exclude=" a = go st { psOpts = (psOpts st) { optExclude  = optExclude (psOpts st) ++ [v] } } rest
-      | Just v <- prefix "--kinds="   a = case parseKinds v of
+      | Just v <- stripPrefix "--json="    a = go st { psOpts = (psOpts st) { optJsonPath = v } } rest
+      | Just v <- stripPrefix "--rel-to="  a = go st { psOpts = (psOpts st) { optRelTo    = Just v } } rest
+      | Just v <- stripPrefix "--exclude=" a = go st { psOpts = (psOpts st) { optExclude  = optExclude (psOpts st) ++ [v] } } rest
+      | Just v <- stripPrefix "--kinds="   a = case parseKinds v of
           Left e   -> Left e
           Right ks -> go st { psOpts = (psOpts st) { optKinds = ks } } rest
       | a == "--json-out" = go st { psOpts = (psOpts st) { optFormat = OutJson } } rest
@@ -127,30 +132,12 @@ parseArgs seed = go ParseState { psOpts = seed, psCliRoots = [], psHadRoots = Fa
           , psHadRoots = True
           } rest
 
-    prefix p s
-      | take (length p) s == p = Just (drop (length p) s)
-      | otherwise              = Nothing
-
 parseKinds :: String -> Either String [FindingKind]
-parseKinds = fmap concat . mapM one . splitComma
+parseKinds = fmap concat . mapM parseKindsToken . splitComma
   where
     splitComma s = case break (== ',') s of
       (a, "")     -> [a]
       (a, _:rest) -> a : splitComma rest
-
-    one "using"         = Right [UnusedInUsing]
-    one "blanket"       = Right [UnusedBlanketOpen]
-    one "defined"       = Right [DefinedDead, DefinedInternalOnly]
-    one "dead"          = Right [DefinedDead]
-    one "internal-only" = Right [DefinedInternalOnly]
-    one "public"        = Right [PublicWithoutDownstream]
-    one "duplicate"     = Right [DuplicateUsingForModule]
-    one "all"           = Right
-      [ UnusedInUsing, UnusedBlanketOpen
-      , DefinedDead, DefinedInternalOnly
-      , PublicWithoutDownstream, DuplicateUsingForModule
-      ]
-    one s           = Left $ "unknown kind: " ++ s
 
 -- ** Source-file discovery
 
@@ -260,7 +247,7 @@ main = do
         putStrLn $ "# excluded: " ++ intercalate ", " (optExclude opts)
                      ++ " (" ++ show suppressed ++ " suppressed)"
     OutJson ->
-      putStrLn (toJson opts sorted)
+      BLC.putStrLn (A.encode (toJson opts sorted))
 
 -- | Take 'renderFindingLine's absolute-path output and rewrite the
 -- file prefix to the user's preferred relative form. The renderer
@@ -269,14 +256,9 @@ formatLine :: Options -> Finding -> String
 formatLine opts f =
   let raw   = renderFindingLine f
       shown = displayPath (optRelTo opts) (fileFinding f)
-  in case stripPrefix' (fileFinding f) raw of
+  in case stripPrefix (fileFinding f) raw of
        Just rest -> shown ++ rest
        Nothing   -> raw
-
-stripPrefix' :: String -> String -> Maybe String
-stripPrefix' p s
-  | p `isPrefixOf` s = Just (drop (length p) s)
-  | otherwise        = Nothing
 
 chunksOf :: Int -> [a] -> [[a]]
 chunksOf n xs
@@ -327,10 +309,6 @@ extractConfigFlag = go []
           []        -> (Nothing, reverse acc)  -- malformed; let parseArgs error later
       | otherwise = go (a : acc) rest
 
-    stripPrefix p s
-      | take (length p) s == p = Just (drop (length p) s)
-      | otherwise              = Nothing
-
 -- | Setters that let 'AgdaUnused.Config.applyConfig' touch our
 -- internal 'Options' record without importing it.
 configTarget :: ConfigTarget Options
@@ -343,33 +321,27 @@ configTarget = ConfigTarget
   , ctSetExclude = \v o -> o { optExclude  = v }
   }
 
--- ** Minimal JSON-out
+-- ** JSON-out
 
-toJson :: Options -> [Finding] -> String
-toJson opts fs =
-  "[\n  " ++ commaJoin (map (one opts) fs) ++ "\n]"
+-- | A JSON array of findings, one object per finding. Keys mirror the
+-- plain-text columns: @file@ (path, optionally relativised via
+-- @--rel-to@), @line@, @module@, @symbol@ (or @null@), @kind@.
+-- Built via aeson so string escaping is correct by construction.
+toJson :: Options -> [Finding] -> A.Value
+toJson opts fs = A.toJSON (map (one opts) fs)
   where
-    one o f =
-      "{ \"file\": \""     ++ esc (displayPath (optRelTo o) (fileFinding f))
-      ++ "\", \"line\": "    ++ show (lineFinding f)
-      ++ ", \"module\": \""  ++ esc (T.unpack (moduleFinding f))
-      ++ "\", \"symbol\": "  ++ maybe "null" (\s -> "\"" ++ esc (T.unpack s) ++ "\"") (symbolFinding f)
-      ++ ", \"kind\": \""    ++ kindTag (kindFinding f)
-      ++ "\" }"
+    one o f = A.object
+      [ "file"   .= displayPath (optRelTo o) (fileFinding f)
+      , "line"   .= lineFinding f
+      , "module" .= moduleFinding f
+      , "symbol" .= symbolFinding f
+      , "kind"   .= kindTag (kindFinding f)
+      ]
 
+    kindTag :: FindingKind -> T.Text
     kindTag UnusedInUsing           = "unused-in-using"
     kindTag UnusedBlanketOpen       = "unused-blanket-open"
     kindTag DefinedDead             = "defined-dead"
     kindTag DefinedInternalOnly     = "defined-internal-only"
     kindTag DuplicateUsingForModule = "duplicate-using"
     kindTag PublicWithoutDownstream = "public-no-downstream"
-
-    esc = concatMap escChar
-    escChar '"'  = "\\\""
-    escChar '\\' = "\\\\"
-    escChar '\n' = "\\n"
-    escChar c    = [c]
-
-    commaJoin []     = ""
-    commaJoin [x]    = x
-    commaJoin (x:xs) = x ++ ",\n  " ++ commaJoin xs

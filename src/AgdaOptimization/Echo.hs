@@ -34,6 +34,7 @@
 module AgdaOptimization.Echo
   ( Options(..)
   , defaultOptions
+  , flagSpecs
   , parseOptions
   , applyConfig
   , run
@@ -59,9 +60,11 @@ import           AgdaGraph.Index      ( Index(..), defAt, descendants, ancestors
 import           AgdaGraph.Schema     ( Definition(..), Kind(..) )
 import           Data.Text            ( Text )
 
-import           AgdaOptimization.CLIParse ( splitFlag, valueFor, readInt, readDbl )
-import           AgdaOptimization.Config ( lookupKey )
-import           AgdaOptimization.UnionFind ( UF, emptyUF, ufClusters, ufFind, ufInsert, ufUnion )
+import           AgdaOptimization.FlagSpec ( FlagSpec(..), SwitchVal(..)
+                                           , parseFlags, applyFlagConfig )
+import           AgdaOptimization.UnionFind ( UF, ufFind )
+import           AgdaOptimization.Cluster ( SimEdge, bfsBoundedLayers, seededUF
+                                          , clustersOfSize2, clusterAvgSim )
 import           AgdaGraph.WL         ( ColorVec, Fingerprint, fingerprintAt
                                       , initialColors, refine, weightedJaccard )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
@@ -109,61 +112,41 @@ defaultOptions = Options
   , optMaxClusterSpread = 0.3
   }
 
+-- | Declarative flag spec for the @echo@ subcommand. Drives both the
+-- argv parser ('parseOptions') and the YAML overlay ('applyConfig'), and
+-- is the single source of truth the help-derivation stage reads. Each
+-- help line is verbatim from 'AgdaOptimization.CLI.subFlags'.
+--
+-- @--delta-only@ is a 'SwitchRejectValue' switch: an attached @=value@
+-- is a hard error @echo: --delta-only does not take a value@; its YAML
+-- key is @delta-only@.
+flagSpecs :: [FlagSpec Options]
+flagSpecs =
+  [ IntFlag "wl-k" "--wl-k=N                  WL refinement depth (default 2)"
+      (\n o -> o { optWlK = n })
+  , DblFlag "jaccard" "--jaccard=F               weighted-Jaccard threshold (default 0.8)"
+      (\x o -> o { optJaccardThreshold = x })
+  , IntFlag "min-size" "--min-size=N              min candidate subtree size (default 3)"
+      (\n o -> o { optMinSize = n })
+  , IntFlag "wl-depth" "--wl-depth=N              per-candidate subtree hop bound; 0 = unbounded (default)"
+      (\n o -> o { optWlDepth = n })
+  , SwitchFlag "delta-only" "--delta-only              show only reverse clusters with forward-spread > 1"
+      SwitchRejectValue (\o -> o { optDeltaOnly = True })
+      (Just "delta-only") (\v o -> o { optDeltaOnly = v })
+  , DblFlag "max-cluster-spread" "--max-cluster-spread=F    reject clusters with spread/size below this (default 0.3, 0 disables)"
+      (\x o -> o { optMaxClusterSpread = x })
+  , IntFlag "top-n" "--top-n=N                 rows to keep (default 50)"
+      (\n o -> o { optTopN = n })
+  ]
+
 -- | Hand-rolled CLI parser. Same shape as
 -- 'AgdaOptimization.Fingerprint.parseOptions'.
 parseOptions :: Options -> [String] -> Either String Options
-parseOptions = go
-  where
-    sub = "echo"
-    intK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      n <- readInt sub k v
-      go (upd o n) rest
-    dblK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      x <- readDbl sub k v
-      go (upd o x) rest
-
-    go :: Options -> [String] -> Either String Options
-    go !o []     = Right o
-    go !o (a:as) = case splitFlag a of
-      Left err                     -> Left (sub <> ": " <> err)
-      Right ("--jaccard",   mv)    -> dblK "--jaccard"   (\o' x -> o' { optJaccardThreshold = x }) mv as o
-      Right ("--min-size",  mv)    -> intK "--min-size"  (\o' n -> o' { optMinSize          = n }) mv as o
-      Right ("--wl-k",      mv)    -> intK "--wl-k"      (\o' n -> o' { optWlK              = n }) mv as o
-      Right ("--wl-depth",  mv)    -> intK "--wl-depth"  (\o' n -> o' { optWlDepth          = n }) mv as o
-      Right ("--top-n",     mv)    -> intK "--top-n"     (\o' n -> o' { optTopN             = n }) mv as o
-      Right ("--max-cluster-spread", mv)
-                                   -> dblK "--max-cluster-spread"
-                                          (\o' x -> o' { optMaxClusterSpread = x }) mv as o
-      Right ("--delta-only", Nothing) ->
-        go (o { optDeltaOnly = True }) as
-      Right ("--delta-only", Just _)  ->
-        Left (sub <> ": --delta-only does not take a value")
-      Right (k, _)                 -> Left (sub <> ": unknown flag: " <> k)
+parseOptions = parseFlags "echo" flagSpecs
 
 -- | Overlay the @echo:@ YAML section onto a seed 'Options'.
 applyConfig :: A.Object -> Options -> Either String Options
-applyConfig obj o0 = do
-  o1 <- updD "jaccard"             (\v o -> o { optJaccardThreshold = v }) o0
-  o2 <- updI "min-size"            (\v o -> o { optMinSize          = v }) o1
-  o3 <- updI "wl-k"                (\v o -> o { optWlK              = v }) o2
-  o4 <- updI "wl-depth"            (\v o -> o { optWlDepth          = v }) o3
-  o5 <- updB "delta-only"          (\v o -> o { optDeltaOnly        = v }) o4
-  o6 <- updI "top-n"               (\v o -> o { optTopN             = v }) o5
-  o7 <- updD "max-cluster-spread"  (\v o -> o { optMaxClusterSpread = v }) o6
-  pure o7
-  where
-    section = "echo"
-    updI k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Int)
-      pure $ maybe o (`f` o) mv
-    updD k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Double)
-      pure $ maybe o (`f` o) mv
-    updB k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Bool)
-      pure $ maybe o (`f` o) mv
+applyConfig obj o0 = applyFlagConfig "echo" flagSpecs obj o0
 
 --------------------------------------------------------------------------------
 -- WL adjacency (hashing, tags, refinement, fingerprints and union-find now
@@ -185,25 +168,14 @@ neighboursOf :: Index -> Dir -> Int -> IS.IntSet
 neighboursOf ix dir i = IM.findWithDefault IS.empty i (dirAdj ix dir)
 
 -- | Rooted subtree under @dir@. @maxDepth <= 0@ uses the unbounded
--- closure; otherwise BFS by layers.
+-- closure (the library 'descendants' / 'ancestors'); otherwise BFS by
+-- layers (the shared 'bfsBoundedLayers').
 rootedSubtree :: Index -> Dir -> Int -> Int -> IS.IntSet
 rootedSubtree ix dir maxDepth root
   | maxDepth <= 0 = case dir of
       DForward -> IS.insert root (descendants ix (IS.singleton root))
       DReverse -> IS.insert root (ancestors   ix (IS.singleton root))
-  | otherwise = bfsBounded
-  where
-    nbrs = neighboursOf ix dir
-    bfsBounded =
-      let step !d !seen !frontier
-            | d <= 0 || IS.null frontier = seen
-            | otherwise =
-                let !nextRaw   = IS.foldl' (\acc x -> IS.union acc (nbrs x))
-                                            IS.empty frontier
-                    !nextLayer = IS.difference nextRaw seen
-                    !seen'     = IS.union seen nextLayer
-                in step (d - 1) seen' nextLayer
-      in step maxDepth (IS.singleton root) (IS.singleton root)
+  | otherwise = bfsBoundedLayers (neighboursOf ix dir) maxDepth root
 
 -- (WL refinement, fingerprints and union-find moved to
 -- "AgdaGraph.WL" / "AgdaOptimization.UnionFind".)
@@ -253,9 +225,6 @@ candidates ix revColors fwdColors Options{..} =
 -- Pair scoring
 --------------------------------------------------------------------------------
 
--- | An edge of the similarity graph in candidate-index space.
-type SimEdge = (Int, Int, Double)
-
 -- | Score all O(N^2 / 2) pairs against the supplied fingerprint
 -- selector. Parallelised per row via 'parMap rdeepseq', preserving the
 -- iteration order of the sequential build for determinism.
@@ -280,43 +249,10 @@ scorePairs thr getFp cs =
       chunks = parMap rdeepseq perI [0 .. n - 1]
   in concatMap id (reverse chunks)
 
--- | Union-find clusterisation. Seeds singletons so we can look up every
--- candidate's representative even if it has no edges.
-buildClusters :: Int -> [SimEdge] -> UF
-buildClusters n edges =
-  let seeded = foldl' (flip ufInsert) emptyUF [0 .. n - 1]
-  in foldl' (\uf (a, b, _) -> ufUnion a b uf) seeded edges
-
 -- | Per-candidate forward-cluster id. Two candidates share a cluster id
 -- iff the union-find puts them in the same component.
 fwdClusterIds :: Int -> UF -> V.Vector Int
 fwdClusterIds n uf = V.generate n $ \i -> ufFind i uf
-
--- | Reverse clusters of size >= 2 from the supplied union-find.
-revClusters :: Int -> UF -> [[Int]]
-revClusters _ uf =
-  [ ks | ks <- ufClusters uf, length ks >= 2 ]
-
--- | Average pairwise similarity within a reverse cluster — analogous to
--- 'AgdaOptimization.Fingerprint.clusterAvgSim'. Missing pairs count as
--- the threshold (lower bound).
-clusterAvgSim :: Double -> [SimEdge] -> [Int] -> Double
-clusterAvgSim thr edges members =
-  let memberSet = IS.fromList members
-      contrib (a, b, s)
-        | IS.member a memberSet && IS.member b memberSet = Just s
-        | otherwise                                      = Nothing
-      sims   = [ s | Just s <- map contrib edges ]
-      nMems  = length members
-      nPairs = nMems * (nMems - 1) `div` 2
-  in case (sims, nPairs) of
-       ([], _)   -> thr
-       (_,  0)   -> thr
-       (xs, np)  ->
-         let !sumKnown   = sum xs
-             !missing    = np - length xs
-             !sumMissing = fromIntegral missing * thr
-         in (sumKnown + sumMissing) / fromIntegral np
 
 --------------------------------------------------------------------------------
 -- Delta computation
@@ -351,21 +287,22 @@ run ix gOpts opts@Options{..} = do
       !revEdges = scorePairs optJaccardThreshold cRevFp candVec
       !fwdEdges = scorePairs optJaccardThreshold cFwdFp candVec
 
-      -- Union-finds for both directions.
-      !revUF    = buildClusters nCand revEdges
-      !fwdUF    = buildClusters nCand fwdEdges
+      -- Forward union-find (the reverse-cluster grouping goes straight
+      -- through the shared 'clustersOfSize2'; the forward one we keep as
+      -- a 'UF' for the per-candidate cluster-id lookup below).
+      !fwdUF    = seededUF nCand fwdEdges
 
       -- Forward cluster id per candidate (a single Int).
       !fwdIds   = fwdClusterIds nCand fwdUF
 
       -- Reverse clusters of size >= 2.
-      !revCs    = revClusters nCand revUF
+      !revCs    = clustersOfSize2 nCand revEdges
 
       -- Annotate each reverse cluster with its forward spread.
       !annot    = [ (members, forwardSpread fwdIds members) | members <- revCs ]
 
       -- Count distinct forward clusters (size >= 2) just for stats.
-      !nFwdClus = length (revClusters nCand fwdUF)
+      !nFwdClus = length (clustersOfSize2 nCand fwdEdges)
       !nRevClus = length revCs
       !nDelta   = length [ () | (_, s) <- annot, s > 1 ]
 

@@ -37,6 +37,7 @@ module AgdaOptimization.Ledger
   ( Options(..)
   , AxiomSource(..)
   , defaultOptions
+  , flagSpecs
   , parseOptions
   , applyConfig
   , run
@@ -48,9 +49,10 @@ import           Control.Parallel.Strategies ( parMap, rdeepseq )
 import           Data.Foldable        ( foldl' )
 import qualified Data.IntMap.Strict   as IM
 import qualified Data.IntSet          as IS
-import           Data.List            ( sortBy )
+import           Data.List            ( intercalate, sortBy )
 import qualified Data.Map.Strict      as Map
-import           Data.Ord             ( Down(..), comparing )
+import           Data.Maybe           ( catMaybes )
+import           Data.Ord             ( comparing )
 import           Data.Text            ( Text )
 import qualified Data.Text            as T
 import qualified Data.Vector          as V
@@ -64,9 +66,9 @@ import           AgdaGraph.Schema     ( Access(..), Definition(..)
                                       , ExternalsSummary(..), Kind(..)
                                       , State(..) )
 
-import           AgdaOptimization.CLIParse ( splitFlag, valueFor, readInt )
 import           AgdaOptimization.Common ( isFoundationalModule )
-import           AgdaOptimization.Config ( lookupKey, lookupKeyEnum, lookupKeyTextList )
+import           AgdaOptimization.FlagSpec ( FlagSpec(..), SwitchVal(..), EnumErr(..)
+                                           , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , renderTable, emitJsonReport
                                          , withHumanOutput )
@@ -133,52 +135,43 @@ parseAxiomSource v = case v of
   "both"         -> Right AsBoth
   _ -> Left ("expected one of postulate|record-field|both, got " <> show v)
 
+-- | Declarative flag spec for the @ledger@ subcommand. Drives both the
+-- argv parser ('parseOptions') and the YAML overlay ('applyConfig'), and
+-- is the single source of truth the help-derivation stage reads. Each
+-- help line is verbatim from 'AgdaOptimization.CLI.subFlags'.
+--
+-- @--no-foundational@ is a 'SwitchPreGuard' switch (matched against the
+-- raw token before 'splitFlag'); its YAML key is @foundational@.
+-- @--axiom-source@ is an 'EnumWrapped' enum (a rejected token is wrapped
+-- @ledger: --axiom-source: …@). The two repeatable list flags append on
+-- the argv side and /replace/ on the config side; CLI repetitions of
+-- each still append, so the final list is (config's list) ++ (CLI
+-- repetitions).
+flagSpecs :: [FlagSpec Options]
+flagSpecs =
+  [ IntFlag "top-n" "--top-n=N                          theorem rows (default 50)"
+      (\n o -> o { optTopN = n })
+  , IntFlag "min-axioms" "--min-axioms=N                     only show theorems with >= N axioms (default 0)"
+      (\n o -> o { optMinAxioms = n })
+  , IntFlag "cohort-min-size" "--cohort-min-size=N                only show cohorts with >= N members (default 2)"
+      (\n o -> o { optCohortMinSize = n })
+  , SwitchFlag "no-foundational" "--no-foundational                  suppress foundational tail section"
+      SwitchPreGuard (\o -> o { optIncludeFoundational = False })
+      (Just "foundational") (\v o -> o { optIncludeFoundational = v })
+  , EnumFlag "axiom-source" "--axiom-source=postulate|record-field|both  what counts as an axiom (default postulate)"
+      parseAxiomSource EnumWrapped (\v o -> o { optAxiomSource = v })
+  , TextListFlag "axiom-module-prefix" "--axiom-module-prefix=PREFIX       repeatable; record-field-axiom module scope"
+      (\tv o -> o { optAxiomModulePrefixes = optAxiomModulePrefixes o ++ [tv] })
+      (\v o -> o { optAxiomModulePrefixes = v })
+  , TextListFlag "theorem-prefix" "--theorem-prefix=PREFIX            repeatable; theorem-set scope (else project-only via externals_summary)"
+      (\tv o -> o { optTheoremPrefixes = optTheoremPrefixes o ++ [tv] })
+      (\v o -> o { optTheoremPrefixes = v })
+  ]
+
 -- | Hand-rolled CLI parser. Mirrors the dispatch shape of
 -- 'AgdaOptimization.Debt.parseOptions'.
 parseOptions :: Options -> [String] -> Either String Options
-parseOptions = go
-  where
-    sub = "ledger"
-    intK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      n <- readInt sub k v
-      go (upd o n) rest
-
-    -- A flag whose value is a 'Text'; appends to a list accumulator.
-    appendTextK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      go (upd o (T.pack v)) rest
-
-    go :: Options -> [String] -> Either String Options
-    go !o []     = Right o
-    go !o (a:as)
-      | a == "--no-foundational" =
-          go o { optIncludeFoundational = False } as
-      | otherwise = case splitFlag a of
-          Left err -> Left (sub <> ": " <> err)
-          Right ("--top-n", mv) ->
-            intK "--top-n"          (\o' n -> o' { optTopN          = n }) mv as o
-          Right ("--min-axioms", mv) ->
-            intK "--min-axioms"     (\o' n -> o' { optMinAxioms     = n }) mv as o
-          Right ("--cohort-min-size", mv) ->
-            intK "--cohort-min-size"(\o' n -> o' { optCohortMinSize = n }) mv as o
-          Right ("--axiom-source", mv) -> do
-            (v, rest) <- valueFor sub "--axiom-source" mv as
-            src <- case parseAxiomSource v of
-              Right s -> Right s
-              Left e  -> Left (sub <> ": --axiom-source: " <> e)
-            go o { optAxiomSource = src } rest
-          Right ("--axiom-module-prefix", mv) ->
-            appendTextK "--axiom-module-prefix"
-                        (\o' tv -> o' { optAxiomModulePrefixes =
-                                          optAxiomModulePrefixes o' ++ [tv] })
-                        mv as o
-          Right ("--theorem-prefix", mv) ->
-            appendTextK "--theorem-prefix"
-                        (\o' tv -> o' { optTheoremPrefixes =
-                                          optTheoremPrefixes o' ++ [tv] })
-                        mv as o
-          Right (k, _) -> Left (sub <> ": unknown flag: " <> k)
+parseOptions = parseFlags "ledger" flagSpecs
 
 -- | Overlay the @ledger:@ YAML section onto a seed 'Options'.
 --
@@ -188,32 +181,7 @@ parseOptions = go
 -- the corresponding flag still append, so the final list is
 -- (config's list) ++ (CLI repetitions).
 applyConfig :: A.Object -> Options -> Either String Options
-applyConfig obj o0 = do
-  o1 <- updI    "top-n"            (\v o -> o { optTopN                = v }) o0
-  o2 <- updI    "min-axioms"       (\v o -> o { optMinAxioms           = v }) o1
-  o3 <- updI    "cohort-min-size"  (\v o -> o { optCohortMinSize       = v }) o2
-  o4 <- updB    "foundational"     (\v o -> o { optIncludeFoundational = v }) o3
-  o5 <- updEnum "axiom-source"     parseAxiomSource
-                                   (\v o -> o { optAxiomSource         = v }) o4
-  o6 <- updTextList "axiom-module-prefix"
-                                   (\v o -> o { optAxiomModulePrefixes = v }) o5
-  o7 <- updTextList "theorem-prefix"
-                                   (\v o -> o { optTheoremPrefixes     = v }) o6
-  pure o7
-  where
-    section = "ledger"
-    updI k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Int)
-      pure $ maybe o (`f` o) mv
-    updB k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Bool)
-      pure $ maybe o (`f` o) mv
-    updEnum k parser f o = do
-      mv <- lookupKeyEnum section obj k parser
-      pure $ maybe o (`f` o) mv
-    updTextList k f o = do
-      mv <- lookupKeyTextList section obj k
-      pure $ maybe o (`f` o) mv
+applyConfig obj o0 = applyFlagConfig "ledger" flagSpecs obj o0
 
 -- ---------------------------------------------------------------------
 -- Core data shapes (kept tiny on purpose — the hot loop is parMap)
@@ -501,10 +469,8 @@ emitFilterDiagnostics opts mes = mapM_ (hPutStrLn stderr) (filterDiagLines opts 
 -- human-output preamble (after the @# Ledger ...@ header).
 filterDiagLines :: Options -> Maybe ExternalsSummary -> [String]
 filterDiagLines opts mes =
-  catMaybe [theoremLine, axiomLine]
+  catMaybes [theoremLine, axiomLine]
   where
-    catMaybe = foldr (\m acc -> case m of Just s -> s : acc; Nothing -> acc) []
-
     thmPrefs = optTheoremPrefixes opts
     axPrefs  = optAxiomModulePrefixes opts
     src      = optAxiomSource opts
@@ -599,11 +565,7 @@ formatAxiomList xs =
       tail3 = if n > 3 then ", ..." else ""
   in case kept of
        []  -> "(none)"
-       _   -> mkComma kept ++ tail3
-  where
-    mkComma []     = ""
-    mkComma [a]    = a
-    mkComma (a:as) = a ++ ", " ++ mkComma as
+       _   -> intercalate ", " kept ++ tail3
 
 renderLeverageTable :: Index -> IM.IntMap Int -> String
 renderLeverageTable ix lev
@@ -631,15 +593,10 @@ renderOneCohort ix (axIds, members, sz) =
       ellipsis  = if length memNames > 6 then ", ..." else ""
       memStr    = case memShown of
                     [] -> ""
-                    _  -> commaJoin memShown ++ ellipsis
-  in "[axioms: " ++ commaJoin axNames ++ "]\n"
+                    _  -> intercalate ", " memShown ++ ellipsis
+  in "[axioms: " ++ intercalate ", " axNames ++ "]\n"
        ++ "  cohort size: " ++ show sz ++ "\n"
        ++ "  members: " ++ memStr
-
-commaJoin :: [String] -> String
-commaJoin []     = ""
-commaJoin [a]    = a
-commaJoin (a:as) = a ++ ", " ++ commaJoin as
 
 -- | Render the foundational tail from the producer's
 -- @externals_summary@ diagnostic. Mirrors the look of
@@ -802,8 +759,3 @@ foundationalTailRows (ExternalsSummary _mods pm) =
 -- 'defAt' contract).
 qnameOf :: Index -> Int -> Text
 qnameOf ix i = defName (defAt ix i)
-
--- Suppress unused-import warning if @Down@ ever stops being used by
--- the human renderer alone.
-_keepDown :: a -> Down a
-_keepDown = Down

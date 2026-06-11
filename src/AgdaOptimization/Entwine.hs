@@ -63,6 +63,7 @@
 module AgdaOptimization.Entwine
   ( Options(..)
   , defaultOptions
+  , flagSpecs
   , parseOptions
   , applyConfig
   , run
@@ -88,12 +89,12 @@ import           Data.Aeson           ( (.=) )
 import           AgdaGraph.Index      ( Index(..), defAt, descendants )
 import           AgdaGraph.Schema     ( Definition(..) )
 
-import           AgdaOptimization.CLIParse ( splitFlag, valueFor, readInt, readDbl )
-import           AgdaOptimization.Common ( computeExcludedSet )
-import           AgdaOptimization.Config ( lookupKey )
+import           AgdaOptimization.FlagSpec ( FlagSpec(..), SwitchVal(..)
+                                           , parseFlags, applyFlagConfig )
+import           AgdaOptimization.Common ( computeExcludedSet, lastSegment )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , renderTable, emitJsonReport
-                                         , withHumanOutput )
+                                         , showD3, withHumanOutput )
 
 ----------------------------------------------------------------------
 -- Options.
@@ -135,67 +136,38 @@ defaultOptions = Options
   , optExcludeNameRegex = T.empty
   }
 
+-- | Declarative flag spec for the @entwine@ subcommand. Drives both
+-- 'parseOptions' and 'applyConfig'. Each help line is verbatim from
+-- 'AgdaOptimization.CLI.subFlags'.
+--
+-- @--transitive@ is a 'SwitchPreGuard' switch (matched against the raw
+-- token before 'splitFlag', so @--transitive=x@ falls through to the
+-- unknown-flag path); its YAML key is @transitive@.
+flagSpecs :: [FlagSpec Options]
+flagSpecs =
+  [ IntFlag "min-co-callers" "--min-co-callers=N             pair must co-occur in >= N callers (default 3)"
+      (\x o -> o { optMinCoCallers = x })
+  , DblFlag "min-iqr" "--min-iqr=F                    min IQR (default 0.5)"
+      (\x o -> o { optMinIQR = x })
+  , DblFlag "min-g-stat" "--min-g-stat=F                 min G-statistic; 6.635 ≈ p<0.01 (default)"
+      (\x o -> o { optMinGStat = x })
+  , IntFlag "top-n" "--top-n=N                      rows to keep (default 100)"
+      (\x o -> o { optTopN = x })
+  , SwitchFlag "transitive" "--transitive                   use ancestors as basket instead of direct callers"
+      SwitchPreGuard (\o -> o { optTransitive = True })
+      (Just "transitive") (\v o -> o { optTransitive = v })
+  , TextFlag "exclude-name-regex" "--exclude-name-regex=PATTERN   POSIX-ERE on unqualified name"
+      (\p o -> o { optExcludeNameRegex = p })
+  ]
+
 -- | Hand-rolled CLI parser.  Mirrors the dispatch table style used by
 -- every other 'AgdaOptimization' analysis (see 'Basket.parseOptions').
 parseOptions :: Options -> [String] -> Either String Options
-parseOptions = go
-  where
-    sub = "entwine"
-    intK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      x <- readInt sub k v
-      go (upd o x) rest
-    dblK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      x <- readDbl sub k v
-      go (upd o x) rest
-    textK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      go (upd o (T.pack v)) rest
-
-    go :: Options -> [String] -> Either String Options
-    go !o []     = Right o
-    go !o (a:as)
-      | a == "--transitive" = go o { optTransitive = True } as
-      | otherwise = case splitFlag a of
-          Left err                            -> Left (sub <> ": " <> err)
-          Right ("--min-co-callers",      mv) ->
-            intK  "--min-co-callers" (\o' x -> o' { optMinCoCallers = x }) mv as o
-          Right ("--min-iqr",             mv) ->
-            dblK  "--min-iqr"        (\o' x -> o' { optMinIQR       = x }) mv as o
-          Right ("--min-g-stat",          mv) ->
-            dblK  "--min-g-stat"     (\o' x -> o' { optMinGStat     = x }) mv as o
-          Right ("--top-n",               mv) ->
-            intK  "--top-n"          (\o' x -> o' { optTopN         = x }) mv as o
-          Right ("--exclude-name-regex",  mv) ->
-            textK "--exclude-name-regex"
-                  (\o' p -> o' { optExcludeNameRegex = p }) mv as o
-          Right (k, _)                        -> Left (sub <> ": unknown flag: " <> k)
+parseOptions = parseFlags "entwine" flagSpecs
 
 -- | Overlay the @entwine:@ YAML section onto a seed 'Options'.
 applyConfig :: A.Object -> Options -> Either String Options
-applyConfig obj o0 = do
-  o1 <- updI "min-co-callers"     (\v o -> o { optMinCoCallers     = v }) o0
-  o2 <- updD "min-iqr"            (\v o -> o { optMinIQR           = v }) o1
-  o3 <- updD "min-g-stat"         (\v o -> o { optMinGStat         = v }) o2
-  o4 <- updI "top-n"              (\v o -> o { optTopN             = v }) o3
-  o5 <- updB "transitive"         (\v o -> o { optTransitive       = v }) o4
-  o6 <- updT "exclude-name-regex" (\v o -> o { optExcludeNameRegex = v }) o5
-  pure o6
-  where
-    section = "entwine"
-    updI k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Int)
-      pure $ maybe o (`f` o) mv
-    updD k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Double)
-      pure $ maybe o (`f` o) mv
-    updB k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Bool)
-      pure $ maybe o (`f` o) mv
-    updT k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Text)
-      pure $ maybe o (`f` o) mv
+applyConfig obj o0 = applyFlagConfig "entwine" flagSpecs obj o0
 
 ----------------------------------------------------------------------
 -- Internal types.
@@ -574,10 +546,7 @@ renderPairRow ix rank p =
 -- | Last dot-component of a QName.  Same trick as Basket /
 -- LoadBearing — full QNames blow tables up.
 shortNameOf :: Definition -> Text
-shortNameOf d =
-  let nm = defName d
-      (_, tl) = T.breakOnEnd "." nm
-  in if T.null tl then nm else tl
+shortNameOf = lastSegment . defName
 
 -- | Last two dot-components of a module name, joined with @.@.
 -- @\"Local.Step\"@ for @\"Protocol.Example.Local.Step\"@;
@@ -587,16 +556,6 @@ shortModule m =
   let segs = T.splitOn "." m
       n    = length segs
   in T.intercalate "." (drop (max 0 (n - 2)) segs)
-
-showD3 :: Double -> String
-showD3 d =
-  -- Three decimals; matches Basket.showD3.  Avoid printf dep.
-  let n  = round (d * 1000) :: Integer
-      s  = show (abs n)
-      sn = if n < 0 then "-" else ""
-      padded = replicate (max 0 (4 - length s)) '0' ++ s
-      (intPart, fracPart) = splitAt (length padded - 3) padded
-  in sn ++ intPart ++ "." ++ fracPart
 
 ----------------------------------------------------------------------
 -- JSON rendering.

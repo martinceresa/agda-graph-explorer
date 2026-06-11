@@ -34,6 +34,7 @@ module AgdaOptimization.LoadBearing
   , Results(..)
   , Weight(..)
   , defaultOptions
+  , flagSpecs
   , parseOptions
   , applyConfig
   , run
@@ -58,9 +59,9 @@ import           Data.Aeson             ( (.=) )
 
 import           AgdaGraph.Index        ( Index(..), defAt )
 import           AgdaGraph.Schema       ( Access(..), Definition(..), State(..) )
-import           AgdaOptimization.CLIParse ( splitFlag, valueFor, readInt )
+import           AgdaOptimization.FlagSpec ( FlagSpec(..), EnumErr(..)
+                                           , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Common ( computeExcludedSet, isTagged )
-import           AgdaOptimization.Config ( lookupKey, lookupKeyEnum )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , renderTable, emitJsonReport
                                          , withHumanOutput )
@@ -104,6 +105,27 @@ defaultOptions = Options
   , optExcludeNameRegex = T.pack "^[_\x2500\x2550]+$"
   }
 
+-- | Declarative flag spec for the @load-bearing@ subcommand. Drives
+-- both 'parseOptions' and 'applyConfig'. Each help line is verbatim
+-- from 'AgdaOptimization.CLI.subFlags'.
+--
+-- The enum-valued flags @--results@ (@tagged|exported|terminals@) and
+-- @--weight@ (@unit|loc@) accept the short tags only and surface the
+-- parser's @Left@ verbatim ('EnumVerbatim'). @--exclude-name-regex@
+-- takes a POSIX-ERE pattern (matched against each definition's
+-- unqualified name); an empty string disables it.
+flagSpecs :: [FlagSpec Options]
+flagSpecs =
+  [ EnumFlag "results" "--results=tagged|exported|terminals  result-set selector (default exported)"
+      parseResults EnumVerbatim (\r o -> o { optResults = r })
+  , EnumFlag "weight" "--weight=unit|loc                    span weighting (default unit)"
+      parseWeight EnumVerbatim (\w o -> o { optWeight = w })
+  , IntFlag "top-n" "--top-n=N                            rows to keep (default 50)"
+      (\n o -> o { optTopN = n })
+  , TextFlag "exclude-name-regex" "--exclude-name-regex=PATTERN         POSIX-ERE on unqualified name (default ^[_─═]+$)"
+      (\p o -> o { optExcludeNameRegex = p })
+  ]
+
 -- | Hand-rolled CLI parser for the @load-bearing@ subcommand.
 --
 -- The enum-valued flags @--results@ (@tagged|exported|terminals@) and
@@ -112,31 +134,7 @@ defaultOptions = Options
 -- @--exclude-name-regex@ takes a POSIX-ERE pattern (matched against
 -- each definition's unqualified name); an empty string disables it.
 parseOptions :: Options -> [String] -> Either String Options
-parseOptions = go
-  where
-    sub = "load-bearing"
-    intK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      n <- readInt sub k v
-      go (upd o n) rest
-    enumK k upd parseEnum mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      r <- parseEnum v
-      go (upd o r) rest
-    textK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      go (upd o (T.pack v)) rest
-
-    go :: Options -> [String] -> Either String Options
-    go !o []     = Right o
-    go !o (a:as) = case splitFlag a of
-      Left err                          -> Left (sub <> ": " <> err)
-      Right ("--results", mv)           -> enumK "--results" (\o' r -> o' { optResults = r }) parseResults mv as o
-      Right ("--weight",  mv)           -> enumK "--weight"  (\o' w -> o' { optWeight  = w }) parseWeight  mv as o
-      Right ("--top-n",   mv)           -> intK  "--top-n"   (\o' n -> o' { optTopN    = n }) mv as o
-      Right ("--exclude-name-regex", mv) ->
-        textK "--exclude-name-regex" (\o' p -> o' { optExcludeNameRegex = p }) mv as o
-      Right (k, _)                      -> Left (sub <> ": unknown flag: " <> k)
+parseOptions = parseFlags "load-bearing" flagSpecs
 
 parseResults :: String -> Either String Results
 parseResults "tagged"    = Right ResultsTagged
@@ -151,23 +149,7 @@ parseWeight v      = Left ("expected one of unit|loc, got " <> show v)
 
 -- | Overlay the @load-bearing:@ YAML section onto a seed 'Options'.
 applyConfig :: A.Object -> Options -> Either String Options
-applyConfig obj o0 = do
-  o1 <- updEnum "results" parseResults (\v o -> o { optResults = v }) o0
-  o2 <- updEnum "weight"  parseWeight  (\v o -> o { optWeight  = v }) o1
-  o3 <- updI    "top-n"                (\v o -> o { optTopN    = v }) o2
-  o4 <- updT    "exclude-name-regex"   (\v o -> o { optExcludeNameRegex = v }) o3
-  pure o4
-  where
-    section = "load-bearing"
-    updI k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Int)
-      pure $ maybe o (`f` o) mv
-    updT k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Text)
-      pure $ maybe o (`f` o) mv
-    updEnum k parser f o = do
-      mv <- lookupKeyEnum section obj k parser
-      pure $ maybe o (`f` o) mv
+applyConfig obj o0 = applyFlagConfig "load-bearing" flagSpecs obj o0
 
 ------------------------------------------------------------------------
 -- Condensation precompute

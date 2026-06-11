@@ -30,8 +30,8 @@ import           Control.Exception  (SomeException, try)
 import           Data.Char          (isDigit, isSpace)
 import qualified Data.IntMap.Strict as IM
 import qualified Data.IntSet        as IS
-import           Data.List          (foldl', isPrefixOf, isSuffixOf, maximumBy,
-                                     sortBy, sortOn)
+import           Data.List          (foldl', isPrefixOf, isSuffixOf, sortBy,
+                                     sortOn)
 import qualified Data.Map.Strict    as M
 import           Data.Ord           (Down (..), comparing)
 import qualified Data.Sequence      as Seq
@@ -95,8 +95,12 @@ bulletList ld lim ds = provBulletList ld lim [ (d, Nothing) | d <- ds ]
 -- Index helpers
 -- ---------------------------------------------------------------------
 
+-- | The real (non-synthetic) defs. Materialised once at snapshot
+-- construction ('AgdaMcp.State.ldRealDefs') and read back here, rather
+-- than re-sliced from the def vector on every query that scans it
+-- (rankedMatches / resolveDef's fallback / querySearch / queryStats).
 realDefs :: Loaded -> [Definition]
-realDefs ld = V.toList (V.take (idxRealCount (ldIndex ld)) (idxDefs (ldIndex ld)))
+realDefs = ldRealDefs
 
 directOut, directIn :: Index -> Int -> IS.IntSet
 directOut ix i = IM.findWithDefault IS.empty i (idxForward ix)
@@ -189,19 +193,12 @@ resolveDef ld name = case lookupDef (ldIndex ld) name of
 ownerOf :: Loaded -> Definition -> Maybe Definition
 ownerOf ld d
   | not (isLocalName d) = Nothing
-  | otherwise = case defLine d of
-      Nothing -> Nothing
-      Just ln ->
-        case [ o | o <- realDefs ld
-                 , enclosingModule (defModule o) (defModule d)
-                 , not (isLocalName o)
-                 , maybe False (<= ln) (defLine o) ] of
-          [] -> Nothing
-          os -> Just (maximumBy (comparing defLine) os)
-  where
-    -- @outer@ is @inner@ or a (segment-aligned) module prefix of it.
-    enclosingModule outer inner =
-      outer == inner || (outer <> ".") `T.isPrefixOf` inner
+    -- The owner relation is keyed by the local def's id and precomputed
+    -- once per snapshot ('AgdaMcp.State.buildOwnerMap'), so this is an
+    -- O(log n) lookup instead of the old full scan of all real defs on
+    -- every rendered result line. 'defId' equals the node id (see
+    -- 'buildIndex'), the same key the map is built under.
+  | otherwise           = IM.lookup (defId d) (ldOwnerMap ld)
 
 -- | @"  (in `owner`)"@ suffix for a local helper, else empty. Appended to
 -- 'locate' / 'callers' / 'callees' lines so the anonymised @_@ owner is

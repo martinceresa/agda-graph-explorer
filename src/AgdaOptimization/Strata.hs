@@ -46,6 +46,7 @@
 module AgdaOptimization.Strata
   ( Options(..)
   , defaultOptions
+  , flagSpecs
   , parseOptions
   , applyConfig
   , run
@@ -71,8 +72,8 @@ import           Data.Aeson           ( (.=) )
 import           AgdaGraph.Index      ( Index(..), defAt )
 import           AgdaGraph.Schema     ( Definition(..), Kind(..), State(..) )
 
-import           AgdaOptimization.CLIParse ( splitFlag, valueFor, readInt )
-import           AgdaOptimization.Config   ( lookupKey )
+import           AgdaOptimization.FlagSpec ( FlagSpec(..)
+                                           , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Report   ( GlobalOpts(..), OutFormat(..)
                                            , renderTable, emitJsonReport
                                            , withHumanOutput )
@@ -99,50 +100,28 @@ defaultOptions = Options
   , optExcludeModuleRegex = T.empty
   }
 
+-- | Declarative flag spec for the @strata@ subcommand. Drives both
+-- 'parseOptions' and 'applyConfig'. Each help line is verbatim from
+-- 'AgdaOptimization.CLI.subFlags'.
+flagSpecs :: [FlagSpec Options]
+flagSpecs =
+  [ IntFlag "top-n" "--top-n=N                        rows to keep (default 50)"
+      (\n o -> o { optTopN = n })
+  , IntFlag "min-size" "--min-size=N                     skip modules with fewer than N defs (default 3)"
+      (\n o -> o { optMinSize = n })
+  , TextFlag "exclude-module-regex" "--exclude-module-regex=PATTERN   POSIX-ERE on the full module name"
+      (\p o -> o { optExcludeModuleRegex = p })
+  ]
+
 -- | Hand-rolled CLI parser for the @strata@ subcommand. Mirrors the
 -- per-flag dispatch shape used by all the other @AgdaOptimization.*@
 -- modules — see e.g. 'AgdaOptimization.Polyglot.parseOptions'.
 parseOptions :: Options -> [String] -> Either String Options
-parseOptions = go
-  where
-    sub = "strata"
-
-    intK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      n <- readInt sub k v
-      go (upd o n) rest
-
-    textK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      go (upd o (T.pack v)) rest
-
-    go :: Options -> [String] -> Either String Options
-    go !o []     = Right o
-    go !o (a:as) = case splitFlag a of
-      Left err                                -> Left (sub <> ": " <> err)
-      Right ("--top-n",                 mv)   ->
-        intK  "--top-n"                 (\o' n -> o' { optTopN               = n }) mv as o
-      Right ("--min-size",              mv)   ->
-        intK  "--min-size"              (\o' n -> o' { optMinSize            = n }) mv as o
-      Right ("--exclude-module-regex",  mv)   ->
-        textK "--exclude-module-regex"  (\o' p -> o' { optExcludeModuleRegex = p }) mv as o
-      Right (k, _) -> Left (sub <> ": unknown flag: " <> k)
+parseOptions = parseFlags "strata" flagSpecs
 
 -- | Overlay the @strata:@ YAML section onto a seed 'Options'.
 applyConfig :: A.Object -> Options -> Either String Options
-applyConfig obj o0 = do
-  o1 <- updI "top-n"                (\v o -> o { optTopN               = v }) o0
-  o2 <- updI "min-size"             (\v o -> o { optMinSize            = v }) o1
-  o3 <- updT "exclude-module-regex" (\v o -> o { optExcludeModuleRegex = v }) o2
-  pure o3
-  where
-    section = "strata"
-    updI k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Int)
-      pure $ maybe o (`f` o) mv
-    updT k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Text)
-      pure $ maybe o (`f` o) mv
+applyConfig obj o0 = applyFlagConfig "strata" flagSpecs obj o0
 
 -- ---------------------------------------------------------------------------
 -- Public entry

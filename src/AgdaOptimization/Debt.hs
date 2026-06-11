@@ -23,6 +23,7 @@
 module AgdaOptimization.Debt
   ( Options(..)
   , defaultOptions
+  , flagSpecs
   , parseOptions
   , applyConfig
   , run
@@ -49,9 +50,9 @@ import           AgdaGraph.Index      ( Index(..), ancestors, defAt, descendants
 import           AgdaGraph.Schema     ( Access(..), Definition(..)
                                       , ExternalsSummary(..), State(..) )
 
-import           AgdaOptimization.CLIParse ( splitFlag, valueFor, readInt )
-import           AgdaOptimization.Common ( notFoundational, terminals )
-import           AgdaOptimization.Config ( lookupKey )
+import           AgdaOptimization.Common ( lastSegment, notFoundational, terminals )
+import           AgdaOptimization.FlagSpec ( FlagSpec(..), SwitchVal(..)
+                                           , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , renderTable, emitJsonReport
                                          , withHumanOutput )
@@ -81,29 +82,37 @@ defaultOptions = Options
   , optFoundationalInventory = True
   }
 
+-- | Declarative flag spec for the @debt@ subcommand. Drives both the
+-- argv parser ('parseOptions') and the YAML overlay ('applyConfig'), and
+-- is the single source of truth the help-derivation stage reads. Each
+-- help line is verbatim from 'AgdaOptimization.CLI.subFlags'.
+--
+-- The three boolean toggles are 'SwitchPreGuard' switches (matched
+-- against the raw token before 'splitFlag', so @--flag=x@ falls through
+-- to the unknown-flag path). YAML key naming matches the underlying
+-- field, not the negated CLI flag: @include-postulates: false@
+-- corresponds to @--no-include-postulates@ on the command line.
+flagSpecs :: [FlagSpec Options]
+flagSpecs =
+  [ IntFlag "top-n" "--top-n=N                       schedule rows (default 50)"
+      (\n o -> o { optTopN = n })
+  , SwitchFlag "include-foundational" "--include-foundational          treat Agda.Builtin.* / Agda.Primitive postulates as debt"
+      SwitchPreGuard (\o -> o { optIncludeFoundational = True })
+      (Just "include-foundational") (\v o -> o { optIncludeFoundational = v })
+  , SwitchFlag "no-include-postulates" "--no-include-postulates         exclude stub postulates from debt"
+      SwitchPreGuard (\o -> o { optIncludePostulates = False })
+      (Just "include-postulates") (\v o -> o { optIncludePostulates = v })
+  , SwitchFlag "no-foundational-inventory" "--no-foundational-inventory     suppress trusted-base table on clean projects"
+      SwitchPreGuard (\o -> o { optFoundationalInventory = False })
+      (Just "foundational-inventory") (\v o -> o { optFoundationalInventory = v })
+  ]
+
 -- | Hand-rolled CLI parser for the @debt@ subcommand. Two boolean
 -- toggles plus an int. @--no-include-postulates@ flips the default
 -- (defaultOptions has @optIncludePostulates = True@); see the
 -- 'Options' field for the rationale.
 parseOptions :: Options -> [String] -> Either String Options
-parseOptions = go
-  where
-    sub = "debt"
-    intK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      n <- readInt sub k v
-      go (upd o n) rest
-
-    go :: Options -> [String] -> Either String Options
-    go !o []     = Right o
-    go !o (a:as)
-      | a == "--include-foundational"     = go o { optIncludeFoundational   = True  } as
-      | a == "--no-include-postulates"    = go o { optIncludePostulates     = False } as
-      | a == "--no-foundational-inventory" = go o { optFoundationalInventory = False } as
-      | otherwise = case splitFlag a of
-          Left err                       -> Left (sub <> ": " <> err)
-          Right ("--top-n", mv)          -> intK "--top-n" (\o' n -> o' { optTopN = n }) mv as o
-          Right (k, _)                   -> Left (sub <> ": unknown flag: " <> k)
+parseOptions = parseFlags "debt" flagSpecs
 
 -- | Overlay the @debt:@ YAML section onto a seed 'Options'.
 --
@@ -111,20 +120,7 @@ parseOptions = go
 -- flag. So @include-postulates: false@ corresponds to
 -- @--no-include-postulates@ on the command line.
 applyConfig :: A.Object -> Options -> Either String Options
-applyConfig obj o0 = do
-  o1 <- updB "include-postulates"     (\v o -> o { optIncludePostulates     = v }) o0
-  o2 <- updB "include-foundational"   (\v o -> o { optIncludeFoundational   = v }) o1
-  o3 <- updI "top-n"                  (\v o -> o { optTopN                  = v }) o2
-  o4 <- updB "foundational-inventory" (\v o -> o { optFoundationalInventory = v }) o3
-  pure o4
-  where
-    section = "debt"
-    updI k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Int)
-      pure $ maybe o (`f` o) mv
-    updB k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Bool)
-      pure $ maybe o (`f` o) mv
+applyConfig obj o0 = applyFlagConfig "debt" flagSpecs obj o0
 
 -- | Which heuristic was used to pick the "exported" set.
 data ExpSource
@@ -490,7 +486,7 @@ renderFoundationalInventory ix postSetAll =
 
       rowCells' (m, s) =
         let !n      = IS.size s
-            shorts  = map (shortName . defName . defAt ix) (IS.toList s)
+            shorts  = map (lastSegment . defName . defAt ix) (IS.toList s)
             !take3  = take 3 shorts
             ellipsis = if n > 3 then ["..."] else []
             !exs    = T.intercalate ", " (take3 ++ map T.pack ellipsis)
@@ -549,12 +545,6 @@ renderFoundationalInventoryFromSummary (Just (ExternalsSummary _mods pm)) =
        ++ " across "  ++ show totalMods
        ++ " module"   ++ (if totalMods == 1 then "" else "s")
        ++ "."
-
--- | Last dot-component of a qualified name; if no dot, the whole name.
-shortName :: Text -> Text
-shortName q =
-  let (_, suffix) = T.breakOnEnd "." q
-  in if T.null suffix then q else suffix
 
 renderFailedPanel :: [Text] -> Int -> String
 renderFailedPanel mods nDefs
@@ -690,7 +680,7 @@ foundationalInventoryJson ix postSetAll =
       !rows = sortBy cmp (Map.toList byModule)
       rowJson (m, s) =
         let !n      = IS.size s
-            shorts  = map (shortName . defName . defAt ix) (IS.toList s)
+            shorts  = map (lastSegment . defName . defAt ix) (IS.toList s)
             !exs    = take 3 shorts
         in A.object
              [ "module"   .= m
@@ -701,8 +691,8 @@ foundationalInventoryJson ix postSetAll =
 
 -- | Same row shape as 'foundationalInventoryJson', sourced from the
 -- producer's @externals_summary@ instead of the in-memory 'Index'.
--- Names in the summary are already unqualified, so no 'shortName' pass
--- is needed. Modules with zero postulates are dropped.
+-- Names in the summary are already unqualified, so no 'lastSegment'
+-- pass is needed. Modules with zero postulates are dropped.
 foundationalInventoryFromSummaryJson :: Maybe ExternalsSummary -> A.Value
 foundationalInventoryFromSummaryJson Nothing = A.toJSON ([] :: [A.Value])
 foundationalInventoryFromSummaryJson (Just (ExternalsSummary _mods pm)) =

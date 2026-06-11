@@ -35,13 +35,14 @@ import           Data.Text         ( Text )
 
 import           AgdaGraph.Index   ( Index, defAt )
 import           AgdaGraph.Schema  ( Definition(..) )
+import           AgdaOptimization.Common ( lastSegment )
 
 -- | Strip a qname to its last dot-component, then try to split it into
 -- @(stem, idx)@ matching @^(.+)-(\\d+)$@. Returns 'Nothing' for items
 -- that aren't part of a numeric-suffix family.
 familyOf :: Index -> Int -> Maybe Text
 familyOf ix i =
-  let !short = lastDotComponent (defName (defAt ix i))
+  let !short = lastSegment (defName (defAt ix i))
   in case parseCaseUnfold (T.unpack short) of
        Just (stem, _) -> Just (T.pack stem)
        Nothing        -> Nothing
@@ -110,18 +111,10 @@ isForcedByFamily ix fraction items =
     addBareStem idx' !sset !acc !item = case familyOf idx' item of
       Just _  -> acc       -- already counted in pass 1
       Nothing ->
-        let !short = lastDotComponent (defName (defAt idx' item))
+        let !short = lastSegment (defName (defAt idx' item))
         in if Map.member short sset
              then Map.insertWith (+) short 1 acc
              else acc
 
 ----------------------------------------------------------------------
 -- Helpers.
-
--- | Last dot-component of a dotted qname. @"Foo.Bar.baz"@ → @"baz"@,
--- @"baz"@ → @"baz"@. Used to expose just the unqualified name to the
--- per-case-unfold pattern matcher.
-lastDotComponent :: Text -> Text
-lastDotComponent t =
-  let (_, tl) = T.breakOnEnd "." t
-  in if T.null tl then t else tl

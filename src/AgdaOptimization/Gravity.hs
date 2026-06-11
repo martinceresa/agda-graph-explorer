@@ -57,6 +57,7 @@ module AgdaOptimization.Gravity
   ( Options(..)
   , ResultMode(..)
   , defaultOptions
+  , flagSpecs
   , parseOptions
   , applyConfig
   , run
@@ -69,9 +70,10 @@ import           Control.Parallel.Strategies  ( parListChunk, rdeepseq
                                               , withStrategy )
 import qualified Data.IntMap.Strict           as IM
 import           Data.IntMap.Strict           ( IntMap )
+import qualified Data.Map.Strict              as Map
 import qualified Data.IntSet                  as IS
 import           Data.IntSet                  ( IntSet )
-import           Data.List                    ( sortBy )
+import           Data.List                    ( foldl', sortBy )
 import           Data.Ord                     ( Down(..), comparing )
 import           Data.Text                    ( Text )
 import qualified Data.Text                    as T
@@ -88,10 +90,9 @@ import           AgdaGraph.Index              ( Index(..), defAt )
 import           AgdaGraph.Schema             ( Access(..), Definition(..)
                                               , State(..) )
 
-import           AgdaOptimization.CLIParse    ( splitFlag, valueFor
-                                              , readInt, readDbl )
+import           AgdaOptimization.FlagSpec    ( FlagSpec(..), EnumErr(..)
+                                              , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Common      ( isTagged )
-import           AgdaOptimization.Config      ( lookupKey, lookupKeyEnum )
 import           AgdaOptimization.Report      ( GlobalOpts(..), OutFormat(..)
                                               , renderTable, emitJsonReport
                                               , withHumanOutput )
@@ -136,44 +137,6 @@ defaultOptions = Options
   , optTopTheorems = 64
   }
 
--- | Hand-rolled CLI parser for the @gravity@ subcommand. Same
--- per-subcommand dispatch shape as 'AgdaOptimization.Polyglot'.
-parseOptions :: Options -> [String] -> Either String Options
-parseOptions = go
-  where
-    sub = "gravity"
-    intK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      n <- readInt sub k v
-      go (upd o n) rest
-    dblK k upd mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      x <- readDbl sub k v
-      go (upd o x) rest
-    enumK k upd parseEnum mv as o = do
-      (v, rest) <- valueFor sub k mv as
-      r <- parseEnum v
-      go (upd o r) rest
-
-    go :: Options -> [String] -> Either String Options
-    go !o []     = Right o
-    go !o (a:as) = case splitFlag a of
-      Left err                            -> Left (sub <> ": " <> err)
-      Right ("--damping",   mv)           ->
-        dblK  "--damping"   (\o' x -> o' { optDamping   = x }) mv as o
-      Right ("--iters",     mv)           ->
-        intK  "--iters"     (\o' n -> o' { optIters     = n }) mv as o
-      Right ("--top-n",     mv)           ->
-        intK  "--top-n"     (\o' n -> o' { optTopN      = n }) mv as o
-      Right ("--results",   mv)           ->
-        enumK "--results"   (\o' r -> o' { optResults   = r }) parseRes mv as o
-      Right ("--tolerance", mv)           ->
-        dblK  "--tolerance" (\o' x -> o' { optTolerance = x }) mv as o
-      Right ("--top-theorems", mv)        ->
-        intK  "--top-theorems" (\o' n -> o' { optTopTheorems = n }) mv as o
-      Right (k, _)                        ->
-        Left (sub <> ": unknown flag: " <> k)
-
 parseRes :: String -> Either String ResultMode
 parseRes "public"    = Right ResPublic
 parseRes "tagged"    = Right ResTagged
@@ -181,27 +144,37 @@ parseRes "terminals" = Right ResTerminals
 parseRes v           =
   Left ("expected one of public|tagged|terminals, got " <> show v)
 
+-- | Declarative flag spec for the @gravity@ subcommand. Drives both
+-- 'parseOptions' and 'applyConfig'. Each help line is verbatim from
+-- 'AgdaOptimization.CLI.subFlags'.
+--
+-- @--results@ is an enum flag parsed by 'parseRes', whose @Left@ is a
+-- bare @"expected one of …"@, surfaced verbatim on the argv side
+-- ('EnumVerbatim').
+flagSpecs :: [FlagSpec Options]
+flagSpecs =
+  [ DblFlag "damping" "--damping=F                          PageRank damping (default 0.85)"
+      (\x o -> o { optDamping = x })
+  , IntFlag "iters" "--iters=N                            max power-iteration steps (default 50)"
+      (\n o -> o { optIters = n })
+  , DblFlag "tolerance" "--tolerance=F                        L1-delta convergence (default 1e-6)"
+      (\x o -> o { optTolerance = x })
+  , IntFlag "top-n" "--top-n=N                            rows to keep (default 50)"
+      (\n o -> o { optTopN = n })
+  , EnumFlag "results" "--results=public|tagged|terminals    theorem-set source (default public)"
+      parseRes EnumVerbatim (\r o -> o { optResults = r })
+  , IntFlag "top-theorems" "--top-theorems=N                     PPR over top-N heaviest theorems (default 64)"
+      (\n o -> o { optTopTheorems = n })
+  ]
+
+-- | Hand-rolled CLI parser for the @gravity@ subcommand. Same
+-- per-subcommand dispatch shape as 'AgdaOptimization.Polyglot'.
+parseOptions :: Options -> [String] -> Either String Options
+parseOptions = parseFlags "gravity" flagSpecs
+
 -- | Overlay the @gravity:@ YAML section onto a seed 'Options'.
 applyConfig :: A.Object -> Options -> Either String Options
-applyConfig obj o0 = do
-  o1 <- updD    "damping"      (\v o -> o { optDamping     = v }) o0
-  o2 <- updI    "iters"        (\v o -> o { optIters       = v }) o1
-  o3 <- updI    "top-n"        (\v o -> o { optTopN        = v }) o2
-  o4 <- updEnum "results"      parseRes (\v o -> o { optResults = v }) o3
-  o5 <- updD    "tolerance"    (\v o -> o { optTolerance   = v }) o4
-  o6 <- updI    "top-theorems" (\v o -> o { optTopTheorems = v }) o5
-  pure o6
-  where
-    section = "gravity"
-    updI k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Int)
-      pure $ maybe o (`f` o) mv
-    updD k f o = do
-      mv <- lookupKey section obj k :: Either String (Maybe Double)
-      pure $ maybe o (`f` o) mv
-    updEnum k parser f o = do
-      mv <- lookupKeyEnum section obj k parser
-      pure $ maybe o (`f` o) mv
+applyConfig obj o0 = applyFlagConfig "gravity" flagSpecs obj o0
 
 ------------------------------------------------------------------------
 -- Driver
@@ -692,19 +665,14 @@ pickSeeds !ix = \case
 guessEntryModule :: [Definition] -> Maybe Text
 guessEntryModule defs =
   let pubs   = [ defModule d | d <- defs, defAccess d == Public ]
-      counts = bumpAll pubs []
-      ranked = sortBy (comparing (\(m, c) -> (Down c, T.length m))) counts
+      counts = Map.toList (foldl' (\m k -> Map.insertWith (+) k 1 m) Map.empty pubs)
+      -- Total ordering (count desc, then name length, then name) so the
+      -- winner is independent of input order — no accidental reliance on
+      -- the def vector's traversal order in a tie.
+      ranked = sortBy (comparing (\(m, c) -> (Down c, T.length m, m))) counts
   in case ranked of
        []        -> Nothing
        ((m,_):_) -> Just m
-  where
-    bumpAll :: [Text] -> [(Text, Int)] -> [(Text, Int)]
-    bumpAll []       acc = acc
-    bumpAll (n:rest) acc = bumpAll rest (bump n acc)
-    bump :: Text -> [(Text, Int)] -> [(Text, Int)]
-    bump !k []                       = [(k, 1)]
-    bump !k ((a,c):xs') | k == a     = (a, c + 1) : xs'
-                        | otherwise  = (a, c) : bump k xs'
 
 
 ------------------------------------------------------------------------
