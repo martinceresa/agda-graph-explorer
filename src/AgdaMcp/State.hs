@@ -43,9 +43,9 @@ module AgdaMcp.State
   ) where
 
 import           Control.Concurrent       (forkIO, threadDelay)
-import           Control.Concurrent.MVar  (MVar, newEmptyMVar, newMVar,
-                                           takeMVar, tryPutMVar, tryTakeMVar,
-                                           withMVar)
+import           Control.Concurrent.MVar  (MVar, modifyMVar_, newEmptyMVar,
+                                           newMVar, takeMVar, tryPutMVar,
+                                           tryTakeMVar, withMVar)
 import           Control.DeepSeq      (force)
 import           Control.Exception    (SomeException, evaluate, try)
 import           Control.Monad        (filterM, forM, forever, void)
@@ -81,6 +81,7 @@ import           AgdaGraph.Similarity (SigBodyFingerprints,
                                        buildSigBodyFingerprints,
                                        silhouetteDefaultWlK, subtermMultisetsVec)
 import           AgdaGraph.WL         (Fingerprint)
+import           AgdaInteract.Registry (SessionEntry (..))
 
 -- | How the daemon (re)builds and reads the graph.
 data Config = Config
@@ -108,6 +109,9 @@ data Config = Config
   , cfgWatch        :: !Bool             -- ^ use an fsnotify watcher (live mode) instead of per-query polling.
   , cfgQueryLog     :: !Bool             -- ^ append one JSON line per @tools/call@ to @cfgOutDir/query-log.jsonl@.
   , cfgAutoResolveUnique :: !Bool        -- ^ auto-resolve a name to the sole "did you mean" candidate (tier 3 of 'AgdaMcp.Query.resolveDefNote').
+  , cfgEnableInteract :: !Bool           -- ^ expose the write-side interaction-bridge tools (load/goal_type/give/…).
+  , cfgAgdaBin      :: !(Maybe FilePath) -- ^ explicit @agda@ path for interaction sessions (else env/$PATH).
+  , cfgInteractArgs :: ![String]         -- ^ extra flags passed to @agda --interaction-json@ (e.g. @--safe@).
   }
 
 defaultConfig :: Config
@@ -129,6 +133,9 @@ defaultConfig = Config
   , cfgWatch        = True
   , cfgQueryLog     = True
   , cfgAutoResolveUnique = True
+  , cfgEnableInteract = False
+  , cfgAgdaBin      = Nothing
+  , cfgInteractArgs = []
   }
 
 -- | A cheap fingerprint of the source tree: file count + newest mtime.
@@ -217,6 +224,11 @@ data ServerState = ServerState
     -- /dedicated/ lock — never 'ssRebuildLock' — so a telemetry append can
     -- never block behind a (minutes-long) @agda-deps@ rebuild, and two
     -- threads (a query and the watcher worker) cannot interleave a line.
+  , ssSessions    :: !(MVar (M.Map FilePath SessionEntry))
+    -- ^ The write-side interaction bridge's live @agda --interaction-json@
+    -- sessions, keyed by loaded module file. Guarded by an 'MVar' (not a
+    -- bare 'IORef') because the background file-watcher thread flips each
+    -- entry's 'seDirty' flag concurrently with the (serialised) tool calls.
   }
 
 newServerState :: Config -> IO ServerState
@@ -231,6 +243,7 @@ newServerState c =
     <*> newMVar ()
     <*> newIORef False
     <*> newMVar ()
+    <*> newMVar M.empty
 
 -- ---------------------------------------------------------------------
 -- Source scanning
@@ -831,6 +844,11 @@ startWatcher ss@ServerState{..}
     skipFragments = ["/.git/", "/dist-newstyle/", "/.agda-explore/", "/_build/"]
     onEvent _ = do
       writeIORef ssDirty True
+      -- Serve-stale parity for live interaction sessions: a source change
+      -- on disk marks every open session dirty so it reloads (refreshing
+      -- its stable-goal map) on next use, rather than eagerly reloading a
+      -- module nobody is interacting with.
+      modifyMVar_ ssSessions (pure . M.map (\e -> e { seDirty = True }))
       void (tryPutMVar ssWake ())   -- coalescing: one pending wakeup is enough
 
 -- | Start the single background rebuild worker, at most once per daemon.

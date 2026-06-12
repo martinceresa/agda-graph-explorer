@@ -69,6 +69,12 @@ data Opts = Opts
   , oWatch    :: Bool
   , oQueryLog :: Bool
   , oAutoResolve :: Bool
+  , oEnableInteract :: Bool
+    -- ^ expose the write-side interaction-bridge tools (@--enable-interact@).
+  , oAgdaBin   :: Maybe FilePath
+    -- ^ explicit @agda@ binary for interaction sessions (@--agda-bin@).
+  , oInteractArgs :: [String]
+    -- ^ extra flags for @agda --interaction-json@ (repeatable @--agda-arg@).
   , oHelp     :: Bool
   , oVer      :: Bool
   }
@@ -102,6 +108,9 @@ data FileConfig = FileConfig
   , fcNoWatch       :: Maybe Bool
   , fcNoQueryLog    :: Maybe Bool
   , fcNoAutoResolve :: Maybe Bool
+  , fcEnableInteract :: Maybe Bool
+  , fcAgdaBin        :: Maybe FilePath
+  , fcInteractArgs   :: Maybe [String]
   }
 
 defaultFileConfig :: FileConfig
@@ -123,6 +132,9 @@ defaultFileConfig = FileConfig
   , fcNoWatch       = Nothing
   , fcNoQueryLog    = Nothing
   , fcNoAutoResolve = Nothing
+  , fcEnableInteract = Nothing
+  , fcAgdaBin        = Nothing
+  , fcInteractArgs   = Nothing
   }
 
 instance FromJSON FileConfig where
@@ -144,6 +156,9 @@ instance FromJSON FileConfig where
     fcNoWatch       <- o .:? "no-watch"
     fcNoQueryLog    <- o .:? "no-query-log"
     fcNoAutoResolve <- o .:? "no-auto-resolve"
+    fcEnableInteract <- o .:? "enable-interact"
+    fcAgdaBin        <- o .:? "agda-bin"
+    fcInteractArgs   <- o .:? "agda-arg"
     pure FileConfig{..}
 
 -- ---------------------------------------------------------------------
@@ -178,6 +193,9 @@ applyConfig FileConfig{..} o = o
   , oWatch    = maybe (oWatch o) not fcNoWatch
   , oQueryLog = maybe (oQueryLog o) not fcNoQueryLog
   , oAutoResolve = maybe (oAutoResolve o) not fcNoAutoResolve
+  , oEnableInteract = fromMaybe (oEnableInteract o) fcEnableInteract
+  , oAgdaBin     = fcAgdaBin `orKeep` oAgdaBin o
+  , oInteractArgs = fromMaybe (oInteractArgs o) fcInteractArgs
   }
   where
     -- A present config value wins over the (default) seed; 'Maybe' field.

@@ -9,7 +9,10 @@ It bundles:
   search / unused) instead of
   forcing the agent to `grep`. The graph is **regenerated on the fly**: when
   sources change, the server re-runs `agda-deps` (reusing Agda's `.agdai`
-  cache) and hot-swaps the in-memory graph.
+  cache) and hot-swaps the in-memory graph. Optionally (`--enable-interact`)
+  it also exposes a **write-side interaction bridge** — goal-driven editing
+  tools (`load` / `goal_type` / `case_split` / `refine` / `give` / …) backed
+  by a live `agda --interaction-json` session (see below).
 - **A skill (`agda-explore`)** — teaches Claude when to reach for those tools
   instead of grep, and how to read their output (including the known
   `agda-unused` false-positive caveats).
@@ -135,3 +138,33 @@ distinct, named by their binding line (`Mod._.QED@388`), so `callers` /
 `agda-explore --help` for server flags — including `--normalise-signatures`
 (semantic form) and `--show-implicit`, which tune the elaborated type
 signatures `type_of` reports.
+
+## Write-side interaction bridge (opt-in)
+
+The tools above are read-only. Started with **`--enable-interact`** (or
+`enable-interact: true` in `.agda-explore.yml`) and with `agda` on `$PATH`
+(or `--agda-bin`), the server adds a **write** surface backed by a live
+`agda --interaction-json` session — the agent edits through Agda's own
+goal / case-split / refine workflow instead of blind string replacement:
+
+| Tool           | Question / action                                                                 |
+|----------------|-----------------------------------------------------------------------------------|
+| `load`         | Open a module; list open goals with **stable ids** (`g0, g1, …`) that survive reloads. |
+| `goal_type`    | The goal's type + in-scope context at a hole.                                     |
+| `goal_context` | Just the in-scope binders and their types.                                        |
+| `infer`        | Infer the type of an expression in a goal's context.                              |
+| `normalize`    | Normalise (compute) an expression in a goal's context.                            |
+| `case_split`   | Split a goal on a variable → unified diff of the generated clauses.               |
+| `refine`       | Refine a goal by a head symbol (`f ?`) → unified diff.                            |
+| `give`         | Fill a goal with a complete term, **Agda-validated** → unified diff (or the localized type error). |
+| `auto`         | Mimer search (unavailable on Agda 2.9.0 — its reader rejects the command; degrades cleanly). |
+
+Each mutator **returns a unified diff and never writes the file** — apply
+it yourself, then `load` again to refresh the goals. A bad `give` term
+fails locally (the file is never left broken), and a `give` / `refine`
+using `postulate`, a termination/coverage/`OPTIONS` pragma, or another
+escape hatch is rejected before Agda sees it (a hard zero-axiom contract).
+`.lagda.md` literate sources are handled — edits land inside the
+```` ```agda ```` code fence, never in the surrounding prose. To turn the
+bridge on for the plugin, add `enable-interact: true` to the project's
+`.agda-explore.yml` (the launcher otherwise starts the server read-only).

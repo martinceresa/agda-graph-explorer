@@ -53,19 +53,26 @@ For shipped work see [Changelog.md](Changelog.md).
        resolution differ between surface and internal forms).
   Both paths documented in `AgdaGoals.Canon`'s module haddock.
 
-- [ ] **Round-6 P5 follow-up: corpus scaling.** Currently single-
-  threaded — one `agda --interaction-json` per file in serial. For
-  large-scale corpora (~hundreds of files) drive in parallel via
-  `Control.Concurrent.Async.mapConcurrently` with a bounded pool
-  (mirror `agda-unused`'s `getNumCapabilities` pattern). Determinism
-  acceptance test must still hold under `+RTS -NK`.
+- [ ] **Round-6 P5 follow-up: corpus scaling.** Still single-threaded,
+  but as of 2026-06-12 `agda-goals` drives all files over **one
+  persistent `agda` process** (`AgdaInteract.Session`, `runDriverBatch`)
+  instead of respawning per file — so the `.agdai` cache is reused across
+  the corpus. True parallelism (several Agda sessions via
+  `Control.Concurrent.Async.mapConcurrently` with a bounded pool,
+  mirroring `agda-unused`'s `getNumCapabilities` pattern) is still open;
+  the determinism / byte-identical acceptance test must hold under
+  `+RTS -NK`.
 
-- [ ] **Round-6 P5 follow-up: protocol-skew fixture.** The
-  `--interaction-json` wire format isn't officially versioned. Add a
-  snapshot of the `AllGoalsWarnings` reply for a `GoalsTest.agda`
-  fixture to `test/` and a CI step that asserts byte-equality against it, so
-  upstream protocol churn shows up as a test failure rather than as
-  silent under-clustering.
+- [x] **Round-6 P5 follow-up: protocol-skew fixture.** Shipped
+  2026-06-12 (with the write-side interaction bridge). Golden
+  `--interaction-json` transcripts for `test/interaction/src/Holes.agda`
+  + `Lit.lagda.md` live under `test/interaction/<agda-version>/*.jsonl`
+  (covering load / goal-type-context / make-case / give / refine / infer
+  / compute / error replies, not just `AllGoalsWarnings`); the offline
+  `interaction-spec` test-suite replays them through the shared
+  `AgdaGraph.Interaction.Protocol` parser, and CI runs it with no `agda`
+  binary. Regenerate with `bash test/interaction/regen.sh` after an Agda
+  bump; a wire-shape change then shows up as a test failure.
 
 - [ ] **Round-6 S1: surface-AST simplifier with typecheck
   rollback.** The proposal's third piece. Mechanical local rewrites

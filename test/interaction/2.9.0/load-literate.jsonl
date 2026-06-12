@@ -1,0 +1,2 @@
+{"info":{"errors":[],"invisibleGoals":[],"kind":"AllGoalsWarnings","visibleGoals":[{"constraintObj":{"id":0,"range":[{"end":{"col":16,"line":14,"pos":383},"start":{"col":12,"line":14,"pos":379}}]},"kind":"OfType","type":"Nat"}],"warnings":[]},"kind":"DisplayInfo"}
+{"interactionPoints":[{"id":0,"range":[{"end":{"col":16,"line":14,"pos":383},"start":{"col":12,"line":14,"pos":379}}]}],"kind":"InteractionPoints"}

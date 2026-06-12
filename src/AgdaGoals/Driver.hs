@@ -29,27 +29,22 @@ module AgdaGoals.Driver
   , DriverError(..)
   , driverErrorTag
   , runDriver
+  , runDriverBatch
   ) where
 
 import           Control.Applicative    ( (<|>) )
-import           Control.Concurrent     ( forkIO )
-import           Control.Concurrent.MVar ( MVar, newEmptyMVar, putMVar, takeMVar )
-import           Control.Exception      ( SomeException, try )
-import           Control.Monad          ( when )
-import qualified Data.ByteString.Lazy   as BL
-import qualified Data.ByteString.Lazy.Char8 as BLC
+import           Control.Monad          ( forM, when )
+import           Data.IORef             ( newIORef, readIORef, writeIORef )
 import           Data.Text              ( Text )
 import qualified Data.Text              as T
-import           System.Exit            ( ExitCode(..) )
 import           System.FilePath        ( takeBaseName )
-import           System.IO              ( Handle, hClose, hFlush, hPutStrLn
-                                        , stderr )
-import           System.Process         ( CreateProcess(..), StdStream(..)
-                                        , createProcess, proc, waitForProcess
-                                        , ProcessHandle )
+import           System.IO              ( hPutStrLn, stderr )
 
-import           AgdaGoals.Protocol     ( Reply(..), DisplayInfo(..)
-                                        , Goal(..), parseReplyLines )
+import           AgdaGoals.Protocol     ( Reply(..), DisplayInfo(..), Goal(..) )
+import           AgdaGraph.Interaction.Iotcm ( iotcmLoad )
+import           AgdaInteract.Session   ( Session, SessionConfig(..), SendOutcome(..)
+                                        , startSession, sendIotcm, sessionAlive
+                                        , closeSession, burstReplies )
 
 ----------------------------------------------------------------------
 -- Configuration & result shapes.
@@ -123,80 +118,85 @@ driverErrorTag = \case
 ----------------------------------------------------------------------
 -- Entry point.
 
--- | Drive @agda --interaction-json@ once for the supplied module.
+-- | Per-module command timeout. The historical one-shot driver waited
+-- indefinitely; a generous bound here just stops a wedged @agda@ from
+-- hanging the whole batch (a timeout poisons the session, which the batch
+-- loop then respawns for the next file).
+goalsTimeoutMicros :: Int
+goalsTimeoutMicros = 600 * 1000000   -- 10 min per module
+
+-- | Drive @agda --interaction-json@ for a list of modules over a SINGLE
+-- persistent agda process — reusing one process (and its on-disk @.agdai@
+-- cache) across files instead of spawning one per file.
+--
+-- Goal extraction per file is byte-identical to the historical one-shot
+-- path: the same @Cmd_load@ yields the same @AllGoalsWarnings@ whether the
+-- process is fresh or reused (a load resets the active module), and
+-- 'scanReplies' is unchanged.
+--
+-- Resilience: if the session dies mid-batch (e.g. a module times out and
+-- poisons it) the next file respawns a fresh process; the poisoning file
+-- reports a 'DriverError'. If @agda@ can't be started at all, every file
+-- reports 'MissingBinary' (matching the per-file one-shot behaviour).
+runDriverBatch :: DriverConfig -> [FilePath] -> IO [DriverResult]
+runDriverBatch _    []              = pure []
+runDriverBatch tmpl files@(first:_) = do
+  let scfg = SessionConfig
+               { scAgdaBin       = dcAgdaBin tmpl
+               , scExtraArgs     = dcExtraArgs tmpl
+               , scTimeoutMicros = goalsTimeoutMicros
+               }
+  est <- startSession scfg first
+  case est of
+    Left err ->
+      pure [ DriverError (MissingBinary (dcAgdaBin tmpl) (T.unpack err)) | _ <- files ]
+    Right sess0 -> do
+      ref     <- newIORef sess0
+      results <- forM files $ \f -> do
+        sess  <- readIORef ref
+        alive <- sessionAlive sess
+        sess' <- if alive
+                   then pure sess
+                   else do                       -- prior file poisoned it: respawn
+                     closeSession sess
+                     r <- startSession scfg f
+                     case r of
+                       Right s -> writeIORef ref s >> pure s
+                       Left _  -> pure sess       -- respawn failed; load will SendDied
+        loadInSession sess' (tmpl { dcModuleFile = f })
+      readIORef ref >>= closeSession
+      pure results
+
+-- | Drive a single module: one process, loaded once, then closed. A thin
+-- wrapper over 'runDriverBatch' so the one-shot and batch paths share the
+-- same session machinery.
 runDriver :: DriverConfig -> IO DriverResult
-runDriver cfg@DriverConfig{..} = do
-  let args = "--interaction-json" : dcExtraArgs
-      cp   = (proc dcAgdaBin args)
-        { std_in  = CreatePipe
-        , std_out = CreatePipe
-        , std_err = CreatePipe
-        }
-  result <- try (createProcess cp) :: IO (Either SomeException
-                       (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
-  case result of
-    Left e -> pure $ DriverError (MissingBinary dcAgdaBin (show e))
-    Right (Just hin, Just hout, Just herr, ph) ->
-      driveOnce cfg hin hout herr ph
-    Right _ ->
-      -- Shouldn't happen given std_in/out/err=CreatePipe.
-      pure $ DriverError (MissingBinary dcAgdaBin "process pipes not created")
+runDriver cfg = headOr (DriverError NoGoalsReply) <$> runDriverBatch cfg [dcModuleFile cfg]
+  where headOr d xs = case xs of (x:_) -> x; [] -> d
 
--- | Internal: send the load command, drain stdout/stderr
--- concurrently to avoid pipe-buffer deadlock, wait for exit.
-driveOnce
-  :: DriverConfig
-  -> Handle -> Handle -> Handle -> ProcessHandle
-  -> IO DriverResult
-driveOnce DriverConfig{..} hin hout herr ph = do
+-- | Send one @Cmd_load@ over an existing session and interpret the reply
+-- burst into a 'DriverResult'.
+loadInSession :: Session -> DriverConfig -> IO DriverResult
+loadInSession sess DriverConfig{..} = do
   let modName = T.pack (takeBaseName dcModuleFile)
-      iotcm   = iotcmLoadCmd dcModuleFile dcIncludePaths
-  -- Send the command.
+      iotcm   = iotcmLoad dcModuleFile dcIncludePaths
+  when dcVerbose $ hPutStrLn stderr ("agda-goals: > " ++ iotcm)
+  out <- sendIotcm sess iotcm
   when dcVerbose $
-    hPutStrLn stderr $ "agda-goals: > " ++ iotcm
-  hPutStrLn hin iotcm
-  hFlush hin
-  -- Close stdin so Agda finishes after the load.
-  hClose hin
+    hPutStrLn stderr ("agda-goals: < " ++ show (length (burstReplies out)) ++ " reply object(s)")
+  pure (resultFromOutcome modName out)
 
-  -- Drain stdout and stderr on separate threads. Critical: without
-  -- this the OS pipe buffer can fill up and Agda will block writing,
-  -- leading to a hang when we 'waitForProcess'.
-  outV <- newEmptyMVar :: IO (MVar BL.ByteString)
-  errV <- newEmptyMVar :: IO (MVar String)
-  _ <- forkIO $ do
-    bs <- BL.hGetContents hout
-    -- Force to NF before signalling completion — we don't want lazy
-    -- IO to keep the handle alive past the 'waitForProcess'.
-    BL.length bs `seq` putMVar outV bs
-  _ <- forkIO $ do
-    s <- BLC.unpack <$> BL.hGetContents herr
-    length s `seq` putMVar errV s
-
-  out <- takeMVar outV
-  err <- takeMVar errV
-  ec  <- waitForProcess ph
-
-  when dcVerbose $ do
-    hPutStrLn stderr "agda-goals: --- agda stdout ---"
-    hPutStrLn stderr (BLC.unpack out)
-    hPutStrLn stderr "agda-goals: --- agda stderr ---"
-    hPutStrLn stderr err
-    hPutStrLn stderr "agda-goals: ---"
-
-  case ec of
-    ExitFailure code -> pure $ DriverError (AgdaNonZero code err)
-    ExitSuccess      -> do
-      let (errs, replies) = parseReplyLines out
-      if not (null errs) && null replies
-        then pure $ DriverError (BadOutput errs)
-        else case scanReplies replies of
-          ScanGoals goals    -> pure DriverOk
-            { drModuleName = modName
-            , drGoals      = goals
-            }
-          ScanAgdaError msg  -> pure $ DriverError (AgdaReportedError msg)
-          ScanNoGoalsReply   -> pure $ DriverError NoGoalsReply
+-- | Map a session reply burst onto the 'DriverResult' the bucketer
+-- consumes. A session that timed out or died maps to a structured error;
+-- otherwise the unchanged 'scanReplies' decides goals-vs-error.
+resultFromOutcome :: Text -> SendOutcome -> DriverResult
+resultFromOutcome modName out = case out of
+  SendTimeout _   -> DriverError (AgdaNonZero (-1) "agda timed out (session reset)")
+  SendDied _ err  -> DriverError (AgdaNonZero (-1) ("agda session ended: " ++ T.unpack err))
+  SendOk rs       -> case scanReplies rs of
+    ScanGoals goals   -> DriverOk { drModuleName = modName, drGoals = goals }
+    ScanAgdaError msg -> DriverError (AgdaReportedError msg)
+    ScanNoGoalsReply  -> DriverError NoGoalsReply
 
 -- | Result of scanning the reply stream. An 'Error' DisplayInfo
 -- takes precedence over 'AllGoalsWarnings': agda may emit an empty
@@ -223,25 +223,4 @@ scanReplies = go Nothing Nothing
       ReplyDisplayInfo (AllGoalsWarnings gs _ _)
         -> go mErr (mGs <|> Just gs) rs
       _ -> go mErr mGs rs
-
--- | Build the @IOTCM@ wire string for a one-shot @Cmd_load@. Format
--- documented at
--- <https://github.com/agda/agda/blob/master/src/full/Agda/Interaction/InteractionTop.hs>;
--- the constructor @IOTCM@ takes the module path, an
--- @HighlightingLevel@ (use @None@), a @HighlightingMethod@ (use
--- @Direct@), and the wrapped command.
---
--- IMPORTANT: @Cmd_load@'s second argument is a list of /bare include
--- directories/, NOT @[\"-i\", dir]@ pairs. Passing @-i@ tokens here
--- yields a quietly-degenerate session where Agda type-checks the
--- file but emits no @AllGoalsWarnings@ reply.
-iotcmLoadCmd :: FilePath -> [FilePath] -> String
-iotcmLoadCmd modPath includes =
-  "IOTCM " ++ show modPath ++ " None Direct (Cmd_load "
-    ++ show modPath ++ " " ++ showStringList (map ("-i" ++) includes) ++ ")"
-  where
-    showStringList ss = "[" ++ commaJoin (map show ss) ++ "]"
-    commaJoin []     = ""
-    commaJoin [x]    = x
-    commaJoin (x:xs) = x ++ "," ++ commaJoin xs
 

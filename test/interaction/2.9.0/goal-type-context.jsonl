@@ -1,0 +1,1 @@
+{"info":{"goalInfo":{"boundary":[],"entries":[{"binding":"Nat","inScope":true,"originalName":"n","reifiedName":"n"}],"kind":"GoalType","outputForms":[],"rewrite":"Simplified","type":"Nat","typeAux":{"kind":"GoalOnly"}},"interactionPoint":{"id":0,"range":[{"end":{"col":16,"line":6,"pos":85},"start":{"col":12,"line":6,"pos":81}}]},"kind":"GoalSpecific"},"kind":"DisplayInfo"}

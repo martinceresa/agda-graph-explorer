@@ -128,9 +128,20 @@ consumers that isn't ready to be picked up. For shipped work see
   proposal; the rationale for splitting it is recorded above.
 
 - **Write-side interaction bridge — semantic Agda editing as MCP
-  tools (`agda-interact`, working name).** `agda-explore` gives
+  tools (`agda-interact`, working name).** — *SHIPPED 2026-06-12*, built
+  directly into the `agda-explore` server under `--enable-interact`
+  (tools `load` / `goal_type` / `goal_context` / `infer` / `normalize` /
+  `case_split` / `refine` / `give` / `auto`); see
+  [Changelog.md](Changelog.md). The session driver
+  (`AgdaInteract.Session`) is shared with `agda-goals`, exactly as the
+  implementation note below anticipated. Two pieces stay deferred:
+  `auto` (Mimer) — Agda 2.9.0's IOTCM reader rejects `Cmd_autoOne`, so
+  the tool degrades until the right invocation is pinned; and a
+  one-Agda-process-per-module *pool* (the current cap closes idle
+  sessions rather than pooling). The original proposal, kept for the
+  rationale, follows. `agda-explore` gave
   agents a rich *read* surface (`locate`, `type_of`, `callers`,
-  `impact`, `find_lemma`, …); there is no *write* counterpart. AI
+  `impact`, `find_lemma`, …); there was no *write* counterpart. AI
   agents editing this corpus fall back to blind exact-string
   replacement plus a full `agda Main` reload to find out whether the
   edit typechecks. That fights Agda's hole-driven design on three

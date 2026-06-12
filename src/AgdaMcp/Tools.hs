@@ -10,10 +10,8 @@ module AgdaMcp.Tools
   ( dispatch
   ) where
 
-import           Data.Aeson         (Value (..), object, parseJSON, (.=))
-import qualified Data.Aeson.Key     as Key
+import           Data.Aeson         (Value (..), object, (.=))
 import qualified Data.Aeson.KeyMap  as KM
-import           Data.Aeson.Types   (parseMaybe)
 import           Data.IORef         (readIORef, writeIORef)
 import           Data.List          (isPrefixOf)
 import qualified Data.Map.Strict    as M
@@ -27,64 +25,25 @@ import           System.FilePath    (isAbsolute, normalise, (</>))
 import           System.Process     (CreateProcess (..), proc,
                                      readCreateProcessWithExitCode)
 
+import           AgdaInteract.Tools (interactTools)
 import           AgdaMcp.Query
 import           AgdaMcp.Rpc
 import           AgdaMcp.State
+import           AgdaMcp.ToolDef
 import qualified BuildInfo
-
--- ---------------------------------------------------------------------
--- Argument helpers
--- ---------------------------------------------------------------------
-
-argLookup :: Value -> Text -> Maybe Value
-argLookup (Object o) k = KM.lookup (Key.fromText k) o
-argLookup _          _ = Nothing
-
-argText :: Value -> Text -> Maybe Text
-argText v k = argLookup v k >>= parseMaybe parseJSON
-
-argInt :: Value -> Text -> Int -> Int
-argInt v k d = fromMaybe d (argLookup v k >>= parseMaybe parseJSON)
-
-argBool :: Value -> Text -> Bool -> Bool
-argBool v k d = fromMaybe d (argLookup v k >>= parseMaybe parseJSON)
-
-argDouble :: Value -> Text -> Double -> Double
-argDouble v k d = fromMaybe d (argLookup v k >>= parseMaybe parseJSON)
-
--- ---------------------------------------------------------------------
--- JSON-schema builders
--- ---------------------------------------------------------------------
-
-objSchema :: [(Text, Value)] -> [Text] -> Value
-objSchema props req = object
-  [ "type"                 .= ("object" :: Text)
-  , "properties"           .= object [ Key.fromText k .= v | (k, v) <- props ]
-  , "required"             .= req
-  , "additionalProperties" .= False
-  ]
-
-sp, ip, bp, np :: Text -> Value
-sp d = object ["type" .= ("string" :: Text),  "description" .= d]
-ip d = object ["type" .= ("integer" :: Text), "description" .= d]
-bp d = object ["type" .= ("boolean" :: Text), "description" .= d]
-np d = object ["type" .= ("number" :: Text),  "description" .= d]
 
 -- ---------------------------------------------------------------------
 -- Tool catalogue
 -- ---------------------------------------------------------------------
 
-type ToolRunner = ServerState -> Value -> IO (Either Text Text)
+-- | The tool catalogue available for this server state: the read-side
+-- graph queries always, plus the write-side interaction-bridge tools
+-- ('interactTools') only when started with @--enable-interact@.
+enabledTools :: ServerState -> [Tool]
+enabledTools ss = graphTools ++ [ t | cfgEnableInteract (ssConfig ss), t <- interactTools ]
 
-data Tool = Tool
-  { tName   :: !Text
-  , tDesc   :: !Text
-  , tSchema :: !Value
-  , tRun    :: !ToolRunner
-  }
-
-tools :: [Tool]
-tools =
+graphTools :: [Tool]
+graphTools =
   [ Tool "locate"
       "Where a definition lives: its module, source file:line, kind, state, \
       \visibility, direct caller/dependency counts, and transitive blast radius. \
@@ -333,11 +292,6 @@ tools =
           Right <$> statusText ss)
   ]
 
-needName :: Value -> (Text -> IO (Either Text Text)) -> IO (Either Text Text)
-needName a go = case argText a "name" of
-  Nothing -> pure (Left "missing required argument: name")
-  Just n  -> go n
-
 -- | The single line appended to a tool's rendered output when
 -- 'ensureFresh' served a /stale/ snapshot — i.e. a rebuild is in flight in
 -- the background and these results reflect the snapshot built at the given
@@ -552,7 +506,7 @@ dispatch ss msg = case rpcMethod msg of
   Just "notifications/initialized" -> pure Nothing
   Just "notifications/cancelled"   -> pure Nothing
   Just "ping"                      -> reply (object [])
-  Just "tools/list"                -> reply (object ["tools" .= map toolInfo tools])
+  Just "tools/list"                -> reply (object ["tools" .= map toolInfo (enabledTools ss)])
   Just "tools/call"                -> Just <$> handleCall ss theId (rpcParams msg)
   Just other -> case rpcId msg of
     Just _  -> pure (Just (errorResponse theId codeMethodNotFound ("method not found: " <> other)))
@@ -567,7 +521,7 @@ dispatch ss msg = case rpcMethod msg of
 handleCall :: ServerState -> Value -> Value -> IO Value
 handleCall ss theId params = case argText params "name" of
   Nothing -> pure (errorResponse theId codeInvalidParams "tools/call: missing tool name")
-  Just tn -> case [ t | t <- tools, tName t == tn ] of
+  Just tn -> case [ t | t <- enabledTools ss, tName t == tn ] of
     []      -> pure (errorResponse theId codeMethodNotFound ("unknown tool: " <> tn))
     (t : _) -> do
       let args = fromMaybe (Object KM.empty) (argLookup params "arguments")

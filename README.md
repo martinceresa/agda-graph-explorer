@@ -7,23 +7,23 @@ shared library plus four executables that read `agda-deps`' v2
 
 **Nothing here links Agda**, so the whole repo builds from Hackage in minutes.
 
-| Tool | What it does |
-|------|--------------|
-| **`agda-graph`** (library) | Typed view of the expanded `graph.json` + an in-memory `Index`. The substrate the executables share. |
-| **`agda-unused`** | Flags unused imports / definitions / blanket opens / public re-exports. |
-| **`agda-optimization`** | ~20 subcommand-driven graph-level analyses (centrality, clustering, motif mining, axiom footprint, …). |
-| **`agda-goals`** | Drives `agda --interaction-json` per file and buckets goal states by canonical hash. Needs `agda` on `$PATH`. |
-| **`agda-explore`** | Interactive MCP server: a daemon that answers point queries over the graph for coding agents, regenerating it on the fly via `agda-deps`. |
+| Tool                       | What it does                                                                                                                              |
+|----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------|
+| **`agda-graph`** (library) | Typed view of the expanded `graph.json` + an in-memory `Index`. The substrate the executables share.                                      |
+| **`agda-unused`**          | Flags unused imports / definitions / blanket opens / public re-exports.                                                                   |
+| **`agda-optimization`**    | ~20 subcommand-driven graph-level analyses (centrality, clustering, motif mining, axiom footprint, …).                                    |
+| **`agda-goals`**           | Drives `agda --interaction-json` (one persistent process) and buckets goal states by canonical hash. Needs `agda` on `$PATH`.            |
+| **`agda-explore`**         | Interactive MCP server: a daemon that answers point queries over the graph for coding agents, regenerating it on the fly via `agda-deps`. |
 
 The single coupling to `agda-deps` is the **v2 `graph.json` wire
 schema** — `agda-deps` produces it, this repo consumes it. See
 [The wire contract](#the-wire-contract).
 
 For runnable recipes (one per subcommand, with empirical defaults
-explained) see [Examples.md](Examples.md). For forward-looking work see
-[TODO.md](TODO.md); for deferred / refused ideas see
-[Backlog.md](Backlog.md) and [Deferred.md](Deferred.md); for shipped work
-see [Changelog.md](Changelog.md).
+explained) see [Examples.md](Examples.md).
+For forward-looking work see [TODO.md](TODO.md);
+for deferred / refused ideas see [Backlog.md](Backlog.md) and [Deferred.md](Deferred.md);
+for shipped work see [Changelog.md](Changelog.md).
 
 ## Prerequisites
 
@@ -84,14 +84,16 @@ output. Config: [`.agda-optimization.yml`](#agda-optimizationyml)
 `scripts/fiedler_helper.py` (needs SciPy). Helper path:
 `--helper=PATH` > `$AGDA_OPTIMIZATION_HELPER` > the bundled data-file.
 
-**Determinism.** `agda-unused` and `agda-optimization` are multicore
+**Parallelism.** `agda-unused` and `agda-optimization` are multicore
 (`-with-rtsopts=-N`); output is byte-identical between `+RTS -N1` and
 `+RTS -NK`.
 
 ## `agda-goals` — bucket goal states
 
-Drives `agda --interaction-json` per file (subprocess), canonicalises
-each open goal type, and buckets by hash to surface recurring missing
+Drives `agda --interaction-json` over the root files as a subprocess —
+one **persistent** Agda process reused across files (the same session
+driver `agda-explore`'s interaction bridge uses) — canonicalises each
+open goal type, and buckets by hash to surface recurring missing
 lemmas. Needs `agda` on `$PATH`. Config:
 [`.agda-goals.yml`](#agda-goalsyml).
 (Experimental; not yet a polished end-user surface.)
@@ -120,6 +122,29 @@ agda-explore --project /path/to/agda/project    # stdio MCP server
 
 Config: [`.agda-explore.yml`](#agda-exploreyml).
 
+**Write-side interaction bridge (opt-in).** With `--enable-interact`
+(or `enable-interact: true` in the config) and `agda` on `$PATH`, the
+daemon *also* exposes goal-driven **editing** tools backed by a live
+`agda --interaction-json` session — the write counterpart to the read
+queries above:
+
+```
+load · goal_type · goal_context · infer · normalize ·
+case_split · refine · give · auto
+```
+
+`load` opens a module and lists its open goals with stable ids
+(`g0, g1, …`) that survive Agda's hole renumbering across reloads. The
+mutators (`case_split` / `refine` / `give`) are **Agda-validated** and
+return a **unified diff** — the bridge never writes the file, and a term
+that doesn't typecheck comes back as the localized Agda error with the
+file untouched. A `give` / `refine` using `postulate`, a
+termination/coverage/`OPTIONS` pragma, or another escape hatch is
+refused up front (a hard zero-axiom contract). `.lagda.md` literate
+sources are handled (edits land inside the code fence). `auto` (Mimer)
+is wired but unavailable on Agda 2.9.0 (its IOTCM reader rejects the
+command) — use `refine`/`give`.
+
 ## Configuration (YAML)
 
 Each tool reads an optional YAML config. **Every key is a kebab-case
@@ -146,14 +171,14 @@ leaves the default in place.
 
 ### `.agda-unused.yml`
 
-| Key | CLI flag | Meaning |
-|-----|----------|---------|
-| `json` | `--json` | Path to the expanded `graph.json`. |
-| `rel-to` | `--rel-to` | Base directory findings are reported relative to. |
-| `json-out` | `--json-out` | Emit findings as a JSON array (bool). |
-| `kinds` | `--kinds` | Which finding kinds to report (YAML list or comma-string). |
-| `roots` | positional `ROOTS` | Source roots to scan (YAML list). |
-| `exclude` | `--exclude` | Globs whose matching findings are dropped. |
+| Key        | CLI flag           | Meaning                                                    |
+|------------|--------------------|------------------------------------------------------------|
+| `json`     | `--json`           | Path to the expanded `graph.json`.                         |
+| `rel-to`   | `--rel-to`         | Base directory findings are reported relative to.          |
+| `json-out` | `--json-out`       | Emit findings as a JSON array (bool).                      |
+| `kinds`    | `--kinds`          | Which finding kinds to report (YAML list or comma-string). |
+| `roots`    | positional `ROOTS` | Source roots to scan (YAML list).                          |
+| `exclude`  | `--exclude`        | Globs whose matching findings are dropped.                 |
 
 `json:` + `roots:` supply what were the required CLI inputs, so
 `agda-unused` can run with no arguments.
@@ -195,15 +220,15 @@ term-cluster:
 
 ### `.agda-goals.yml`
 
-| Key | CLI flag | Meaning |
-|-----|----------|---------|
-| `agda-bin` | `--agda-bin` | Path to the `agda` binary to drive. |
-| `include-paths` | `-i` | Include paths passed to `agda` (YAML list). |
-| `agda-args` | — | Extra raw args forwarded to `agda` (YAML list). |
-| `format` | `--format` | `human` or `json`. |
-| `quiet` | `--quiet` | Suppress the config breadcrumb (bool). |
-| `top-n` | `--top-n` | How many buckets to report. |
-| `roots` | positional | Files / directories to drive (YAML list). |
+| Key             | CLI flag     | Meaning                                         |
+|-----------------|--------------|-------------------------------------------------|
+| `agda-bin`      | `--agda-bin` | Path to the `agda` binary to drive.             |
+| `include-paths` | `-i`         | Include paths passed to `agda` (YAML list).     |
+| `agda-args`     | —            | Extra raw args forwarded to `agda` (YAML list). |
+| `format`        | `--format`   | `human` or `json`.                              |
+| `quiet`         | `--quiet`    | Suppress the config breadcrumb (bool).          |
+| `top-n`         | `--top-n`    | How many buckets to report.                     |
+| `roots`         | positional   | Files / directories to drive (YAML list).       |
 
 ```yaml
 agda-bin: agda
@@ -220,8 +245,11 @@ module), `entries` (a *list* of entry modules — see below), `include`
 (include paths, list), `graph` (a prebuilt `graph.json` for preloaded
 mode), `project`, `out-dir`, `agda-deps-bin`, `agda-unused-bin`.
 Behaviour toggles (bools): `no-term-hashes`, `no-signatures`,
-`normalise-signatures`, `show-implicit`, `no-auto-rebuild`, `no-watch`;
-plus `min-term-depth` (int).
+`normalise-signatures`, `show-implicit`, `no-auto-rebuild`, `no-watch`,
+`enable-interact` (expose the write-side interaction bridge); plus
+`min-term-depth` (int), `agda-bin` (the `agda` binary for interaction
+sessions, else `$AGDA_BIN` / `$PATH`), and `agda-arg` (a list of extra
+flags for `agda --interaction-json`, e.g. `--safe`).
 
 **Multiple entry modules.** `--entry` is repeatable on the CLI and the
 config accepts an `entries:` list alongside the back-compat scalar
@@ -285,3 +313,4 @@ split-file layout used only by `agda-deps`' HTML views), see the
 ## AI Disclaimer
 
 Substantial portions of this codebase were developed with AI assistance.
+Everthing that works is thanks to AI, whatever does not, it is my fault.

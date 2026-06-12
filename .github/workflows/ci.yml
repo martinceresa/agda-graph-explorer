@@ -78,3 +78,19 @@ jobs:
 
     - name: agda-explore — binary smoke
       run: cabal run -v0 agda-explore -- --version
+
+    - name: interaction bridge — offline test-suite (protocol fixtures + pure logic)
+      # Replays the committed golden --interaction-json transcripts under
+      # test/interaction/<version>/ through the parser + burst-splitter, and
+      # exercises the guard / literate / goal-id / edit logic. NO agda binary
+      # is used — an Agda bump that changes the wire shape fails here until
+      # the fixtures are regenerated (bash test/interaction/regen.sh).
+      run: cabal test interaction-spec
+
+    - name: agda-explore — interaction tools listed under --enable-interact
+      run: |
+        printf '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n' \
+          | cabal run -v0 agda-explore -- --enable-interact --graph test/deps.json \
+          | grep -q '"name":"give"' \
+          && echo "interaction tools present" \
+          || { echo "interaction tools MISSING from tools/list"; exit 1; }

@@ -1,0 +1,14 @@
+JSON> {"kind":"Status","status":{"checked":false,"showImplicitArguments":false,"showIrrelevantArguments":false}}
+{"kind":"ClearRunningInfo"}
+{"kind":"ClearHighlighting","tokenBased":"NotOnlyTokenBased"}
+{"debugLevel":1,"kind":"RunningInfo","message":"Checking Holes (/home/mceresa/Repositories/Projects/agda-graph-explorer/test/interaction/src/Holes.agda)."}
+{"kind":"Status","status":{"checked":false,"showImplicitArguments":false,"showIrrelevantArguments":false}}
+{"info":{"errors":[],"invisibleGoals":[],"kind":"AllGoalsWarnings","visibleGoals":[{"constraintObj":{"id":0,"range":[{"end":{"col":16,"line":6,"pos":85},"start":{"col":12,"line":6,"pos":81}}]},"kind":"OfType","type":"Nat"},{"constraintObj":{"id":1,"range":[{"end":{"col":22,"line":9,"pos":131},"start":{"col":18,"line":9,"pos":127}}]},"kind":"OfType","type":"Nat"},{"constraintObj":{"id":2,"range":[{"end":{"col":22,"line":10,"pos":153},"start":{"col":18,"line":10,"pos":149}}]},"kind":"OfType","type":"Nat"},{"constraintObj":{"id":3,"range":[{"end":{"col":13,"line":13,"pos":191},"start":{"col":9,"line":13,"pos":187}}]},"kind":"OfType","type":"A"}],"warnings":[]},"kind":"DisplayInfo"}
+{"interactionPoints":[{"id":0,"range":[{"end":{"col":16,"line":6,"pos":85},"start":{"col":12,"line":6,"pos":81}}]},{"id":1,"range":[{"end":{"col":22,"line":9,"pos":131},"start":{"col":18,"line":9,"pos":127}}]},{"id":2,"range":[{"end":{"col":22,"line":10,"pos":153},"start":{"col":18,"line":10,"pos":149}}]},{"id":3,"range":[{"end":{"col":13,"line":13,"pos":191},"start":{"col":9,"line":13,"pos":187}}]}],"kind":"InteractionPoints"}
+JSON> {"kind":"Status","status":{"checked":false,"showImplicitArguments":false,"showIrrelevantArguments":false}}
+{"info":{"goalInfo":{"boundary":[],"entries":[{"binding":"Nat","inScope":true,"originalName":"n","reifiedName":"n"}],"kind":"GoalType","outputForms":[],"rewrite":"Simplified","type":"Nat","typeAux":{"kind":"GoalOnly"}},"interactionPoint":{"id":0,"range":[{"end":{"col":16,"line":6,"pos":85},"start":{"col":12,"line":6,"pos":81}}]},"kind":"GoalSpecific"},"kind":"DisplayInfo"}
+JSON> {"kind":"Status","status":{"checked":false,"showImplicitArguments":false,"showIrrelevantArguments":false}}
+{"info":{"goalInfo":{"expr":"Nat","kind":"InferredType"},"interactionPoint":{"id":3,"range":[{"end":{"col":13,"line":13,"pos":191},"start":{"col":9,"line":13,"pos":187}}]},"kind":"GoalSpecific"},"kind":"DisplayInfo"}
+JSON> {"kind":"Status","status":{"checked":false,"showImplicitArguments":false,"showIrrelevantArguments":false}}
+{"info":{"goalInfo":{"computeMode":"DefaultCompute","expr":"2","kind":"NormalForm"},"interactionPoint":{"id":0,"range":[{"end":{"col":16,"line":6,"pos":85},"start":{"col":12,"line":6,"pos":81}}]},"kind":"GoalSpecific"},"kind":"DisplayInfo"}
+JSON> 

@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+### Write-side interaction bridge for `agda-explore` (2026-06-12)
+
+An opt-in (`--enable-interact`, or `enable-interact: true` in
+`.agda-explore.yml`) **write surface** on the `agda-explore` daemon,
+backed by a long-lived `agda --interaction-json` subprocess — the
+symmetric counterpart to the read-side query tools, and a *second,
+independent* subprocess model beside the graph daemon (interaction tools
+reflect live on-disk state and bypass `ensureFresh`). Needs `agda` on
+`$PATH` (or `--agda-bin`).
+
+New MCP tools:
+
+- **read:** `load` (open a module; lists goals with STABLE ids
+  `g0, g1, …` that survive Agda's hole renumbering across reloads),
+  `goal_type`, `goal_context`, `infer`, `normalize`.
+- **write (Agda-validated):** `case_split`, `refine`, `give` — each
+  returns a **unified diff** (the bridge never writes the file); a term
+  that doesn't typecheck returns the localized Agda error with the file
+  left untouched. `auto` (Mimer) is wired but degrades on Agda 2.9.0,
+  whose IOTCM reader rejects `Cmd_autoOne` — use `refine`/`give`.
+- **hard zero-axiom contract:** `give` / `refine` input is rejected up
+  front if it uses `postulate`, a termination / coverage / `OPTIONS`
+  pragma, or another escape hatch (`AgdaInteract.Guard`).
+- `.lagda.md` literate sources are first-class: Agda reports positions
+  as character offsets into the full file, so edits land inside the
+  ```` ```agda ```` fence and never in surrounding prose.
+
+Internals:
+
+- The `--interaction-json` reply parser + IOTCM command builders were
+  promoted into the `agda-graph` library
+  (`AgdaGraph.Interaction.Protocol` / `.Iotcm`); `AgdaGoals.Protocol` is
+  now a thin re-export.
+- `agda-goals` was migrated onto the same long-lived session driver
+  (`AgdaInteract.Session`): one persistent `agda` process across all
+  files (reusing the `.agdai` cache) instead of one per file. Goal
+  extraction is **byte-identical** to the old one-shot driver (the
+  acceptance gate, human and `--format=json`).
+- New offline test-suite `interaction-spec` replays committed golden
+  `--interaction-json` transcripts (`test/interaction/<version>/`) as a
+  protocol-skew tripwire, plus pure guard / literate / goal-id / edit
+  unit tests. CI runs it with **no `agda` binary** (regenerate the
+  fixtures with `bash test/interaction/regen.sh` after an Agda bump).
+
 ### Agent-usage-analysis recommendations (2026-06-12)
 
 Implemented all nine recommendations mined from a downstream consumer

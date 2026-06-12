@@ -6,7 +6,10 @@ description: >-
   need to locate a definition, find who calls or uses it, see what it
   depends on, gauge the blast radius of changing it, read its type, find
   structurally or type-similar definitions, or hunt unused imports / dead
-  code. Backed by the `agda-explore` MCP server (from the agda-explore
+  code. If the server is started with --enable-interact, also use it to
+  edit proofs goal-by-goal — open a module's goals, read a goal's type and
+  context, case-split, refine, or give a term (all Agda-validated, returned
+  as diffs). Backed by the `agda-explore` MCP server (from the agda-explore
   plugin).
 ---
 
@@ -156,6 +159,35 @@ matched against the file path or module name (`**/Init.agda`, `Prelude.*`;
 resolved scope, effective kinds, and any excludes, so a "0 findings" result
 is always self-describing — never silently mis-scoped.
 
+## Editing proofs with the interaction bridge (when enabled)
+
+If the server was started with `--enable-interact` (or `enable-interact:
+true` in `.agda-explore.yml`) and `agda` is on `$PATH`, a **write** surface
+is available — prefer it over blind string edits + a full reload, because it
+drives Agda's own hole workflow and validates every step:
+
+| You want to…                                          | Use            |
+|-------------------------------------------------------|----------------|
+| Open a module and see its open goals (with stable ids) | `load`         |
+| Read a goal's type + in-scope context                  | `goal_type` / `goal_context` |
+| Infer / normalise an expression in a goal's context    | `infer` / `normalize` |
+| Case-split a goal on a variable                        | `case_split`   |
+| Refine a goal by a head symbol (`f ?`)                 | `refine`       |
+| Fill a goal with a complete term (type-checked)        | `give`         |
+
+Workflow: `load <file>` first — it returns goals as `g0, g1, …`, **stable
+ids that persist across reloads** (Agda renumbers holes; these don't). Pass
+a stable id to the other tools. `case_split` / `refine` / `give` return a
+**unified diff and do NOT write the file** — apply the diff yourself, then
+`load` again to pick up the new goals. A `give` whose term doesn't typecheck
+comes back as the localized Agda error with the file untouched, so you can
+iterate safely. Note: the bridge **refuses** any `give` / `refine` that uses
+`postulate`, a termination/coverage/`OPTIONS` pragma, or another escape
+hatch — it will not close a goal by weakening soundness; supply a real term.
+`auto` (Mimer) is unavailable on Agda 2.9.0 (the interaction reader rejects
+it) — reach for `refine`/`give` instead. `.lagda.md` files work; edits stay
+inside the code block.
+
 ## Good habits
 
 - Lead with `locate`/`type_of` to orient, `callers`/`impact` before editing,
@@ -165,3 +197,7 @@ is always self-describing — never silently mis-scoped.
   conclusion already matches the goal.
 - Only fall back to reading files or grepping when you need the *prose*
   around a definition, or to verify an `unused` finding.
+- When the interaction bridge is enabled and you're *constructing* a proof
+  (not just reading), drive it through `load` → `goal_type` →
+  `case_split`/`refine`/`give` rather than editing the hole as text and
+  reloading — each step is Agda-validated and the diffs keep you in sync.

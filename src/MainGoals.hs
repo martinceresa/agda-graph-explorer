@@ -35,7 +35,7 @@ import           AgdaGoals.Canon      ( CanonicalGoal(..) )
 import           AgdaGoals.Config     ( ConfigTarget(..), applyConfig
                                       , discoverConfigPath, loadConfig )
 import           AgdaGoals.Driver     ( DriverConfig(..), DriverError(..)
-                                      , DriverResult(..), runDriver
+                                      , DriverResult(..), runDriverBatch
                                       , driverErrorTag )
 import           AgdaGoals.Protocol   ( Goal(..), GoalRange(..), RangePos(..) )
 
@@ -201,13 +201,13 @@ main = do
       hPutStrLn stderr $ "agda-goals: applied config from " ++ p
     _ -> pure ()
 
-  -- Drive Agda once per root file, single-threaded. Force results to
-  -- NF as we accumulate so we don't grow a chain of DriverResults
-  -- across the corpus.
-  let drive1 :: FilePath -> IO DriverResult
-      drive1 f = runDriver DriverConfig
+  -- Drive Agda over the root files via ONE persistent
+  -- `agda --interaction-json` process (reusing its .agdai cache across
+  -- files), single-threaded. 'dcModuleFile' is a placeholder here —
+  -- 'runDriverBatch' sets it per file.
+  let tmpl = DriverConfig
         { dcAgdaBin      = optAgdaBin opts
-        , dcModuleFile   = f
+        , dcModuleFile   = ""
         , dcIncludePaths = optIncludes opts
         , dcExtraArgs    = optAgdaArgs opts
         , dcVerbose      = optVerbose opts
@@ -223,7 +223,7 @@ main = do
     forM_ missing $ \f -> hPutStrLn stderr ("agda-goals: file not found: " ++ f)
     exitWith (ExitFailure 2)
 
-  results <- mapM drive1 (optRoots opts)
+  results <- runDriverBatch tmpl (optRoots opts)
 
   -- Collect goals + propagate the first hard error to set exit code.
   -- Note: we still emit buckets for any successful files even if one

@@ -19,7 +19,7 @@
 -- With no flags it discovers a project from the current directory.
 module Main (main) where
 
-import           Control.Exception  (SomeException, try)
+import           Control.Exception  (SomeException, finally, try)
 import           Control.Monad      (forM)
 import           Data.List          (intercalate, isSuffixOf, sortOn)
 import           Data.Maybe         (fromMaybe)
@@ -37,6 +37,7 @@ import           AgdaMcp.Config     (Opts (..), applyConfig,
                                      loadConfig, orderNub)
 import           AgdaMcp.Rpc        (runStdioLoop)
 import           AgdaMcp.State
+import           AgdaInteract.Tools (closeAllSessions)
 import           AgdaMcp.Tools      (dispatch)
 import qualified BuildInfo
 
@@ -54,6 +55,7 @@ defOpts = Opts
   , oHashes = True, oSigs = True, oNormSigs = False, oShowImpl = False
   , oMinDepth = 3, oAuto = True, oWatch = True, oQueryLog = True
   , oAutoResolve = True
+  , oEnableInteract = False, oAgdaBin = Nothing, oInteractArgs = []
   , oHelp = False, oVer = False
   }
 
@@ -95,6 +97,9 @@ parseOpts (x : xs) o = case x of
   "--no-watch"        -> parseOpts xs o { oWatch = False }
   "--no-query-log"    -> parseOpts xs o { oQueryLog = False }
   "--no-auto-resolve" -> parseOpts xs o { oAutoResolve = False }
+  "--enable-interact" -> parseOpts xs o { oEnableInteract = True }
+  "--agda-bin"        -> need $ \v -> o { oAgdaBin = Just v }
+  "--agda-arg"        -> need $ \v -> o { oInteractArgs = oInteractArgs o ++ [v] }
   _ | isAgdaFile x    -> parseOpts xs o { oEntries = oEntries o ++ [x] }
     | otherwise       -> Left ("unknown argument: " ++ x)
   where
@@ -196,6 +201,9 @@ buildConfig o = do
         , cfgWatch        = oWatch o
         , cfgQueryLog     = oQueryLog o
         , cfgAutoResolveUnique = oAutoResolve o
+        , cfgEnableInteract = oEnableInteract o
+        , cfgAgdaBin      = oAgdaBin o
+        , cfgInteractArgs = oInteractArgs o
         , cfgIncludes     = bin
         }
       preloaded g incl = do
@@ -285,6 +293,13 @@ usage = unlines
   , "                        in live mode, off in preloaded mode)."
   , "  --no-auto-resolve     Do not auto-resolve a name to its sole near-match candidate"
   , "                        (on by default; a one-line note flags any auto-resolution)."
+  , "  --enable-interact     Expose the write-side interaction-bridge tools (load,"
+  , "                        goal_type, goal_context, infer, normalize, case_split,"
+  , "                        refine, give) backed by a live `agda --interaction-json`"
+  , "                        session. Needs `agda` on $PATH (or --agda-bin)."
+  , "  --agda-bin P          Path to agda for interaction sessions (else $AGDA_BIN, $PATH)."
+  , "  --agda-arg ARG        Extra flag for `agda --interaction-json` (repeatable;"
+  , "                        e.g. --agda-arg --safe)."
   , "  --config FILE         Load this .agda-explore.yml (else discovered; see below)."
   , "  -h, --help            This help."
   , "  -V, --version         Version."
@@ -325,7 +340,9 @@ main = do
           ss  <- newServerState cfg
           startWatcher ss
           hPutStrLn stderr ("agda-explore: ready (" ++ modeDesc cfg ++ ")")
-          runStdioLoop (dispatch ss)
+          -- Reap any live interaction sessions when the stdio loop ends
+          -- (stdin EOF) or throws, so child agda processes aren't orphaned.
+          runStdioLoop (dispatch ss) `finally` closeAllSessions ss
 
 -- | Discover + load a config file and overlay it onto 'defOpts',
 -- returning the seed 'Opts' and the applied path (for the breadcrumb).

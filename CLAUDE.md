@@ -24,9 +24,11 @@ The repo ships one shared library and four executables:
   `chokepoint`, `silhouette`, `entwine`, `fiedler`, `horizon`,
   `strata` — round 4 — plus `term-cluster`, `concept-bundle`).
 - **`agda-goals`** — *process driver* (not a `Backend`): drives
-  `agda --interaction-json` per file as a **subprocess**, captures the
-  `AllGoalsWarnings` reply, and buckets goal states by canonical hash.
-  Needs `agda` on `$PATH`; links no Agda library.
+  `agda --interaction-json` over the root files using a **single
+  persistent process** (`AgdaInteract.Session`, shared with
+  `agda-explore`'s bridge — reuses one `.agdai` cache across files),
+  captures each `AllGoalsWarnings` reply, and buckets goal states by
+  canonical hash. Needs `agda` on `$PATH`; links no Agda library.
 - **`agda-explore`** — *interactive MCP (Model Context Protocol)
   server*: a long-running daemon that loads the expanded `graph.json`
   once into `AgdaGraph.Index` and answers point queries over stdio
@@ -34,6 +36,15 @@ The repo ships one shared library and four executables:
   `type_of` / `similar_types` / `similar_bodies` / `search` / `unused`).
   It regenerates the graph *on the fly* by re-running `agda-deps` as a
   **subprocess** (see [Cross-repo runtime link](#cross-repo-runtime-link)).
+  Under `--enable-interact` it *also* exposes a **write-side interaction
+  bridge** (`load` / `goal_type` / `goal_context` / `infer` /
+  `normalize` / `case_split` / `refine` / `give` / `auto`) backed by a
+  long-lived `agda --interaction-json` **subprocess** — every `give` /
+  `refine` is Agda-validated and returns a unified diff (the bridge
+  never writes the file). This is a *second, independent* subprocess
+  model beside the graph daemon: interaction tools reflect live on-disk
+  state and deliberately bypass `ensureFresh`. Needs `agda` on `$PATH`
+  (or `--agda-bin`).
 
 A Claude Code plugin under `plugin/` bundles the `agda-explore` server
 with a skill and two Agda agents. See [plugin/README.md](plugin/README.md).
@@ -103,7 +114,8 @@ Two tools shell out:
   (`plugin/bin/agda-explore-launch.sh`) says as much in its
   not-found message. Preloaded mode (point the daemon at an existing
   `graph.json`) needs no `agda-deps` at all.
-- **`agda-goals` → `agda`.** Drives `agda --interaction-json` per file;
+- **`agda-goals` → `agda`.** Drives `agda --interaction-json` over the
+  root files as one persistent subprocess (via `AgdaInteract.Session`);
   needs `agda` on `$PATH`.
 
 ## Module map
@@ -150,8 +162,12 @@ src/
 
   MainGoals.hs                  agda-goals entry point.
   AgdaGoals/
-    Protocol.hs                 --interaction-json wire format.
-    Driver.hs                   per-file agda subprocess driver.
+    Protocol.hs                 thin re-export of
+                                AgdaGraph.Interaction.Protocol (kept for
+                                the historical name; mirrors Canon.hs).
+    Driver.hs                   batch driver over a single persistent
+                                AgdaInteract.Session (one process for all
+                                files; respawn-on-poison fallback).
     Canon.hs                    textual goal-type canonicaliser +
                                 local Murmur64 hashString (vendored from
                                 murmur-hash to keep this repo Agda-free).
@@ -169,11 +185,37 @@ src/
                                 sibling-binary discovery; fsnotify
                                 watcher with poll fallback.
     Query.hs                    pure point queries over Index.
-    Tools.hs                    MCP lifecycle + tool catalogue +
-                                tools/call dispatch; `unused` shells to
-                                agda-unused.
+    Tools.hs                    MCP lifecycle + read-side tool catalogue
+                                + tools/call dispatch; `unused` shells to
+                                agda-unused. Appends interactTools (gated
+                                on --enable-interact).
+    ToolDef.hs                  shared Tool/ToolRunner record + schema
+                                builders + arg accessors (so Tools.hs and
+                                AgdaInteract.Tools share them, no cycle).
+
+  AgdaInteract/                 Write-side interaction bridge (agda-explore
+                                only; the long-lived agda session model).
+    Session.hs                  long-lived `agda --interaction-json`
+                                subprocess: prompt-delimited reply bursts,
+                                timeout→poison, reader/stderr threads,
+                                SessionEntry registry value.
+    GoalId.hs                   stable goal ids (g0,g1,…) keyed by hole
+                                char-offset, surviving Agda's renumbering
+                                across reloads (syncGoals).
+    Guard.hs                    no-postulate / no-escape-hatch guard on
+                                give/refine input (hard zero-axiom contract).
+    Literate.hs                 .lagda.md code-block detection + the
+                                isInsideCode splice guard.
+    Edit.hs                     splice / clause re-indent / unified-diff
+                                helpers (Data.Text char offsets).
+    Tools.hs                    the interaction tool runners + session
+                                registry management + interactTools list.
 
 src-agda-graph/AgdaGraph/       Shared library.
+  Interaction/Protocol.hs       FromJSON mirror of the --interaction-json
+                                reply wire shape (consumer source of truth;
+                                shared by agda-goals + the bridge).
+  Interaction/Iotcm.hs          pure IOTCM command-string builders.
   Schema.hs                     FromJSON / NFData mirror of the expanded
                                 JSON. Consumer source of truth for the
                                 wire shape.
@@ -267,6 +309,54 @@ plugin/                         Claude Code plugin bundling the
   discriminator is the running binary's *mtime*
   (`AgdaMcp.State.binaryIdent`), not the fingerprint, whose `built` date
   freezes across a rebuild that doesn't recompile `BuildInfo`.
+
+- **The `--interaction-json` protocol is not version-stable, so it is
+  pinned by golden fixtures.** `test/interaction/<agda-version>/*.jsonl`
+  are real `agda` transcripts; the offline `interaction-spec` test-suite
+  replays them through `AgdaGraph.Interaction.Protocol` (CI never runs
+  `agda`). An Agda bump that changes the wire shape fails that suite —
+  regenerate with `bash test/interaction/regen.sh` (needs `agda`) and
+  review the diff. The parser is deliberately **lenient** (unknown
+  `kind` → `Other*`, never a decode crash) for the same reason; keep it
+  that way.
+
+- **Interaction bursts are delimited by the `JSON> ` prompt, not by line
+  structure.** Agda prints the readiness prompt *without* a trailing
+  newline, so it glues onto the first reply of the next burst
+  (`JSON> {…}`). `AgdaInteract.Session`'s reader emits a burst boundary
+  on the prompt *prefix* of a line AND on a trailing bare `JSON> `
+  (a line reader would block on the latter — it has no newline). One
+  prompt = one command settled. Do not "simplify" this to `hGetLine`.
+
+- **Interaction positions are 1-based *character* offsets into the full
+  file** (prose included for `.lagda.md` — verified by fixture). So
+  literate range-mapping is the identity; splicing uses `Data.Text`
+  character indexing (`AgdaInteract.Edit`), never bytes (`→` is one
+  char, three bytes). `AgdaInteract.Literate.isInsideCode` is a guard
+  that refuses to splice into literate prose.
+
+- **The write-side bridge enforces a hard zero-axiom contract and never
+  writes the file.** `AgdaInteract.Guard.checkGiveInput` rejects
+  `postulate` / termination-or-coverage-or-`OPTIONS` pragmas / escape
+  identifiers *before* the term reaches Agda; `give`/`refine` return a
+  unified diff for the caller to apply, then mark the session dirty so
+  the next query reloads from (unchanged) disk — keeping the bridge's
+  view consistent with disk. `auto` (Mimer) is wired but Agda 2.9.0's
+  IOTCM reader rejects `Cmd_autoOne`, so it degrades with a clear note;
+  it lights up automatically on an Agda that accepts the command.
+
+- **`agda-goals` and the bridge share one session driver
+  (`AgdaInteract.Session`), but it must stay goal-id-free.** The
+  daemon's per-session goal-id state lives in `AgdaInteract.Registry`
+  (`SessionEntry`), NOT in `Session`, so `agda-goals` can reuse the bare
+  transport without pulling in `AgdaInteract.GoalId`. `agda-goals` now
+  drives all files over ONE persistent process (`runDriverBatch`); its
+  goal extraction is **byte-identical** to the old one-process-per-file
+  driver — a `Cmd_load` yields the same `AllGoalsWarnings` whether the
+  process is fresh or reused, and `scanReplies` is unchanged. That
+  byte-identity is the acceptance test for the unification; re-check it
+  (human + `--format=json`) against a known corpus if you touch the
+  driver or the session reader.
 
 ## v2 graph.json schema (consumer view)
 
