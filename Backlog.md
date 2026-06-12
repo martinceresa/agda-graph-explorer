@@ -127,12 +127,97 @@ consumers that isn't ready to be picked up. For shipped work see
   The original umbrella design came from the proof-simplification
   proposal; the rationale for splitting it is recorded above.
 
+- **Write-side interaction bridge — semantic Agda editing as MCP
+  tools (`agda-interact`, working name).** `agda-explore` gives
+  agents a rich *read* surface (`locate`, `type_of`, `callers`,
+  `impact`, `find_lemma`, …); there is no *write* counterpart. AI
+  agents editing this corpus fall back to blind exact-string
+  replacement plus a full `agda Main` reload to find out whether the
+  edit typechecks. That fights Agda's hole-driven design on three
+  fronts: (a) the agent reconstructs by hand the goal / case-split /
+  refine workflow agda2-mode exists to provide; (b) exact-string
+  matching over heavy Unicode + layout-sensitive source is brittle —
+  the downstream consumer's session notes record edits that broke on
+  generalizable-variable name collisions (`tc` from `Block` shadowing
+  a local binding) and operator-overload resolution, exactly the
+  scope / type facts a semantic layer settles at edit time; (c) the
+  feedback loop is a from-scratch recheck on a corpus whose recheck
+  is the expensive part (Lemma5 `with`-abstraction hotspots). It is
+  the natural write-side symmetry to the existing read-side tools.
+
+  **Proposed MCP surface** (added to the `agda-explore` server so the
+  agent keeps a single endpoint; see the implementation note on where
+  the code actually lives):
+    - `load <module>` → open goals with ids, source ranges, types.
+    - `goal_type <goal>` → normalized goal type (the `type_of` analog
+      for an interaction hole rather than a top-level name).
+    - `goal_context <goal>` → in-scope binders and their types.
+    - `case_split <goal> <var>` → the clauses Agda generates, as a
+      diff against the current clause.
+    - `refine <goal> <expr>` / `give <goal> <expr>` → Agda elaborates
+      the term and returns either the residual subgoals (with ids) or
+      a *localized* type error, without touching the rest of the file.
+    - `normalize <goal> <expr>`, `infer <goal> <expr>` → the
+      `Cmd_compute` / `Cmd_infer` helpers.
+    - `auto <goal>` → Mimer / auto result, when available.
+  Each mutating op returns a unified diff plus the post-edit goal set,
+  so the agent can chain edits without re-reading the file.
+
+  **Requirements**
+    - Operations go through `agda --interaction-json`, so every
+      `give` / `refine` / `case_split` is *Agda-validated*: a non-
+      typechecking term fails locally and the file is never left in a
+      broken state. (Contrast S1's source rewriter, which can.)
+    - `.lagda.md` support is mandatory — map interaction ranges
+      through the literate code-block offsets in both directions.
+    - Stable goal identity across incremental reloads within a
+      session: Agda renumbers holes on reload, so the bridge must
+      keep a session → stable-id map.
+    - The bridge must never close a goal by injecting `postulate`,
+      `{-# TERMINATING #-}`, or similar — zero-postulate / fixed-axiom
+      invariants are a hard contract for the consumer corpus.
+    - Snapshot a protocol fixture set + CI on it — `--interaction-json`
+      is not officially version-stable (same risk register as P5).
+
+  **Implementation note / synergy with P5.** The stateful process
+  driver — spawn `agda --interaction-json`, frame the protocol, track
+  per-session goal state — is *the same driver* P5 (`agda-goals`,
+  goal-state clustering) needs: P5 *reads* goal types for clustering,
+  this *writes* through the same channel. Build the driver once
+  (`Agda.Interaction.Session`, working name) and let both the
+  clustering executable and these MCP tools sit on top. This also
+  resolves the architectural mismatch flagged for the `agda-simplify`
+  umbrella: `agda-explore` today loads a *pre-built, static* graph and
+  is request/response, whereas an interaction session is a *long-lived
+  stateful subprocess*. Expose the tools through the `agda-explore`
+  server for endpoint convenience, but keep the session manager in its
+  own module so the graph daemon's serve-stale request/response model
+  is not contaminated by per-module Agda processes.
+
+  **Open questions**
+    - Concurrency: one Agda subprocess per module-session vs. a pool,
+      and the interplay with the graph daemon's memory footprint on a
+      large corpus.
+    - Whether `goal_type` / `goal_context` should reuse `type_of`'s
+      normalization and pretty-printing settings for output
+      consistency with the read-side tools.
+    - Cost: this does not beat the per-check elaboration price, it
+      only amortizes it by avoiding full reloads — quantify on a
+      Lemma5-class module before committing.
+
+  **Pick up when** there is active *proof-construction* (not
+  polish / reporting) load on a consumer corpus — the payoff scales
+  with how many holes get filled and shrinks to near-zero on a
+  finished proof maintained by string edits to surrounding prose.
+  Natural to land alongside or just after P5, since they share the
+  driver.
+
 ---
 
-## From the Jolteon-FastBFT agent-usage analysis (2026-06-12) — SHIPPED
+## From the consumer-project agent-usage analysis (2026-06-12) — SHIPPED
 
-Source: `Jolteon-FastBFT/docs/MCP/UsageAnalysis.md` — a mining pass
-over all 60 Claude-agent session transcripts in that consumer project.
+Source: a downstream consumer project's `docs/MCP/UsageAnalysis.md` — a
+mining pass over all 60 Claude-agent session transcripts in that project.
 Key context: of 154 MCP calls only ~20 were organic; agents otherwise
 fell back to grep/Bash (307 CLI calls). The items below came from that
 *negative space* — why agents with the MCP available chose not to use

@@ -270,7 +270,7 @@ tools =
       (objSchema [ ("query", sp "Substring to search for (case-insensitive). May be empty when kind/state/module_prefix is given.")
                  , ("kind", sp "Filter by structural kind: function|projection|datatype|record|constructor|postulate|primitive|other.")
                  , ("state", sp "Filter by lifecycle state: defined|postulate|hole|failed.")
-                 , ("module_prefix", sp "Only list definitions whose module starts with this prefix (e.g. `Protocol.Jolteon.Block`).")
+                 , ("module_prefix", sp "Only list definitions whose module starts with this prefix (e.g. `Data.List.Base`).")
                  , ("limit", ip "Max results (default 30).")
                  , ("top_level_only", bp "Drop where-block / anonymous-module locals (default false).")
                  ] [])

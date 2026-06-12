@@ -4,10 +4,10 @@
 
 ### Agent-usage-analysis recommendations (2026-06-12)
 
-Implemented all nine recommendations mined from the Jolteon-FastBFT
-agent-session analysis (the *negative space* — why agents with the MCP
-available fell back to grep). See the `agda-deps` repo for producer-side
-items.
+Implemented all nine recommendations mined from a downstream consumer
+project's agent-session analysis (the *negative space* — why agents with
+the MCP available fell back to grep). See the `agda-deps` repo for
+producer-side items.
 
 **`agda-explore` (daemon):**
 

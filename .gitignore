@@ -9,10 +9,19 @@ dist-newstyle
 # Local Claude Code agent definitions
 .claude/
 
-# Kept local, not version-controlled: the battle-test harness + its run
-# artifacts (BattleTest/ — includes the PyRepr/ harness source and the
-# generated per-tool reports/graphs) and the generated optimization HTML
-# (OptSite/). The tracked test harness is .github/workflows/ci.yml.
+# PyRun/ is the tracked, project-independent exercise harness (engine +
+# config descriptor + tests/ + docs). Only its generated run output is
+# ignored — everything lands under PyRun/out/ (per-area reports, raw
+# captures, summary.*, generated graph fixtures), plus pycache and any
+# locally-dropped agda-deps path record.
+PyRun/out/
+PyRun/.agda-deps-bin
+PyRun/**/__pycache__/
+
+# Kept local, not version-controlled: BattleTest/ is the archived prior run
+# (reports + graph fixtures + the hand-distilled Impr.md), and the generated
+# optimization HTML (OptSite/). The tracked CI harness is
+# .github/workflows/ci.yml.
 BattleTest/
 OptSite/
 
