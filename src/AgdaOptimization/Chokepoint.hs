@@ -588,19 +588,25 @@ run !ix !gOpts !opts = do
       !excluded   = computeExcludedSet ix (optExcludeNameRegex opts)
       !sccOf      = cdSccOf cond
       !members    = cdMembers cond
-      -- Empty default 'postulates-axioms' is symptomatic of
-      -- 'agda-deps --no-externals' upstream having stripped the
-      -- @Agda.Builtin.*@/@Agda.Primitive.*@ axioms. Recover by
-      -- silently falling back to 'terminal-leaves' so the documented
-      -- best-practice workflow doesn't exit 1.
-      -- The fallback fires only when the user did NOT pass --sinks
-      -- explicitly (i.e. 'optSinks opts == Nothing'); an explicit
-      -- '--sinks=postulates-axioms' still errors out — that's the
-      -- caller asking for postulates and we should tell them there
-      -- aren't any.
+
+      sccsOf s    = IS.fromList [ IM.findWithDefault (-1) v sccOf | v <- IS.toList s ]
+      !srcSccs0   = sccsOf srcSet
+
+      -- The default 'postulates-axioms' sink set is "unusable" when it is
+      -- empty (symptomatic of 'agda-deps --no-externals' having stripped
+      -- the @Agda.Builtin.*@/@Agda.Primitive.*@ axioms) OR when its SCCs
+      -- are fully swallowed by the source SCCs (the only postulates are
+      -- themselves exported, so there is nothing downstream to cut — the
+      -- common shape on a --no-externals project graph). Either way we
+      -- silently fall back to 'terminal-leaves' so the run yields a cut
+      -- instead of exiting 1. The fallback fires only when the user did
+      -- NOT pass --sinks explicitly; an explicit '--sinks=postulates-axioms'
+      -- is honoured as-is and the downstream empty/overlap diagnostics fire.
+      !primaryUnusable = IS.null sinkSetTry
+                      || IS.null (IS.difference (sccsOf sinkSetTry) srcSccs0)
       !fallbackEligible = isNothing (optSinks opts)
                        && primaryMode == PostulatesAxioms
-                       && IS.null sinkSetTry
+                       && primaryUnusable
       !usedMode
         | fallbackEligible = TerminalLeaves
         | otherwise        = primaryMode
@@ -618,11 +624,11 @@ run !ix !gOpts !opts = do
   -- Announce the sink fallback before any downstream stderr noise.
   when fallbackEligible $
     hPutStrLn stderr $
-         "[chokepoint] note: --sinks=postulates-axioms resolved to empty "
-      ++ "(likely --no-externals upstream);\n"
-      ++ "             falling back to --sinks=terminal-leaves. Pass "
-      ++ "--sinks=postulates-axioms explicitly\n"
-      ++ "             to error instead."
+         "[chokepoint] note: --sinks=postulates-axioms resolved to empty or "
+      ++ "fully overlapped the sources\n"
+      ++ "             (likely --no-externals upstream); falling back to "
+      ++ "--sinks=terminal-leaves.\n"
+      ++ "             Pass --sinks=postulates-axioms explicitly to error instead."
 
   when (IS.null sinkSet) $ do
     -- Even the fallback came up empty (or the user explicitly asked
@@ -652,9 +658,30 @@ run !ix !gOpts !opts = do
       capOf v    = sccCapacity ix members v
 
   when (IS.null sinkSccs) $ do
-    hPutStrLn stderr $
-      "[chokepoint] error: source and sink SCC sets overlap completely; "
-        ++ "nothing to cut. Try a different --sources/--sinks combo."
+    -- Rather than a generic "try a different combo", probe every
+    -- --sources/--sinks pairing and name the ones that would actually
+    -- yield a non-empty disjoint sink SCC set on THIS graph.
+    let sccsOf s    = IS.fromList [ IM.findWithDefault (-1) v sccOf | v <- IS.toList s ]
+        disjointN sm km =
+          IS.size (IS.difference (sccsOf (pickSinks ix cond km)) (sccsOf (pickSources ix sm)))
+        combos      = [ (sm, km) | sm <- [ExportedTheorems, AllPublic, Terminals]
+                                 , km <- [PostulatesAxioms, TerminalLeaves] ]
+        working     = [ (sm, km, c) | (sm, km) <- combos, let c = disjointN sm km, c > 0 ]
+    hPutStrLn stderr
+      "[chokepoint] error: source and sink SCC sets overlap completely; nothing to cut."
+    if null working
+      then hPutStrLn stderr $
+             "             No --sources/--sinks combination yields disjoint sets on this\n"
+          ++ "             graph. This is typical of a graph built with `agda-deps\n"
+          ++ "             --no-externals`, which strips the Agda.Builtin.*/Primitive axiom\n"
+          ++ "             layer that the theorems->axioms cut needs as sinks. Re-run\n"
+          ++ "             chokepoint on the full graph (without --no-externals)."
+      else do
+        hPutStrLn stderr
+          "             Combinations that WOULD yield a cut (disjoint sink SCCs in parens):"
+        mapM_ (\(sm, km, c) -> hPutStrLn stderr $
+                 "               --sources=" ++ srcModeTag sm
+                   ++ " --sinks=" ++ sinkModeTag km ++ "  (" ++ show c ++ ")") working
     exitFailure
 
   hPutStrLn stderr $

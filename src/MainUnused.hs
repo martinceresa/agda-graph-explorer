@@ -133,8 +133,12 @@ parseArgs seed = go ParseState { psOpts = seed, psCliRoots = [], psHadRoots = Fa
           } rest
 
 parseKinds :: String -> Either String [FindingKind]
-parseKinds = fmap concat . mapM parseKindsToken . splitComma
+parseKinds = fmap concat . mapM (parseKindsToken . trim) . splitComma
   where
+    -- Trim surrounding whitespace per token so the CLI accepts
+    -- @--kinds=defined, public@ — matching the YAML path
+    -- ('AgdaUnused.Config.parseKindsCSV'), which already trims.
+    trim = dropWhile (== ' ') . reverse . dropWhile (== ' ') . reverse
     splitComma s = case break (== ',') s of
       (a, "")     -> [a]
       (a, _:rest) -> a : splitComma rest

@@ -112,6 +112,14 @@ data Options = Options
     -- majority is a single family is suppressed. 1.0 requires the whole
     -- bundle to be one family; 0.0 plus 'optForcedSuppress' would
     -- suppress anything touching a family at all.
+  , optMaxBasketSize  :: !Int
+    -- ^ Drop transactions whose qualifying-item count exceeds this cap
+    -- /before/ the L2/L3 pair/triple enumeration. A basket of @b@ items
+    -- contributes @C(b,2)@ pairs and @C(b,3)@ triples, so a single
+    -- high-fan-out definition (a big aggregator module, a wide record)
+    -- can make the count maps blow up super-linearly and the run hang.
+    -- Mirrors 'AgdaOptimization.ConceptBundle'. @0@ disables the cap;
+    -- default @64@.
   } deriving (Show)
 
 defaultOptions :: Options
@@ -124,6 +132,7 @@ defaultOptions = Options
   , optBudgetSecs     = 0.0
   , optForcedSuppress = True
   , optForcedFraction = 0.5
+  , optMaxBasketSize  = 64
   }
 
 -- | Declarative flag spec for the @basket@ subcommand. Drives both the
@@ -157,6 +166,8 @@ flagSpecs =
       (Just "forced-suppress") (\v o -> o { optForcedSuppress = v })
   , DblFlag "forced-fraction" "--forced-fraction=F         bundle-fraction gate for the suppressor (default 0.5)"
       (\x o -> o { optForcedFraction = x })
+  , IntFlag "max-basket-size" "--max-basket-size=N         drop baskets exceeding N items before counting; 0 = disabled (default 64)"
+      (\x o -> o { optMaxBasketSize = x })
   ]
 
 -- | Hand-rolled CLI parser for the @basket@ subcommand. Each value is
@@ -228,7 +239,11 @@ data Stats = Stats
 run :: Index -> GlobalOpts -> Options -> IO ()
 run ix gOpts opts = do
   let !txsAll = buildTransactions ix
-      !txs    = qualifying txsAll
+      -- Cap oversized baskets BEFORE the C(b,k) enumeration so one
+      -- high-fan-out definition can't make the pair/triple count maps
+      -- blow up super-linearly (the cause of the prior hang on large
+      -- corpora). Disabled with --max-basket-size=0.
+      (!txs, !nCapped) = capLargeBaskets (optMaxBasketSize opts) (qualifying txsAll)
       !n      = length txs
 
       -- Item -> count of transactions containing it.
@@ -253,6 +268,13 @@ run ix gOpts opts = do
 
       pCorrThreshold :: Double
       pCorrThreshold = 0.01
+
+  when (nCapped > 0) $
+    hPutStrLn stderr $
+      "agda-optimization basket: dropped " ++ show nCapped
+        ++ " oversized basket(s) (> " ++ show (optMaxBasketSize opts)
+        ++ " items) before counting; raise --max-basket-size (or 0 to "
+        ++ "disable) to include them."
 
   -- Deadline plumbing. When the budget is 0 we still allocate the
   -- IORef but no reaper is spawned, so 'readIORef' is always False.
@@ -434,6 +456,9 @@ headerLine Options{..} =
   ++ (if optForcedSuppress
         then ", forced-suppress@" ++ showD optForcedFraction
         else ", forced-suppress=off")
+  ++ (if optMaxBasketSize > 0
+        then ", max-basket-size=" ++ show optMaxBasketSize
+        else ", max-basket-size=off")
   ++ ")"
 
 statsLine :: Stats -> Double -> String
@@ -481,6 +506,21 @@ isQualifyingItem ix i = case defKind (defAt ix i) of
 -- items.
 qualifying :: [Tx] -> [Tx]
 qualifying = filter (\t -> length (txItems t) >= 2)
+
+-- | Drop transactions whose basket exceeds the cap, returning
+-- @(kept, droppedCount)@. A cap of @0@ disables the filter. Applied
+-- after 'qualifying' and before the @C(b,k)@ pair/triple enumeration,
+-- this bounds the count-map blow-up a single high-fan-out definition
+-- would otherwise cause (the @basket@ analogue of
+-- 'AgdaOptimization.ConceptBundle.capLargeBaskets').
+capLargeBaskets :: Int -> [Tx] -> ([Tx], Int)
+capLargeBaskets capN txs
+  | capN <= 0 = (txs, 0)
+  | otherwise = foldr step ([], 0) txs
+  where
+    step t (!keep, !dropped)
+      | length (txItems t) > capN = (keep, dropped + 1)
+      | otherwise                 = (t : keep, dropped)
 
 ----------------------------------------------------------------------
 -- Apriori levels.
@@ -982,6 +1022,7 @@ basketOptionsJson Options{..} = A.object
   , "budget_seconds"        .= optBudgetSecs
   , "forced_suppress"       .= optForcedSuppress
   , "forced_fraction"       .= optForcedFraction
+  , "max_basket_size"       .= optMaxBasketSize
   ]
 
 basketRuleJson :: Index -> Int -> Rule -> A.Value

@@ -27,6 +27,7 @@ module AgdaGraph.Schema
 
 import           Control.DeepSeq      ( NFData(..) )
 import           Control.Monad        ( when )
+import           Control.Exception    ( IOException, try )
 import qualified Data.Aeson           as A
 import           Data.Aeson           ( FromJSON(..), withObject, withText
                                       , (.:), (.:?), (.!=) )
@@ -358,8 +359,12 @@ lengthMismatch xs ys =
     || or (zipWith (\a b -> length a /= length b) xs ys)
 
 -- | Read an expanded-mode @graph.json@ from disk. The error case carries
--- a human-readable message (no Haskell exception trace).
+-- a human-readable message (no Haskell exception trace) for BOTH a
+-- failed read (missing / unreadable file) and a failed decode, so every
+-- consumer gets a clean diagnostic instead of an uncaught 'IOException'.
 loadExpandedGraph :: FilePath -> IO (Either String ExpandedGraph)
 loadExpandedGraph p = do
-  !bytes <- BL.readFile p
-  pure (A.eitherDecode bytes)
+  r <- try (BL.readFile p) :: IO (Either IOException BL.ByteString)
+  pure $ case r of
+    Left e   -> Left ("cannot read graph file: " ++ show e)
+    Right bs -> A.eitherDecode bs

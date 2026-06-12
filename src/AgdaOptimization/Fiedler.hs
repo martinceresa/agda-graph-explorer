@@ -53,7 +53,7 @@ import qualified Data.Text                   as T
 import qualified Data.Vector                 as V
 import qualified Data.Version
 import           System.Environment          ( getExecutablePath, lookupEnv )
-import           System.Exit                 ( ExitCode(..) )
+import           System.Exit                 ( ExitCode(..), exitWith )
 import           System.FilePath             ( (</>), takeDirectory )
 import           System.IO                   ( hClose, hPutStrLn, openTempFile
                                              , stderr )
@@ -392,12 +392,27 @@ readHelperOutput p = do
 
 -- | Emit an empty-but-valid report so downstream JSON consumers don't
 -- crash. The @reason@ is surfaced in the stats block.
+-- | Emit the empty/failed report (human or JSON), then exit with a code
+-- that lets a caller distinguish WHY there is no output — every reason
+-- here is a failure, so the process must not exit 0 (a downstream script
+-- or the MCP layer could not otherwise tell the run produced nothing).
+-- The contract: 2 = helper script unavailable, 3 = helper present but a
+-- Python dependency (scipy/numpy) is missing, 4 = any other helper fault.
 emitEmpty :: GlobalOpts -> Options -> String -> IO ()
-emitEmpty gOpts opts reason = case gOutFormat gOpts of
-  OutJson  -> emitJsonReport (gOutPath gOpts) (emptyJson opts reason)
-  OutHuman -> withHumanOutput (gOutPath gOpts) $ do
-    putStrLn (headerLine opts)
-    putStrLn $ "(no output: " ++ reason ++ ")"
+emitEmpty gOpts opts reason = do
+  case gOutFormat gOpts of
+    OutJson  -> emitJsonReport (gOutPath gOpts) (emptyJson opts reason)
+    OutHuman -> withHumanOutput (gOutPath gOpts) $ do
+      putStrLn (headerLine opts)
+      putStrLn $ "(no output: " ++ reason ++ ")"
+  exitWith (exitForReason reason)
+
+-- | Failure reason -> process exit code (see 'emitEmpty').
+exitForReason :: String -> ExitCode
+exitForReason "helper-not-found"                 = ExitFailure 2
+exitForReason "helper-invocation-failed"         = ExitFailure 2
+exitForReason "helper-python-dependency-missing" = ExitFailure 3
+exitForReason _                                  = ExitFailure 4
 
 emptyJson :: Options -> String -> A.Value
 emptyJson opts reason = A.object

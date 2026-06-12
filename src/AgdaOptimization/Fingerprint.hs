@@ -48,6 +48,7 @@ module AgdaOptimization.Fingerprint
   ) where
 
 import           Control.Monad        ( forM_, when )
+import           System.IO            ( hPutStrLn, stderr )
 import           Control.Parallel.Strategies ( parMap, rdeepseq )
 import           Data.Foldable        ( foldl' )
 import qualified Data.HashMap.Strict  as HM
@@ -201,6 +202,19 @@ rootedSubtree ix dir maxDepth root
   where
     nbrs = neighboursOf ix dir
 
+-- | The per-candidate subtree hop bound actually used. Outgoing /
+-- Incoming cones are bounded by the DAG, so an unbounded (0) depth is
+-- fine. A 'Bidirectional' subtree closes over forward AND reverse edges,
+-- so an unbounded walk reaches the whole weakly-connected component for
+-- /every/ candidate — quadratic blow-up that made @--direction=both@
+-- hang on real corpora. So a Bidirectional run with an unset (0)
+-- wl-depth is auto-bounded to a local radius; an explicit @--wl-depth@
+-- always wins.
+effectiveWlDepth :: Options -> Int
+effectiveWlDepth Options{..} = case optDirection of
+  Bidirectional | optWlDepth <= 0 -> 1
+  _                               -> optWlDepth
+
 --------------------------------------------------------------------------------
 -- Candidate selection
 --------------------------------------------------------------------------------
@@ -214,14 +228,15 @@ data Cand = Cand
   } -- not Show; we never print this whole thing.
 
 candidates :: Index -> ColorVec -> Options -> [Cand]
-candidates ix cols Options{..} =
+candidates ix cols opts@Options{..} =
   let n   = idxNodeCount ix
+      !effDepth = effectiveWlDepth opts
       mk i =
         let d = defAt ix i
         in if defKind d == KOther
              then Nothing
              else
-               let !sub  = rootedSubtree ix optDirection optWlDepth i
+               let !sub  = rootedSubtree ix optDirection effDepth i
                    !size = IS.size sub
                in if size < optMinSize
                     then Nothing
@@ -394,6 +409,12 @@ scorePairs thr cs owners =
 -- compact JSON object depending on @gOutFormat gOpts@.
 run :: Index -> GlobalOpts -> Options -> IO ()
 run ix gOpts opts@Options{..} = do
+  when (effectiveWlDepth opts /= optWlDepth) $
+    hPutStrLn stderr $
+      "[fingerprint] --direction=both with unbounded depth auto-bounded to "
+        ++ "wl-depth=" ++ show (effectiveWlDepth opts)
+        ++ " (an unbounded bidirectional subtree spans the whole component "
+        ++ "per candidate); pass --wl-depth=N to override."
   let !c0        = initialColors ix (neighboursOf ix optDirection)
       !ck        = refine ix (neighboursOf ix optDirection) optWlK c0
       !candList  = candidates ix ck opts

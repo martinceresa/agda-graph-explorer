@@ -216,6 +216,20 @@ run ix gOpts opts0 = do
       -- Aim for ~20 progress lines; never spam.
       progressEvery = max 1 (totalSeeds `div` 20)
 
+  -- Subgraph enumeration is O(|V| · maxFanOut^(maxSize-1)); past the
+  -- default size 3 on a non-trivial graph it gets infeasible fast (size 4
+  -- already times out on a ~6k-node corpus). Warn rather than silently
+  -- hang, and point at the escape hatches.
+  when (optMaxSize opts >= 4 && totalSeeds > 2000) $
+    hPutStrLn stderr $
+      "agda-optimization motif: --max-size=" ++ show (optMaxSize opts)
+        ++ " on " ++ show totalSeeds ++ " seed node(s) — enumeration is "
+        ++ "O(|V|·maxFanOut^(max-size-1)) and may be very slow or exhaust "
+        ++ "memory. Bound the per-seed cost with --max-fan-out=N (the most "
+        ++ "effective knob), lower --max-size, or exclude hubs with "
+        ++ "--exclude-hub-pct. (--budget only checks between seeds, so it "
+        ++ "won't interrupt a single expensive seed.)"
+
   -- Deadline plumbing. When the budget is 0 (default) we still allocate
   -- the IORef but never spawn a reaper, so 'readIORef' is always False.
   deadlineRef <- newIORef False

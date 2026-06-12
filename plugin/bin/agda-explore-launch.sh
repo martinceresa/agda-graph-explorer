@@ -28,13 +28,21 @@ find_bin () {
   onpath=$(command -v agda-explore 2>/dev/null || true)
   [ -n "$onpath" ] && candidates+=("$onpath")
   # 3. agda-explore under a project/ancestor/plugin dist-newstyle tree.
-  local script_dir hit root
+  # Roots: the Claude project dir and the plugin's own ancestors (where a
+  # dist-newstyle build tree lives during development). The bare $PWD is
+  # dropped (CLAUDE_PROJECT_DIR defaults to it), and we never scan from
+  # the filesystem root — that would be a whole-FS `find` if the script is
+  # ever relocated near `/`. -maxdepth bounds the dist-newstyle nesting
+  # (the binary sits ~10 levels under the project root).
+  local script_dir hit root rootabs
   script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-  for root in "${CLAUDE_PROJECT_DIR:-$PWD}" "$PWD" "$script_dir/.." "$script_dir/../.."; do
+  for root in "${CLAUDE_PROJECT_DIR:-$PWD}" "$script_dir/.." "$script_dir/../.."; do
     [ -d "$root" ] || continue
+    rootabs=$(cd "$root" 2>/dev/null && pwd -P)
+    case "$rootabs" in ""|/) continue;; esac
     while IFS= read -r hit; do
       [ -n "$hit" ] && [ -x "$hit" ] && candidates+=("$hit")
-    done < <(find "$root" -maxdepth 14 -type f \
+    done < <(find "$root" -maxdepth 12 -type f \
                -path '*x/agda-explore/build/agda-explore/agda-explore' 2>/dev/null || true)
   done
 

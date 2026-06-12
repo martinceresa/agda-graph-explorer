@@ -24,6 +24,7 @@ import qualified Data.ByteString.Lazy.Char8 as BLC
 import           Data.List            ( foldl', isPrefixOf, stripPrefix )
 import qualified Data.Text            as T
 import           System.Environment   ( getArgs )
+import           System.Directory     ( doesFileExist )
 import           System.Exit          ( exitFailure, exitSuccess, exitWith
                                       , ExitCode(..) )
 import           System.IO            ( hPutStrLn, stderr )
@@ -211,6 +212,16 @@ main = do
         , dcExtraArgs    = optAgdaArgs opts
         , dcVerbose      = optVerbose opts
         }
+
+  -- Fail fast on a missing target file with a direct message + exit 2,
+  -- instead of driving agda over it and surfacing the read failure
+  -- through the interaction protocol (a confusing AgdaReportedError /
+  -- exit 6).
+  oks <- mapM doesFileExist (optRoots opts)
+  let missing = [ f | (f, ok) <- zip (optRoots opts) oks, not ok ]
+  when (not (null missing)) $ do
+    forM_ missing $ \f -> hPutStrLn stderr ("agda-goals: file not found: " ++ f)
+    exitWith (ExitFailure 2)
 
   results <- mapM drive1 (optRoots opts)
 

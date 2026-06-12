@@ -124,6 +124,13 @@ data Options = Options
     -- Defs whose short name matches are dropped from every basket
     -- and excluded from the candidate pair set.  Empty (default) =
     -- no filter.
+  , optMaxBasketSize    :: !Int
+    -- ^ Drop baskets with more than this many items before the
+    -- @C(b,2)@ pair enumeration. @0@ = disabled. Default @0@, but in
+    -- @--transitive@ mode an unset cap auto-defaults to a bound (see
+    -- 'effectiveCap') because a node's full descendant closure can be
+    -- thousands of items wide, making the pair count explode. A node
+    -- with a near-universal closure contributes only noise anyway.
   } deriving (Show)
 
 defaultOptions :: Options
@@ -134,6 +141,7 @@ defaultOptions = Options
   , optTopN             = 100
   , optTransitive       = False
   , optExcludeNameRegex = T.empty
+  , optMaxBasketSize    = 0
   }
 
 -- | Declarative flag spec for the @entwine@ subcommand. Drives both
@@ -158,7 +166,31 @@ flagSpecs =
       (Just "transitive") (\v o -> o { optTransitive = v })
   , TextFlag "exclude-name-regex" "--exclude-name-regex=PATTERN   POSIX-ERE on unqualified name"
       (\p o -> o { optExcludeNameRegex = p })
+  , IntFlag "max-basket-size" "--max-basket-size=N            drop baskets exceeding N items; 0 = off (auto-bounds --transitive)"
+      (\x o -> o { optMaxBasketSize = x })
   ]
+
+-- | The basket-size cap actually applied. Direct mode keeps the user's
+-- value (default 0 = no cap, so direct-edge output is unchanged). In
+-- @--transitive@ mode an unset cap (0) auto-defaults to a bound so the
+-- pair enumeration over wide descendant closures terminates; an explicit
+-- non-zero @--max-basket-size@ always wins.
+effectiveCap :: Options -> Int
+effectiveCap opts
+  | optMaxBasketSize opts /= 0 = optMaxBasketSize opts
+  | optTransitive opts         = 128
+  | otherwise                  = 0
+
+-- | Drop baskets whose item set exceeds the cap, returning
+-- @(kept, droppedCount)@. A cap of @0@ disables the filter.
+capBaskets :: Int -> [(Int, IntSet)] -> ([(Int, IntSet)], Int)
+capBaskets capN bs
+  | capN <= 0 = (bs, 0)
+  | otherwise = foldr step ([], 0) bs
+  where
+    step b@(_, items) (!keep, !dropped)
+      | IS.size items > capN = (keep, dropped + 1)
+      | otherwise            = (b : keep, dropped)
 
 -- | Hand-rolled CLI parser.  Mirrors the dispatch table style used by
 -- every other 'AgdaOptimization' analysis (see 'Basket.parseOptions').
@@ -223,7 +255,11 @@ run ix gOpts opts = do
       !nExcluded   = IS.size excluded
 
       -- 1. Baskets.  Only callers with a non-empty basket count.
-      !baskets     = buildBaskets ix opts excluded
+      -- Oversized baskets are dropped before pair counting (see
+      -- 'effectiveCap'): in --transitive mode a node's descendant
+      -- closure can be thousands wide, exploding the C(b,2) enumeration.
+      !cap         = effectiveCap opts
+      (!baskets, !nCapped) = capBaskets cap (buildBaskets ix opts excluded)
       !nCallers    = length baskets
 
       -- 2. Per-def caller frequency + pair counts in one pass.
@@ -284,6 +320,14 @@ run ix gOpts opts = do
       ++ " candidate pairs (>=" ++ show minCo
       ++ "), kept " ++ show (length kept)
       ++ "/" ++ show (length filtered) ++ "."
+  if nCapped > 0
+    then hPutStrLn stderr $
+           "[entwine] dropped " ++ show nCapped ++ " oversized basket(s) (> "
+             ++ show cap ++ " items) before counting"
+             ++ (if optMaxBasketSize opts == 0 && optTransitive opts
+                   then " (auto-cap for --transitive; set --max-basket-size to override)."
+                   else "; raise --max-basket-size (or 0 to disable) to include them.")
+    else pure ()
 
   case gOutFormat gOpts of
     OutJson ->
