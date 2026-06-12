@@ -133,8 +133,10 @@ load · goal_type · goal_context · infer · normalize ·
 case_split · refine · give · auto
 ```
 
-`load` opens a module and lists its open goals with stable ids
-(`g0, g1, …`) that survive Agda's hole renumbering across reloads. The
+`load` opens a module and lists its open goals with ids (`g0, g1, …`) and
+their source positions. An id stays put for a hole whose position is
+unchanged across a reload, but applying an edit can renumber goals — so
+after applying a diff, re-`load` and read the fresh list. The
 mutators (`case_split` / `refine` / `give`) are **Agda-validated** and
 return a **unified diff** — the bridge never writes the file, and a term
 that doesn't typecheck comes back as the localized Agda error with the

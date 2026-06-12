@@ -49,6 +49,28 @@ which parses — so it is the constructor, not the arity. The `auto` MCP tool is
 wired but degrades gracefully (returns a clear "auto unavailable on this agda"
 message) until the correct invocation for this read path is pinned.
 
+## End-to-end convergence test (`convergence.py`)
+
+`convergence.py` drives a *live* `agda-explore --enable-interact` daemon
+through the whole editing loop — `load → give → apply the returned diff →
+reload → … → 0 goals → agda typechecks the result` — against the small
+fixture project in [`proj/`](proj/) (`Nat.agda`, a literate `Doc.lagda.md`,
+and `Proof.agda`). It works on a scratch copy, so the committed fixtures
+stay pristine. This covers the contract the offline suite can't: that diffs
+actually apply, reloads pick up edits, goals converge, and the finished
+proof compiles. Needs `agda` on `$PATH`; NOT run in CI.
+
+```
+python3 test/interaction/convergence.py        # discovers the cabal binary
+```
+
+The richer `proj/Proof.agda` (a case-split + a refine + plain gives) is left
+for an **agent-driven** pass: point an agent at the daemon and have it close
+every hole using only the bridge tools, then confirm `agda` is clean — the
+truest test of whether the tools are usable from their descriptions. (The
+plugin loaded in a real Claude Code session against a real project is the
+highest-fidelity version of that.)
+
 ## IOTCM command syntax (Agda 2.9.0, confirmed working)
 
 ```

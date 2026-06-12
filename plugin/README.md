@@ -149,7 +149,7 @@ goal / case-split / refine workflow instead of blind string replacement:
 
 | Tool           | Question / action                                                                 |
 |----------------|-----------------------------------------------------------------------------------|
-| `load`         | Open a module; list open goals with **stable ids** (`g0, g1, …`) that survive reloads. |
+| `load`         | Open a module; list open goals with ids (`g0, g1, …`) + source positions. Re-`load` after edits — applying a diff can renumber goals. |
 | `goal_type`    | The goal's type + in-scope context at a hole.                                     |
 | `goal_context` | Just the in-scope binders and their types.                                        |
 | `infer`        | Infer the type of an expression in a goal's context.                              |

@@ -1,17 +1,24 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Stable goal identities that survive Agda's hole renumbering.
+-- | Client-facing goal ids (@g0@, @g1@, …) over Agda's interaction holes.
 --
 -- Agda reissues interaction-point integers (@?0@, @?1@, …) on every
--- @Cmd_load@, so an id the MCP client is holding goes stale the moment
--- the file is reloaded after an edit. This layer assigns each hole a
--- monotonic 'StableId' the first time it is seen, keyed by the hole's
--- start __character offset__ (Agda @pos@), and re-derives the
--- offset→stable mapping on every reload. The client always sees
--- @g0@, @g1@, … and never Agda's churning integers.
+-- @Cmd_load@. This layer assigns each hole a monotonic 'StableId' the
+-- first time it is seen, keyed by the hole's start __character offset__
+-- (Agda @pos@), and re-derives the offset→stable mapping on every reload.
+--
+-- __Scope of stability.__ An id is preserved across a reload only while
+-- the hole's offset is unchanged — e.g. a watcher-triggered reload of an
+-- unsaved file, or the other goals after a @give@ that doesn't move them.
+-- An edit that shifts a hole's offset (most edits shift everything below
+-- the edit point) gives that hole a /fresh/ id. So this does not provide
+-- identity that survives arbitrary edits; clients should re-read the goal
+-- list after applying an edit (selecting by @(line:col)@) rather than
+-- caching an id across one. The win over raw Agda ids is the within-load
+-- and unchanged-hole-across-reload cases.
 --
 -- A 'GoalMap' lives per session ('AgdaInteract.Session'): interaction
--- ids are per-load, so the map is rebuilt — preserving stable ids — each
--- time 'syncGoals' runs against a fresh @AllGoalsWarnings@.
+-- ids are per-load, so the map is rebuilt each time 'syncGoals' runs
+-- against a fresh @AllGoalsWarnings@.
 module AgdaInteract.GoalId
   ( StableId(..)
   , GoalEntry(..)

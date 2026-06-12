@@ -199,9 +199,12 @@ src/
                                 subprocess: prompt-delimited reply bursts,
                                 timeout→poison, reader/stderr threads,
                                 SessionEntry registry value.
-    GoalId.hs                   stable goal ids (g0,g1,…) keyed by hole
-                                char-offset, surviving Agda's renumbering
-                                across reloads (syncGoals).
+    GoalId.hs                   client goal ids (g0,g1,…) over Agda's holes,
+                                keyed by hole char-offset (syncGoals): an id
+                                is preserved across a reload only while the
+                                hole's offset is unchanged — an edit that
+                                shifts it yields a fresh id, so clients
+                                re-read goals after an edit (match line:col).
     Guard.hs                    no-postulate / no-escape-hatch guard on
                                 give/refine input (hard zero-axiom contract).
     Literate.hs                 .lagda.md code-block detection + the

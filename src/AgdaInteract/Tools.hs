@@ -44,10 +44,14 @@ interactTools :: [Tool]
 interactTools =
   [ Tool "load"
       "Load (or reload) an Agda module into a live interaction session and \
-      \list its open goals. Each goal gets a STABLE id (g0, g1, …) that \
-      \survives Agda's hole renumbering across reloads — use it with the \
-      \other interaction tools. Reflects live on-disk file state (not the \
-      \dependency-graph snapshot). Required before goal_type/infer/etc."
+      \list its open goals — each with an id (g0, g1, …) and its source \
+      \(line:col). The id maps to Agda's interaction hole and keeps its \
+      \value across a reload while the hole's position is unchanged, but \
+      \applying an edit can renumber goals — so after applying a diff, \
+      \re-`load` and pick goals from the FRESH list (matching on (line:col) \
+      \is most robust; don't cache an id across an edit). Use the ids with \
+      \the other interaction tools. Reflects live on-disk file state (not \
+      \the dependency-graph snapshot). Required before goal_type/infer/etc."
       (objSchema [ ("file", sp "Path to the .agda / .lagda.md module (relative to the project root, or absolute).") ]
                  ["file"])
       runLoad

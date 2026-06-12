@@ -168,18 +168,21 @@ drives Agda's own hole workflow and validates every step:
 
 | You want to…                                          | Use            |
 |-------------------------------------------------------|----------------|
-| Open a module and see its open goals (with stable ids) | `load`         |
+| Open a module and see its open goals (ids + positions) | `load`         |
 | Read a goal's type + in-scope context                  | `goal_type` / `goal_context` |
 | Infer / normalise an expression in a goal's context    | `infer` / `normalize` |
 | Case-split a goal on a variable                        | `case_split`   |
 | Refine a goal by a head symbol (`f ?`)                 | `refine`       |
 | Fill a goal with a complete term (type-checked)        | `give`         |
 
-Workflow: `load <file>` first — it returns goals as `g0, g1, …`, **stable
-ids that persist across reloads** (Agda renumbers holes; these don't). Pass
-a stable id to the other tools. `case_split` / `refine` / `give` return a
-**unified diff and do NOT write the file** — apply the diff yourself, then
-`load` again to pick up the new goals. A `give` whose term doesn't typecheck
+Workflow: `load <file>` first — it returns goals as `g0, g1, …` with their
+`(line:col)`. Pass an id to the other tools. `case_split` / `refine` /
+`give` return a **unified diff and do NOT write the file** — apply the diff
+yourself, then `load` again to pick up the new goals. **Don't cache an id
+across an edit:** applying a diff can renumber goals (an id is only
+preserved while a hole's position is unchanged), so always re-`load` after
+an edit and re-select — matching on the reported `(line:col)` is the robust
+way to track a specific goal. A `give` whose term doesn't typecheck
 comes back as the localized Agda error with the file untouched, so you can
 iterate safely. Note: the bridge **refuses** any `give` / `refine` that uses
 `postulate`, a termination/coverage/`OPTIONS` pragma, or another escape

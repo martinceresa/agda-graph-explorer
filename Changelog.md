@@ -14,9 +14,11 @@ reflect live on-disk state and bypass `ensureFresh`). Needs `agda` on
 
 New MCP tools:
 
-- **read:** `load` (open a module; lists goals with STABLE ids
-  `g0, g1, …` that survive Agda's hole renumbering across reloads),
-  `goal_type`, `goal_context`, `infer`, `normalize`.
+- **read:** `load` (open a module; lists goals with ids `g0, g1, …` and
+  their `(line:col)` — an id is preserved across a reload while the hole's
+  position is unchanged, but applying an edit can renumber goals, so
+  re-`load` after edits), `goal_type`, `goal_context`, `infer`,
+  `normalize`.
 - **write (Agda-validated):** `case_split`, `refine`, `give` — each
   returns a **unified diff** (the bridge never writes the file); a term
   that doesn't typecheck returns the localized Agda error with the file
