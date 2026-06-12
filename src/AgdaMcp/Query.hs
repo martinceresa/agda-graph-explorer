@@ -712,38 +712,55 @@ queryRoots ld lim byMod chains mModPrefix mKindTxt mStateTxt name =
 -- ('AgdaGraph.Similarity.buildSigBodyFingerprints') the batch @silhouette@
 -- analysis clusters on — so a high-similarity pair here is exactly a
 -- structural-twin candidate there (an equal fingerprint scores 1.0).
+-- | Shared Weisfeiler–Leman signature-fingerprint scoring behind
+-- 'querySimilarTypes' and @find_lemma@'s anchor mode. Given an already-resolved
+-- subject definition and a candidate predicate, returns either a
+-- too-small-footprint message (keyed by @label@) or the scored candidates
+-- (UNSORTED — each caller imposes its own ordering and rendering) plus the
+-- provenance note. Both callers thus rank by the identical metric the
+-- @silhouette@ analysis uses, by construction rather than by copy.
+sigSimilarCands
+  :: Loaded -> Text -> Definition -> Double -> (Definition -> Bool)
+  -> Either Text ([(Double, Definition)], Text)
+sigSimilarCands ld label d minSim keep =
+  let ix   = ldIndex ld
+      sbf  = ldSigBodyFp ld
+      i    = defId d
+      mine = sbfSig sbf V.! i
+      size = fingerprintSize mine
+  in if size < 2
+       then Left ("`" <> label <> "` has too small a type-signature footprint ("
+                    <> tshow size <> " WL-fingerprint node(s)) for a meaningful "
+                    <> "type-similarity comparison.")
+       else
+         let cands = [ (s, dj)
+                     | j <- [0 .. idxRealCount ix - 1], j /= i
+                     , let dj = defAt ix j
+                     , defKind dj /= KOther
+                     , keep dj
+                     , let s = weightedJaccard mine (sbfSig sbf V.! j)
+                     , s >= minSim ]
+             provNote = if sbfHasProvenance sbf then ""
+                        else "\n(note: graph lacks edge provenance, so the "
+                             <> "signature/body split is unavailable — fingerprints "
+                             <> "cover all edges, like `silhouette`'s fallback)"
+         in Right (cands, provNote)
+
 querySimilarTypes :: Loaded -> Int -> Double -> Text -> Text
 querySimilarTypes ld lim minSim name = case resolveDefNote ld name of
   Nothing -> notFound ld name
   Just (note, d) -> (note <>) $
-    let ix   = ldIndex ld
-        sbf  = ldSigBodyFp ld
-        i    = defId d
-        mine = sbfSig sbf V.! i
-        size = fingerprintSize mine
-    in if size < 2
-         then "`" <> name <> "` has too small a type-signature footprint ("
-                <> tshow size <> " WL-fingerprint node(s)) for a meaningful "
-                <> "type-similarity comparison."
-         else
-           let cands = [ (s, dj)
-                       | j <- [0 .. idxRealCount ix - 1], j /= i
-                       , let dj = defAt ix j
-                       , defKind dj /= KOther
-                       , let s = weightedJaccard mine (sbfSig sbf V.! j)
-                       , s >= minSim ]
-               ranked = take lim (sortBy (comparing (Down . fst)) cands)
-               provNote = if sbfHasProvenance sbf then ""
-                          else "\n(note: graph lacks edge provenance, so the "
-                               <> "signature/body split is unavailable — fingerprints "
-                               <> "cover all edges, like `silhouette`'s fallback)"
-           in if null ranked
-                then "No definitions with signature-shape similarity ≥ "
-                       <> tshow minSim <> " for `" <> name <> "`." <> provNote
-                else "Definitions with a similar type-signature shape to `" <> name
-                       <> "` (Weisfeiler–Leman signature fingerprint — the `silhouette` "
-                       <> "metric):\n"
-                       <> rankedList lim ranked <> provNote
+    case sigSimilarCands ld name d minSim (const True) of
+      Left msg -> msg
+      Right (cands, provNote) ->
+        let ranked = take lim (sortBy (comparing (Down . fst)) cands)
+        in if null ranked
+             then "No definitions with signature-shape similarity ≥ "
+                    <> tshow minSim <> " for `" <> name <> "`." <> provNote
+             else "Definitions with a similar type-signature shape to `" <> name
+                    <> "` (Weisfeiler–Leman signature fingerprint — the `silhouette` "
+                    <> "metric):\n"
+                    <> rankedList lim ranked <> provNote
 
 -- | Definitions whose elaborated body shares canonical subterms with the
 -- subject's, ranked by occurrence-weighted Jaccard of their subterm-hash
@@ -788,10 +805,9 @@ querySimilarBodies ld lim minSim name = case resolveDefNote ld name of
 rankedList :: Int -> [(Double, Definition)] -> Text
 rankedList lim xs =
   T.intercalate "\n"
-    [ "- " <> pct s <> "  `" <> defName d <> "`  ["
+    [ "- " <> pctOf s <> "  `" <> defName d <> "`  ["
             <> renderKind (defKind d) <> "]  " <> loc d
     | (s, d) <- take lim xs ]
-  where pct s = T.pack (show (fromIntegral (round (s * 1000) :: Int) / 10 :: Double)) <> "%"
 
 pctOf :: Double -> Text
 pctOf s = T.pack (show (fromIntegral (round (s * 1000) :: Int) / 10 :: Double)) <> "%"
@@ -869,38 +885,20 @@ queryFindLemma ld lim minSim mKindTxt mModPrefix mGoal mAnchor =
     anchorMode anchor = case resolveDefNote ld anchor of
       Nothing        -> notFound ld anchor
       Just (note, d) -> (note <>) $
-        let ix   = ldIndex ld
-            sbf  = ldSigBodyFp ld
-            i    = defId d
-            mine = sbfSig sbf V.! i
-            size = fingerprintSize mine
-        in if size < 2
-             then "`" <> anchor <> "` has too small a type-signature footprint ("
-                    <> tshow size <> " WL-fingerprint node(s)) for a meaningful "
-                    <> "type-similarity comparison."
-             else
-               let cands = [ (s, dj)
-                           | j <- [0 .. idxRealCount ix - 1], j /= i
-                           , let dj = defAt ix j
-                           , defKind dj /= KOther
-                           , candKeep dj
-                           , let s = weightedJaccard mine (sbfSig sbf V.! j)
-                           , s >= minSim ]
-                   ranked = take lim
-                              (sortBy (comparing (\(s, dj) -> (Down s, defName dj))) cands)
-                   provNote = if sbfHasProvenance sbf then ""
-                              else "\n(note: graph lacks edge provenance, so the "
-                                   <> "signature/body split is unavailable — fingerprints "
-                                   <> "cover all edges, like `silhouette`'s fallback)"
-               in if null ranked
-                    then "No lemmas with signature-shape similarity ≥ "
-                           <> tshow minSim <> " to `" <> anchor <> "`"
-                           <> filterNote <> "." <> provNote
-                    else "Candidate lemmas matching the type shape of `" <> anchor
-                           <> "`" <> filterNote
-                           <> " (Weisfeiler–Leman signature fingerprint — the `similar_types`/"
-                           <> "`silhouette` metric):\n"
-                           <> lemmaList ranked <> provNote
+        case sigSimilarCands ld anchor d minSim candKeep of
+          Left msg -> msg
+          Right (cands, provNote) ->
+            let ranked = take lim
+                           (sortBy (comparing (\(s, dj) -> (Down s, defName dj))) cands)
+            in if null ranked
+                 then "No lemmas with signature-shape similarity ≥ "
+                        <> tshow minSim <> " to `" <> anchor <> "`"
+                        <> filterNote <> "." <> provNote
+                 else "Candidate lemmas matching the type shape of `" <> anchor
+                        <> "`" <> filterNote
+                        <> " (Weisfeiler–Leman signature fingerprint — the `similar_types`/"
+                        <> "`silhouette` metric):\n"
+                        <> lemmaList ranked <> provNote
 
     -- ----------------------------------------------------------------
     -- Free-text mode: canonicalise + conclusion token Jaccard.
@@ -941,9 +939,9 @@ queryFindLemma ld lim minSim mKindTxt mModPrefix mGoal mAnchor =
     sigConclTokens sig =
       identTokens (conclusionOf (unCanonical (canonicalizeGoal sig)))
 
-    renderTokens ts = case [ "`" <> t <> "`" | t <- Set.toAscList ts ] of
-      [] -> "(none)"
-      xs -> T.intercalate ", " xs
+    renderTokens ts
+      | Set.null ts = "(none)"
+      | otherwise   = T.intercalate ", " [ "`" <> t <> "`" | t <- Set.toAscList ts ]
 
     -- one ranked bullet, with the matched conclusion annotation.
     lemmaList ranked = T.intercalate "\n"

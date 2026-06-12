@@ -28,6 +28,7 @@ module AgdaMcp.Config
   , loadConfig
   , applyConfig
   , extractConfigArg
+  , orderNub
   ) where
 
 import           Control.Exception (SomeException, displayException, try)
@@ -187,13 +188,18 @@ applyConfig FileConfig{..} o = o
     -- seed @oEntries@ so a later CLI @--entry@ appends on top (mirrors the
     -- @-i@ append contract). Empty when neither key is present, so the
     -- seed's existing @oEntries@ is kept (the @if null@ guard above).
-    cfgEntries = nubOrdF (maybe [] pure fcEntry ++ fromMaybe [] fcEntries)
-    nubOrdF = go []
-      where
-        go seen []       = reverse seen
-        go seen (x : xs)
-          | x `elem` seen = go seen xs
-          | otherwise     = go (x : seen) xs
+    cfgEntries = orderNub (maybe [] pure fcEntry ++ fromMaybe [] fcEntries)
+
+-- | Order-preserving dedup (first occurrence wins). Shared with "Main"
+-- (the @agda-explore@ entry point) so the config-merge here and the
+-- CLI/env assembly there dedup entry/include lists identically.
+orderNub :: Eq a => [a] -> [a]
+orderNub = go []
+  where
+    go _    []       = []
+    go seen (x : xs)
+      | x `elem` seen = go seen xs
+      | otherwise     = x : go (x : seen) xs
 
 -- ---------------------------------------------------------------------
 -- Discovery

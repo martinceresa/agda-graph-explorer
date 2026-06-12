@@ -9,8 +9,10 @@ dist-newstyle
 # Local Claude Code agent definitions
 .claude/
 
-# Battle-test artifacts and generated optimization HTML — scratch output,
-# not tracked.
+# Kept local, not version-controlled: the battle-test harness + its run
+# artifacts (BattleTest/ — includes the PyRepr/ harness source and the
+# generated per-tool reports/graphs) and the generated optimization HTML
+# (OptSite/). The tracked test harness is .github/workflows/ci.yml.
 BattleTest/
 OptSite/
 

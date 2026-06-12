@@ -34,7 +34,7 @@ import           System.IO          (hPutStrLn, stderr)
 
 import           AgdaMcp.Config     (Opts (..), applyConfig,
                                      discoverConfigPath, extractConfigArg,
-                                     loadConfig)
+                                     loadConfig, orderNub)
 import           AgdaMcp.Rpc        (runStdioLoop)
 import           AgdaMcp.State
 import           AgdaMcp.Tools      (dispatch)
@@ -111,16 +111,8 @@ orElse :: Maybe a -> Maybe a -> Maybe a
 orElse (Just x) _ = Just x
 orElse Nothing  y = y
 
--- | Order-preserving dedup (first occurrence wins). Used so duplicate
--- entries (config + CLI + env) aren't handed to agda-deps twice and the
--- include-default dirs aren't repeated.
-orderNub :: Eq a => [a] -> [a]
-orderNub = go []
-  where
-    go _    []       = []
-    go seen (x : xs)
-      | x `elem` seen = go seen xs
-      | otherwise     = x : go (x : seen) xs
+-- 'orderNub' (order-preserving dedup) is shared from "AgdaMcp.Config" so the
+-- config-merge and this CLI/env assembly dedup entry/include lists identically.
 
 -- ---------------------------------------------------------------------
 -- Project discovery

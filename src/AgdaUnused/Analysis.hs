@@ -487,6 +487,13 @@ definedButUnused ctx fp thisMod shorts =
   , let trivial = (thisMod, sh) `S.member` ctxTrivialBody ctx
   , S.null (usersClosure ctx (thisMod, sh))
   , let intra = M.findWithDefault S.empty (thisMod, sh) (ctxIntraModUsedQ ctx)
+  -- 'crossFile' (short name used in some OTHER file) and 'inFileUse'
+  -- (occurs beyond the def's signature + LHS in THIS file) are the two
+  -- halves of the elaborator-inlining suppression below. Bound once
+  -- here so the two dead-branch guards share the single cross-file scan
+  -- instead of each recomputing it.
+  , let crossFile = mentionedCrossFile ctx fp sh
+        inFileUse = countToken sh (M.findWithDefault T.empty fp (ctxSourceBodies ctx)) > 2
   -- PHASE B (the principled fix): a TRIVIAL-bodied def whose short
   -- name appears as a use in ANOTHER file is treated as having a
   -- synthetic external user — the elaborator inlined the callee and
@@ -494,11 +501,9 @@ definedButUnused ctx fp thisMod shorts =
   -- mentions it. Such a def is never dead. We gate this on
   -- trivial-bodied only (the inliner only inlines trivial RHSs) so we
   -- don't mask a genuinely-dead non-trivial def whose short name
-  -- collides with an unrelated live identifier elsewhere. (This is a
-  -- formalisation of the cross-file half of 'mentionedAsUse' below,
-  -- restricted to inline-eligible defs; the wider 'mentionedAsUse'
-  -- guard still applies to the in-file-count case for all defs.)
-  , S.null intra `implies` not (trivial && mentionedCrossFile ctx fp sh)
+  -- collides with an unrelated live identifier elsewhere. (The wider
+  -- cross-file-or-in-file check still applies to all dead defs below.)
+  , S.null intra `implies` not (trivial && crossFile)
   -- Suppress dead false positives caused by Agda's elaborator
   -- inlining the callee: when there are *no* intra-module graph
   -- users either, double-check the source text. If the short name
@@ -507,7 +512,7 @@ definedButUnused ctx fp thisMod shorts =
   -- reference the dep graph just lost. We only apply this to the
   -- DEAD branch; the internal-only branch already has graph evidence
   -- of intra-module use and doesn't need a source-text fallback.
-  , S.null intra `implies` not (mentionedAsUse ctx fp sh)
+  , S.null intra `implies` not (crossFile || inFileUse)
   -- Skip the @internal-only@ "wrap in @private@" suggestion for
   -- names the producer already reports as 'Private'. They're
   -- already wrapped; re-flagging them is noise. The 'DefinedDead'
@@ -520,20 +525,11 @@ definedButUnused ctx fp thisMod shorts =
     implies True  x = x
     implies False _ = True
 
--- | True if @sh@ has at least one *use* occurrence — i.e. cross-file
--- mention or in-file count > 2 (signature + LHS = 2 minimum for a
--- definition, so the third occurrence is a use). Suppresses dead/
--- internal-only FPs from Agda's elaborator inlining.
-mentionedAsUse :: Context -> FilePath -> Text -> Bool
-mentionedAsUse ctx fp sh = mentionedCrossFile ctx fp sh
-  || let ownBody = M.findWithDefault T.empty fp (ctxSourceBodies ctx)
-     in countToken sh ownBody > 2
-
 -- | True if @sh@ appears in the body tokens of some file OTHER than
--- @fp@. Pulled out of 'mentionedAsUse' so Phase B's synthetic external
--- user (in 'definedButUnused') can consult the cross-file half on its
--- own, without the in-file occurrence-count heuristic. Iterates the
--- key-ordered 'M.toList' so it stays determinism-safe.
+-- @fp@. 'definedButUnused' combines this (the cross-file half of the
+-- elaborator-inlining dead-FP suppression) with an in-file
+-- occurrence-count check. Iterates the key-ordered 'M.toList' so it
+-- stays determinism-safe.
 mentionedCrossFile :: Context -> FilePath -> Text -> Bool
 mentionedCrossFile ctx fp sh =
   any (\(p, toks) -> p /= fp && S.member sh toks)

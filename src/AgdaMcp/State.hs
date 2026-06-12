@@ -549,20 +549,15 @@ runBuild Config{..}
                      ++ showEc ec ++ "):\n" ++ lastLines 25 err)
         else Right graphPath
 
-    -- Single entry: preserve the historical one-subprocess path exactly —
-    -- emit into 'cfgOutDir' and read back 'cfgGraphPath' via 'loadLoaded'.
+    -- Single entry: 'runOne' into 'cfgOutDir' IS the historical one-subprocess
+    -- command (identical 'baseArgs ++ ["-o", cfgOutDir, entry]') and writes
+    -- exactly 'cfgGraphPath' (== cfgOutDir </> "deps.json"), so we read back
+    -- the path it returns via 'loadLoaded'. Sharing 'runOne' keeps the single-
+    -- and multi-entry build commands from drifting on a future 'baseArgs' change.
     singleEntry :: FilePath -> FilePath -> IO (Either String Loaded)
-    singleEntry deps entry = do
-      createDirectoryIfMissing True cfgOutDir
-      let args = baseArgs ++ ["-o", cfgOutDir, entry]
-      (ec, _out, err) <-
-        readCreateProcessWithExitCode
-          (proc deps args) { cwd = Just cfgProjectRoot } ""
-      exists <- doesFileExist cfgGraphPath
-      if not exists
-        then pure (Left ("agda-deps produced no graph (" ++ showEc ec
-                          ++ "):\n" ++ lastLines 25 err))
-        else loadLoaded cfgAutoResolveUnique cfgIncludes cfgGraphPath
+    singleEntry deps entry =
+      runOne deps cfgOutDir entry
+        >>= either (pure . Left) (loadLoaded cfgAutoResolveUnique cfgIncludes)
 
     -- Multiple entries: one agda-deps run per entry into a per-entry
     -- sub-dir of 'cfgOutDir', decode each graph, then union in-process and
