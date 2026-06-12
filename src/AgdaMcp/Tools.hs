@@ -14,12 +14,14 @@ import           Data.Aeson         (Value (..), object, parseJSON, (.=))
 import qualified Data.Aeson.Key     as Key
 import qualified Data.Aeson.KeyMap  as KM
 import           Data.Aeson.Types   (parseMaybe)
-import           Data.IORef         (readIORef)
+import           Data.IORef         (readIORef, writeIORef)
 import           Data.List          (isPrefixOf)
 import qualified Data.Map.Strict    as M
 import           Data.Maybe         (fromMaybe)
 import           Data.Text          (Text)
 import qualified Data.Text          as T
+import           Data.Time.Clock    (diffUTCTime, getCurrentTime)
+import           Data.Time.Format.ISO8601 (iso8601Show)
 import           System.Directory   (doesPathExist)
 import           System.FilePath    (isAbsolute, normalise, (</>))
 import           System.Process     (CreateProcess (..), proc,
@@ -88,9 +90,10 @@ tools =
       \visibility, direct caller/dependency counts, and transitive blast radius. \
       \For a where-/anonymous-module helper it also reports the enclosing \
       \top-level `owner`. Accepts a fully-qualified name or any unique \
-      \dotted-suffix (e.g. `liveness′`). Use instead of grepping for a \
-      \definition site."
-      (objSchema [("name", sp "Fully-qualified name or any unique dotted-suffix of one.")] ["name"])
+      \dotted-suffix (e.g. `liveness′`); a single unambiguous near-match \
+      \(case-insensitive infix) is resolved automatically, with a one-line \
+      \`(auto-resolved …)` note. Use instead of grepping for a definition site."
+      (objSchema [("name", sp "Fully-qualified name or any unique dotted-suffix of one. A single unambiguous near-match is auto-resolved (noted in the output); ambiguous names list candidates.")] ["name"])
       (\ss a -> needName a $ \n -> withFresh ss (\ld -> queryLocate ld n))
 
   , Tool "callers"
@@ -196,8 +199,8 @@ tools =
       (objSchema [ ("name", sp "Definition whose type signature you want.")
                  , ("source", bp "Show the as-written source signature instead of the elaborated type (default false).")
                  ] ["name"])
-      (\ss a -> needName a $ \n -> withFreshIO ss (\ld ->
-          readSignature ld (argBool a "source" False)
+      (\ss a -> needName a $ \n -> withFreshFailFast ss n (\ld ->
+          readSignature ld (cfgEntries (ssConfig ss)) (argBool a "source" False)
             (cfgNormaliseSigs (ssConfig ss)) (cfgShowImplicit (ssConfig ss)) n))
 
   , Tool "similar_types"
@@ -226,6 +229,35 @@ tools =
       (\ss a -> needName a $ \n ->
           withFresh ss (\ld -> querySimilarBodies ld (argInt a "limit" 10) (argDouble a "min_sim" 0.3) n))
 
+  , Tool "find_lemma"
+      "Goal-directed lemma search: find existing definitions whose \
+      \*conclusion* (result type) resembles a proof goal, so you can reuse a \
+      \lemma instead of re-deriving it. Two modes (supply EXACTLY ONE of \
+      \`goal`/`anchor`): (1) `anchor=<existing def>` ranks by the same \
+      \Weisfeiler-Leman signature-fingerprint shape as `similar_types` (true \
+      \structural matching, requires a graph node with edges); (2) \
+      \`goal=\"<rendered goal type>\"` canonicalises the free-text goal, takes \
+      \its conclusion (after the last top-level arrow), and ranks candidate \
+      \signatures by identifier-token Jaccard over their conclusions — a \
+      \name-overlap proxy, NOT WL (an out-of-graph string has no edges to \
+      \fingerprint). Optional `kind`/`module_prefix` filter candidates. \
+      \Free-text mode needs a signatures-enabled graph (the daemon default); \
+      \against a signature-less graph it returns a rebuild note."
+      (objSchema [ ("goal", sp "Free-text goal type to match (e.g. `xs ++ [] ≡ xs`); mutually exclusive with `anchor`. Ranks by conclusion-token overlap.")
+                 , ("anchor", sp "An existing definition whose result type is the goal shape; mutually exclusive with `goal`. Ranks by WL signature-fingerprint shape (like `similar_types`).")
+                 , ("kind", sp "Restrict candidates to this structural kind: function|projection|datatype|record|constructor|postulate|primitive|other.")
+                 , ("module_prefix", sp "Only consider candidates whose module starts with this prefix.")
+                 , ("limit", ip "Max results (default 10).")
+                 , ("min_sim", np "Minimum similarity 0..1 (default 0.3).")
+                 ] [])
+      (\ss a -> case (argText a "goal", argText a "anchor") of
+          (Just _, Just _) -> pure (Left "find_lemma takes exactly one of `goal` or `anchor`, not both.")
+          (Nothing, Nothing) -> pure (Left "find_lemma requires one of `goal` (free-text type) or `anchor` (an existing definition).")
+          _ -> withFresh ss (\ld ->
+                 queryFindLemma ld (argInt a "limit" 10) (argDouble a "min_sim" 0.3)
+                   (argText a "kind") (argText a "module_prefix")
+                   (argText a "goal") (argText a "anchor")))
+
   , Tool "search"
       "Find definitions whose qualified name contains a substring, ranked by \
       \match tightness. Use to discover exact names before other queries. \
@@ -252,7 +284,10 @@ tools =
       "Run agda-unused over the current graph: unused `using` imports, \
       \duplicate opens, and (opt-in) dead definitions. High-signal for \
       \import hygiene; carries the known instance/`with`-clause false-positive \
-      \caveat. The response header echoes the resolved scope, effective kinds, \
+      \caveat. Each `dead` finding is tagged high- or low-confidence (the \
+      \low ones have trivial bodies the elaborator may have inlined) — verify \
+      \low-confidence ones before deleting; high-confidence ones are safe. \
+      \The response header echoes the resolved scope, effective kinds, \
       \and any exclude globs, and the trailing `# excluded:` line reports how \
       \many findings the excludes suppressed."
       (objSchema [ ("scope", sp "Restrict the scan to a directory, file, or module name \
@@ -266,6 +301,12 @@ tools =
                                    \`*` stops at `/`, `?` is one char — e.g. `**/Init.agda` for a \
                                    \re-export hub, or `Prelude.*`. The output's `# excluded:` line \
                                    \reports how many findings were suppressed.")
+                 , ("group_by", sp "Aggregate findings into per-group counts instead of one \
+                                    \line per finding: `dir` (directory of the relativised path), \
+                                    \`file` (relativised path), or `kind`. Rows are sorted by \
+                                    \descending count, ties broken by group key.")
+                 , ("count_only", bp "Print only the grand total (default false). Wins over \
+                                      \group_by if both are set.")
                  ] [])
       runUnused
 
@@ -275,6 +316,8 @@ tools =
       \— queries auto-rebuild when sources change."
       (objSchema [] [])
       (\ss _ -> do
+          -- The @rebuild@ tool always (force-)rebuilds: stale=True.
+          writeIORef (ssLastRebuilt ss) True
           e <- forceRebuild ss
           pure $ case e of
             Left err -> Left (T.pack err)
@@ -284,7 +327,10 @@ tools =
       "Daemon configuration and the current snapshot's freshness and \
       \statistics. Does not trigger a rebuild."
       (objSchema [] [])
-      (\ss _ -> Right <$> statusText ss)
+      (\ss _ -> do
+          -- @status@ never rebuilds: stale=False.
+          writeIORef (ssLastRebuilt ss) False
+          Right <$> statusText ss)
   ]
 
 needName :: Value -> (Text -> IO (Either Text Text)) -> IO (Either Text Text)
@@ -292,22 +338,81 @@ needName a go = case argText a "name" of
   Nothing -> pure (Left "missing required argument: name")
   Just n  -> go n
 
+-- | The single line appended to a tool's rendered output when
+-- 'ensureFresh' served a /stale/ snapshot — i.e. a rebuild is in flight in
+-- the background and these results reflect the snapshot built at the given
+-- time, not a guaranteed-fresh one. Plain text only (no structured JSON
+-- field), matching the existing footer style. The model reads this and
+-- knows to re-query (or call @rebuild@) for fresh results.
+staleFooter :: Loaded -> Text
+staleFooter ld =
+  "\n# stale: graph is rebuilding in the background; results reflect the snapshot built at "
+    <> T.pack (show (ldBuiltAt ld))
+
+-- | Record the @stale@ telemetry column for the request currently in
+-- flight. Every tool runner that calls 'ensureFresh' threads the E1
+-- @(Loaded, Bool)@ stale flag through here; 'handleCall' reads + resets it
+-- after the runner returns. (The @rebuild@ tool sets 'True', @status@
+-- 'False' directly — see the catalogue.)
+noteRebuilt :: ServerState -> Bool -> IO ()
+noteRebuilt ss = writeIORef (ssLastRebuilt ss)
+
 withFresh :: ServerState -> (Loaded -> Text) -> IO (Either Text Text)
 withFresh ss f = do
   e <- ensureFresh ss
-  pure $ case e of Left err -> Left (T.pack err); Right ld -> Right (f ld)
+  case e of
+    Left err          -> pure (Left (T.pack err))
+    Right (ld, stale) -> do
+      noteRebuilt ss stale
+      pure (Right (f ld <> if stale then staleFooter ld else ""))
 
 withFreshIO :: ServerState -> (Loaded -> IO (Either Text Text)) -> IO (Either Text Text)
 withFreshIO ss f = do
   e <- ensureFresh ss
-  case e of Left err -> pure (Left (T.pack err)); Right ld -> f ld
+  case e of
+    Left err          -> pure (Left (T.pack err))
+    Right (ld, stale) -> do
+      noteRebuilt ss stale
+      r <- f ld
+      pure $ case r of
+        Left err  -> Left err
+        Right txt -> Right (txt <> if stale then staleFooter ld else "")
+
+-- | The E2 fail-fast wrapper used by @type_of@. Before paying the
+-- 'ensureFresh' barrier (which, post-E1, may schedule a background
+-- rebuild and serve stale), it resolves @name@ against the
+-- /already-loaded/ snapshot. If a snapshot exists and the name is absent
+-- from it ('nameInSnapshot' 'False'), it answers the 'notInGraph' message
+-- instantly — no 'ensureFresh' scan, no scheduled rebuild — recording the
+-- request as non-stale telemetry. Only when the name resolves, or no
+-- snapshot exists yet, does it fall through to 'withFreshIO'/'ensureFresh'
+-- (so a genuinely-present name still gets the freshness path, and the
+-- first-ever query still blocks on the one build as before).
+--
+-- @isError=false@: a not-in-graph result is a normal lookup outcome, like
+-- @locate@'s. The 'notInGraph' text is rendered from the same snapshot the
+-- real 'readSignature' would use, so the slow and fast paths agree.
+withFreshFailFast
+  :: ServerState
+  -> Text                                  -- ^ the queried name
+  -> (Loaded -> IO (Either Text Text))     -- ^ the freshness-gated action
+  -> IO (Either Text Text)
+withFreshFailFast ss name f = do
+  cur <- readIORef (ssLoaded ss)
+  case cur of
+    Just ld | not (nameInSnapshot ld name) -> do
+      -- Fast path: absent from the current snapshot, answer instantly.
+      noteRebuilt ss False
+      pure (Right (notInGraph ld (cfgEntries (ssConfig ss)) name))
+    _ -> withFreshIO ss f                   -- present, or no snapshot yet
 
 runUnused :: ToolRunner
 runUnused ss a = do
   e <- ensureFresh ss
   case e of
     Left err -> pure (Left ("cannot prepare graph: " <> T.pack err))
-    Right ld -> do
+    Right (ld, stale) -> do
+      noteRebuilt ss stale
       let c = ssConfig ss
       mscope <- resolveScope c ld (argText a "scope")
       case mscope of
@@ -317,31 +422,42 @@ runUnused ss a = do
           case mbin of
             Nothing  -> pure (Left "could not locate the agda-unused binary (set AGDA_UNUSED_BIN or pass --agda-unused-bin)")
             Just bin -> do
-              let mkinds = argText a "kinds"
-                  excls  = maybe [] (filter (not . T.null) . T.splitOn ",") (argText a "exclude")
+              let mkinds   = argText a "kinds"
+                  excls    = maybe [] (filter (not . T.null) . T.splitOn ",") (argText a "exclude")
+                  mgroupBy  = argText a "group_by"
+                  countOnly = argBool a "count_only" False
                   uargs = [ "--json=" ++ cfgGraphPath c
                           , "--rel-to=" ++ cfgProjectRoot c ]
                        ++ maybe [] (\k -> ["--kinds=" ++ T.unpack k]) mkinds
                        ++ [ "--exclude=" ++ T.unpack g | g <- excls ]
+                       ++ maybe [] (\v -> ["--group-by=" ++ T.unpack v]) mgroupBy
+                       ++ [ "--count-only" | countOnly ]
                        ++ [scope]
               (_ec, out, err) <-
                 readCreateProcessWithExitCode (proc bin uargs) { cwd = Just (cfgProjectRoot c) } ""
               let body   = if null out then err else out
                   -- Self-describing header: resolved scope, effective
-                  -- kinds, and exclude globs, so "0 findings" can't be
-                  -- mistaken for a mis-scoped or over-excluded run.
+                  -- kinds, exclude globs, and any aggregation mode, so
+                  -- "0 findings" can't be mistaken for a mis-scoped or
+                  -- over-excluded run.
                   header = "scope: " <> T.pack scope <> "\n"
                         <> "kinds: " <> fromMaybe "(agda-unused default)" mkinds <> "\n"
                         <> (if null excls then ""
                               else "exclude: " <> T.intercalate ", " excls <> "\n")
+                        <> maybe "" (\v -> "group_by: " <> v <> "\n") mgroupBy
+                        <> (if countOnly then "count_only: true\n" else "")
                         <> "\n"
-              pure (Right (header <> caveat <> T.pack body))
+              pure (Right (header <> caveat <> T.pack body
+                             <> if stale then staleFooter ld else ""))
   where
     caveat =
       "Note: `using` and `duplicate` findings are high-signal. `blanket`, \
       \`defined`, and `public` are best-effort — instance methods and names \
-      \used only through `with`/`with ←` chains are known false positives, so \
-      \grep-verify a deletion candidate before removing it.\n\n"
+      \used only through `with`/`with ←` chains are known false positives. \
+      \Each `dead` finding now carries a confidence tag in its note: \
+      \high-confidence deletion candidates are safe, but verify the \
+      \low-confidence ones (`low confidence: trivial body, possibly inlined`) \
+      \before removing — the elaborator may have inlined the callee.\n\n"
 
 -- | Resolve the @scope@ argument to an absolute path for @agda-unused@,
 -- which keys its module table by /absolute/ path — a relative @scope@
@@ -381,13 +497,20 @@ statusText ss = do
   bin      <- binaryIdent
   banner   <- stalenessBanner ss
   watching <- isWatching ss
+  -- A plain IORef read — status never acquires the rebuild lock, so it is
+  -- answerable even while a background rebuild holds it (the point of
+  -- serve-stale). True ⇒ a rebuild is pending/in-flight and queries are
+  -- being served from the prior snapshot until it lands.
+  dirty    <- readIORef (ssDirty ss)
   let c = ssConfig ss
       base = T.unlines
         [ "agda-explore status"
         , "  server build: " <> T.pack BuildInfo.buildFingerprint
         , "  binary:       " <> T.pack bin
         , "  project root: " <> T.pack (cfgProjectRoot c)
-        , "  entry:        " <> maybe "(none — preloaded graph)" T.pack (cfgEntry c)
+        , "  entries:      " <> (if null (cfgEntries c)
+                                  then "(none — preloaded graph)"
+                                  else T.intercalate ", " (map T.pack (cfgEntries c)))
         , "  includes:     " <> (if null (cfgIncludes c) then "(none)"
                                   else T.intercalate ", " (map T.pack (cfgIncludes c)))
         , "  graph file:   " <> T.pack (cfgGraphPath c)
@@ -399,6 +522,10 @@ statusText ss = do
                                   else if watching then "fsnotify watcher (event-driven)"
                                   else if cfgWatch c then "polling (watcher unavailable)"
                                   else "polling (watcher disabled)")
+        , "  rebuild:      " <> (if cfgPreloaded c then "n/a (preloaded)"
+                                  else if dirty
+                                    then "in flight (serving stale; status never blocks on it)"
+                                    else "idle (snapshot is fresh)")
         , "  term hashes:  " <> (if cfgWithHashes c then "on" else "off")
         ]
   pure $ banner <> base <> "\n" <> case cur of
@@ -444,7 +571,30 @@ handleCall ss theId params = case argText params "name" of
     []      -> pure (errorResponse theId codeMethodNotFound ("unknown tool: " <> tn))
     (t : _) -> do
       let args = fromMaybe (Object KM.empty) (argLookup params "arguments")
-      r <- tRun t ss args
+      -- Telemetry (E6): time the runner, capture whether it triggered a
+      -- live rebuild (the runner writes 'ssLastRebuilt'; reset first so a
+      -- runner that doesn't touch it reads a clean False), and append one
+      -- JSON line per tools/call when cfgQueryLog is on. This is the single
+      -- place where the tool name, the raw arguments Value, and the
+      -- Right/Left result are all in scope. Logging never affects the reply
+      -- (appendQueryLog swallows its own IO failures).
+      writeIORef (ssLastRebuilt ss) False
+      t0 <- getCurrentTime
+      r  <- tRun t ss args
+      t1 <- getCurrentTime
+      stale <- readIORef (ssLastRebuilt ss)
+      let durMs = realToFrac (diffUTCTime t1 t0) * 1000 :: Double
+          ok    = either (const False) (const True) r
+      if cfgQueryLog (ssConfig ss)
+        then appendQueryLog ss $ object
+               [ "ts"     .= iso8601Show t1
+               , "tool"   .= tn
+               , "args"   .= args
+               , "dur_ms" .= durMs
+               , "ok"     .= ok
+               , "stale"  .= stale
+               ]
+        else pure ()
       pure $ resultResponse theId $ case r of
         Right txt -> callResult False txt
         Left  err -> callResult True err

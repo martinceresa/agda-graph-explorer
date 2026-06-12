@@ -34,29 +34,33 @@ import           Data.Foldable       ( toList )
 import qualified Data.Text           as T
 
 import           AgdaGraph.ConfigCore ( DiscoverSpec(..), discoverWith, loadYamlConfig )
-import           AgdaUnused.Analysis ( FindingKind(..) )
+import           AgdaUnused.Analysis ( FindingKind(..), GroupBy, parseGroupBy )
 
 -- | Externally-supplied configuration. Every field is 'Maybe' so a
 -- partial config only overrides what the user actually set.
 data Config = Config
-  { cfgJson    :: !(Maybe FilePath)
-  , cfgRelTo   :: !(Maybe FilePath)
-  , cfgJsonOut :: !(Maybe Bool)
-  , cfgKinds   :: !(Maybe [FindingKind])
-  , cfgRoots   :: !(Maybe [FilePath])
-  , cfgExclude :: !(Maybe [String])
+  { cfgJson      :: !(Maybe FilePath)
+  , cfgRelTo     :: !(Maybe FilePath)
+  , cfgJsonOut   :: !(Maybe Bool)
+  , cfgKinds     :: !(Maybe [FindingKind])
+  , cfgRoots     :: !(Maybe [FilePath])
+  , cfgExclude   :: !(Maybe [String])
+  , cfgGroupBy   :: !(Maybe GroupBy)
+  , cfgCountOnly :: !(Maybe Bool)
   } deriving (Show)
 
 -- | Drop-target for 'applyConfig'. We don't import the @Options@
 -- type from "MainUnused" because that would create a cyclic
 -- dependency; the caller threads in field-setters via this record.
 data ConfigTarget a = ConfigTarget
-  { ctSetJson    :: FilePath      -> a -> a
-  , ctSetRelTo   :: FilePath      -> a -> a
-  , ctSetJsonOut :: Bool          -> a -> a
-  , ctSetKinds   :: [FindingKind] -> a -> a
-  , ctSetRoots   :: [FilePath]    -> a -> a
-  , ctSetExclude :: [String]      -> a -> a
+  { ctSetJson      :: FilePath      -> a -> a
+  , ctSetRelTo     :: FilePath      -> a -> a
+  , ctSetJsonOut   :: Bool          -> a -> a
+  , ctSetKinds     :: [FindingKind] -> a -> a
+  , ctSetRoots     :: [FilePath]    -> a -> a
+  , ctSetExclude   :: [String]      -> a -> a
+  , ctSetGroupBy   :: GroupBy       -> a -> a
+  , ctSetCountOnly :: Bool          -> a -> a
   }
 
 -- | Apply a 'Config' to an arbitrary @Options@-shaped value using
@@ -64,12 +68,14 @@ data ConfigTarget a = ConfigTarget
 -- corresponding 'Maybe' is 'Just'.
 applyConfig :: ConfigTarget a -> Config -> a -> a
 applyConfig ConfigTarget{..} Config{..} = id
-  . maybe id ctSetJson    cfgJson
-  . maybe id ctSetRelTo   cfgRelTo
-  . maybe id ctSetJsonOut cfgJsonOut
-  . maybe id ctSetKinds   cfgKinds
-  . maybe id ctSetRoots   cfgRoots
-  . maybe id ctSetExclude cfgExclude
+  . maybe id ctSetJson      cfgJson
+  . maybe id ctSetRelTo     cfgRelTo
+  . maybe id ctSetJsonOut   cfgJsonOut
+  . maybe id ctSetKinds     cfgKinds
+  . maybe id ctSetRoots     cfgRoots
+  . maybe id ctSetExclude   cfgExclude
+  . maybe id ctSetGroupBy   cfgGroupBy
+  . maybe id ctSetCountOnly cfgCountOnly
 
 -- | 'FromJSON' for the 'cfgKinds' field. Accepts EITHER a YAML
 -- scalar (@kinds: "using,blanket"@) or a YAML list
@@ -78,15 +84,23 @@ applyConfig ConfigTarget{..} Config{..} = id
 -- list element.
 instance FromJSON Config where
   parseJSON = withObject "agda-unused config" $ \o -> do
-    cfgJson    <- o .:? "json"
-    cfgRelTo   <- o .:? "rel-to"
-    cfgJsonOut <- o .:? "json-out"
-    rawKinds   <- o .:? "kinds"
-    cfgKinds   <- traverse parseKindsField rawKinds
-    cfgRoots   <- o .:? "roots"
-    cfgExclude <- o .:? "exclude"
+    cfgJson      <- o .:? "json"
+    cfgRelTo     <- o .:? "rel-to"
+    cfgJsonOut   <- o .:? "json-out"
+    rawKinds     <- o .:? "kinds"
+    cfgKinds     <- traverse parseKindsField rawKinds
+    cfgRoots     <- o .:? "roots"
+    cfgExclude   <- o .:? "exclude"
+    rawGroupBy   <- o .:? "group-by"
+    cfgGroupBy   <- traverse parseGroupByField rawGroupBy
+    cfgCountOnly <- o .:? "count-only"
     return Config{..}
     where
+      parseGroupByField :: A.Value -> A.Parser GroupBy
+      parseGroupByField = withText "group-by" $ \t ->
+        case parseGroupBy (T.unpack t) of
+          Left e  -> fail e
+          Right g -> return g
       parseKindsField :: A.Value -> A.Parser [FindingKind]
       parseKindsField = \case
         A.String t -> case parseKindsCSV (T.unpack t) of

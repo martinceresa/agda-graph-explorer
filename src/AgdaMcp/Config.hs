@@ -50,7 +50,10 @@ import           AgdaGraph.ConfigCore (DiscoverSpec (..), discoverInDir)
 -- 'Config' the daemon ultimately runs with, one field per CLI flag.
 data Opts = Opts
   { oGraph    :: Maybe FilePath
-  , oEntry    :: Maybe FilePath
+  , oEntries  :: [FilePath]
+    -- ^ Agda entry modules (repeatable @--entry@; appended, exactly like
+    -- @-i@). @[]@ = none given on the CLI/config. Several entries union
+    -- their import closures into one graph (see "AgdaGraph.Union").
   , oIncl     :: [FilePath]
   , oProj     :: Maybe FilePath
   , oOut      :: Maybe FilePath
@@ -63,6 +66,8 @@ data Opts = Opts
   , oMinDepth :: Int
   , oAuto     :: Bool
   , oWatch    :: Bool
+  , oQueryLog :: Bool
+  , oAutoResolve :: Bool
   , oHelp     :: Bool
   , oVer      :: Bool
   }
@@ -77,6 +82,10 @@ data Opts = Opts
 -- (matching @agda-deps@' @no-externals@ convention).
 data FileConfig = FileConfig
   { fcEntry         :: Maybe FilePath
+    -- ^ Back-compat scalar @entry:@ key (one module). Unioned with
+    -- 'fcEntries' in 'applyConfig'.
+  , fcEntries       :: Maybe [FilePath]
+    -- ^ New list @entries:@ key. Unioned with the scalar @entry:@.
   , fcInclude       :: Maybe [FilePath]
   , fcGraph         :: Maybe FilePath
   , fcProject       :: Maybe FilePath
@@ -90,11 +99,14 @@ data FileConfig = FileConfig
   , fcMinTermDepth  :: Maybe Int
   , fcNoAutoRebuild :: Maybe Bool
   , fcNoWatch       :: Maybe Bool
+  , fcNoQueryLog    :: Maybe Bool
+  , fcNoAutoResolve :: Maybe Bool
   }
 
 defaultFileConfig :: FileConfig
 defaultFileConfig = FileConfig
   { fcEntry         = Nothing
+  , fcEntries       = Nothing
   , fcInclude       = Nothing
   , fcGraph         = Nothing
   , fcProject       = Nothing
@@ -108,11 +120,14 @@ defaultFileConfig = FileConfig
   , fcMinTermDepth  = Nothing
   , fcNoAutoRebuild = Nothing
   , fcNoWatch       = Nothing
+  , fcNoQueryLog    = Nothing
+  , fcNoAutoResolve = Nothing
   }
 
 instance FromJSON FileConfig where
   parseJSON = withObject "agda-explore config" $ \o -> do
     fcEntry         <- o .:? "entry"
+    fcEntries       <- o .:? "entries"
     fcInclude       <- o .:? "include"
     fcGraph         <- o .:? "graph"
     fcProject       <- o .:? "project"
@@ -126,6 +141,8 @@ instance FromJSON FileConfig where
     fcMinTermDepth  <- o .:? "min-term-depth"
     fcNoAutoRebuild <- o .:? "no-auto-rebuild"
     fcNoWatch       <- o .:? "no-watch"
+    fcNoQueryLog    <- o .:? "no-query-log"
+    fcNoAutoResolve <- o .:? "no-auto-resolve"
     pure FileConfig{..}
 
 -- ---------------------------------------------------------------------
@@ -139,10 +156,12 @@ instance FromJSON FileConfig where
 --
 -- Applied to the /default/ 'Opts' so the subsequent CLI parse layers on
 -- top (defaults \< config \< CLI). CLI @-i@ then /appends/ to any config
--- includes; an explicit CLI @--project@/@--graph@/etc. replaces.
+-- includes, and CLI @--entry@ likewise appends to any config @entry:@ /
+-- @entries:@ (so the union covers config + CLI entries); an explicit CLI
+-- @--project@/@--graph@/etc. replaces.
 applyConfig :: FileConfig -> Opts -> Opts
 applyConfig FileConfig{..} o = o
-  { oEntry    = fcEntry            `orKeep` oEntry o
+  { oEntries  = if null cfgEntries then oEntries o else cfgEntries
   , oIncl     = fromMaybe (oIncl o) fcInclude
   , oGraph    = fcGraph            `orKeep` oGraph o
   , oProj     = fcProject          `orKeep` oProj o
@@ -156,11 +175,25 @@ applyConfig FileConfig{..} o = o
   , oMinDepth = fromMaybe (oMinDepth o) fcMinTermDepth
   , oAuto     = maybe (oAuto o)  not fcNoAutoRebuild
   , oWatch    = maybe (oWatch o) not fcNoWatch
+  , oQueryLog = maybe (oQueryLog o) not fcNoQueryLog
+  , oAutoResolve = maybe (oAutoResolve o) not fcNoAutoResolve
   }
   where
     -- A present config value wins over the (default) seed; 'Maybe' field.
     orKeep (Just v) _ = Just v
     orKeep Nothing  k = k
+    -- Union the back-compat scalar @entry:@ and the new list @entries:@,
+    -- entry-first then the list, deduped order-preserving. Becomes the
+    -- seed @oEntries@ so a later CLI @--entry@ appends on top (mirrors the
+    -- @-i@ append contract). Empty when neither key is present, so the
+    -- seed's existing @oEntries@ is kept (the @if null@ guard above).
+    cfgEntries = nubOrdF (maybe [] pure fcEntry ++ fromMaybe [] fcEntries)
+    nubOrdF = go []
+      where
+        go seen []       = reverse seen
+        go seen (x : xs)
+          | x `elem` seen = go seen xs
+          | otherwise     = go (x : seen) xs
 
 -- ---------------------------------------------------------------------
 -- Discovery

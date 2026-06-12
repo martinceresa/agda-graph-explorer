@@ -20,14 +20,20 @@ module AgdaMcp.Query
   , queryRoots
   , querySimilarTypes
   , querySimilarBodies
+  , queryFindLemma
   , querySearch
   , queryStats
   , readSignature
   , suggestions
+  , nameInSnapshot
+  , notInGraph
   ) where
 
 import           Control.Exception  (SomeException, try)
 import           Data.Char          (isDigit, isSpace)
+import           Data.Maybe         (isJust)
+import           Data.Set           (Set)
+import qualified Data.Set           as Set
 import qualified Data.IntMap.Strict as IM
 import qualified Data.IntSet        as IS
 import           Data.List          (foldl', isPrefixOf, isSuffixOf, sortBy,
@@ -46,6 +52,8 @@ import           AgdaGraph.Schema   (Access (..), Definition (..),
                                      Provenance (..), State (..))
 import           AgdaGraph.Similarity (SigBodyFingerprints (..), fingerprintSize)
 import           AgdaGraph.WL       (weightedJaccard)
+import           AgdaGraph.GoalCanon (canonicalizeGoal, conclusionOf, identTokens,
+                                     tokenJaccard, unCanonical)
 
 import           AgdaMcp.State      (Loaded (..))
 
@@ -98,7 +106,7 @@ bulletList ld lim ds = provBulletList ld lim [ (d, Nothing) | d <- ds ]
 -- | The real (non-synthetic) defs. Materialised once at snapshot
 -- construction ('AgdaMcp.State.ldRealDefs') and read back here, rather
 -- than re-sliced from the def vector on every query that scans it
--- (rankedMatches / resolveDef's fallback / querySearch / queryStats).
+-- (rankedMatches / resolveDefNote's fallback / querySearch / queryStats).
 realDefs :: Loaded -> [Definition]
 realDefs = ldRealDefs
 
@@ -116,6 +124,38 @@ notFound ld name =
     []  -> "No similarly-named definitions found. Try the `search` tool with a substring."
     sug -> "Did you mean one of:\n" <> bulletList ld 8 sug
 
+-- | Does @name@ resolve to a definition in this snapshot? Uses the full
+-- 'resolveDefNote' resolver (not bare 'lookupDef'), so a legitimately
+-- resolvable short/dotted-suffix name (e.g. a bare @sq@ ↦ @Where._.sq\@15@)
+-- or a unique near-match (E4 auto-resolve) counts as present. This is the
+-- @type_of@ fast-path predicate ('AgdaMcp.Tools.withFreshFailFast'): when
+-- it is 'False' against the already-loaded snapshot, the daemon answers
+-- 'notInGraph' instantly instead of paying the 'ensureFresh' barrier.
+nameInSnapshot :: Loaded -> Text -> Bool
+nameInSnapshot ld name = isJust (resolveDefNote ld name)
+
+-- | The @type_of@ fast-path "not in the current graph" message. Unlike
+-- 'notFound' (used by @locate@), this names the configured entry
+-- module(s) and explains import-closure scoping — a name absent here may
+-- simply live outside the entries' reachable closure — pointing the user
+-- at @search@ or a multi-entry configuration. The 'suggestions' /
+-- "Did you mean" block is reused verbatim from 'notFound' so the
+-- candidate list is identical. @entries@ is 'cfgEntries' from the live
+-- config; empty in preloaded mode.
+notInGraph :: Loaded -> [FilePath] -> Text -> Text
+notInGraph ld entries name =
+  notFound ld name <> "\n\n" <> scopeNote
+  where
+    scopeNote =
+      "This name is not in the graph reachable from " <> entryDesc
+        <> ". It may live outside the configured entries' import closure — "
+        <> "try the `search` tool for a substring, or add the module to the "
+        <> "graph (configure multiple entry roots / `--entry`)."
+    entryDesc = case map T.pack entries of
+      []  -> "(no entry configured — preloaded graph)"
+      [e] -> "entry `" <> e <> "`"
+      es  -> "entries " <> T.intercalate ", " (map (\e -> "`" <> e <> "`") es)
+
 -- | Definitions whose (lower-cased) qualified name contains the query,
 -- ranked by how tightly they match. Untruncated — callers take what they
 -- need.
@@ -129,7 +169,10 @@ rankedMatches ld q =
         | q' `T.isPrefixOf` T.toLower (base d)  = 1
         | q' `T.isInfixOf`  T.toLower (base d)  = 2
         | otherwise                             = 3
-  in sortBy (comparing (\d -> (score d, T.length (defName d))))
+      -- defName is the final tiebreak so the order is a strict total order
+      -- (independent of input order), not merely stable — the "did you mean"
+      -- list and the E4 unique-candidate auto-resolve both read this.
+  in sortBy (comparing (\d -> (score d, T.length (defName d), defName d)))
             (filter hit (realDefs ld))
 
 -- | Top @lim@ ranked matches — the 'notFound' "did you mean" candidate list.
@@ -163,26 +206,46 @@ isDottedSuffix :: Text -> Text -> Bool
 isDottedSuffix needle hay =
   hay == needle || ("." <> needle) `T.isSuffixOf` hay
 
--- | Resolve a query name to a single definition. Tries an exact
--- fully-qualified match first; failing that, a /unique/ segment-aligned
--- dotted-suffix match (the documented "or unique name" contract), with
--- the helper @\@<line>@ disambiguator stripped before comparison so a
--- bare @sq@ still resolves @Where._.sq\@15@. An unknown or ambiguous name
--- returns 'Nothing', so callers fall back to the 'notFound' candidate list.
+-- | Resolve a query name to a single definition, plus a one-line,
+-- newline-terminated breadcrumb to prepend to the result. Tiers, in order:
+--
+--   1. exact fully-qualified match ('lookupDef');
+--   2. a /unique/ segment-aligned dotted-suffix match (the documented "or
+--      unique name" contract), with the helper @\@<line>@ disambiguator
+--      stripped before comparison so a bare @sq@ still resolves
+--      @Where._.sq\@15@;
+--   3. (gated by 'ldAutoResolveUnique', default on) a /unique near-match/:
+--      resolve iff 'rankedMatches' — the very list the 'notFound' "Did you
+--      mean" block draws from — has exactly one element, i.e. the only
+--      thing standing between the user and an answer was a single
+--      suggestion.
+--
+-- The breadcrumb is empty for the byte-identical exact (tier 1) and
+-- unique-dotted-suffix (tier 2) tiers, so existing precise behaviour is
+-- unchanged. Tier 3 emits @(auto-resolved \`<input>\` to \`<FQN>\`)@ so an
+-- agent that typed a short or differently-cased name learns the canonical
+-- name. Reusing 'rankedMatches' makes "auto-resolved" exactly "the
+-- Did-you-mean block would have shown a single candidate"; ambiguity
+-- (>= 2 candidates) stays ambiguous — tier 3 declines and the caller
+-- renders the unchanged multi-candidate 'notFound'.
 --
 -- 'defId' of the returned definition equals its node id (see 'buildIndex'),
 -- so callers can feed it straight into 'idxForward' / 'idxReverse' without
 -- a second 'lookupId'.
-resolveDef :: Loaded -> Text -> Maybe Definition
-resolveDef ld name = case lookupDef (ldIndex ld) name of
-  Just d  -> Just d
+resolveDefNote :: Loaded -> Text -> Maybe (Text, Definition)
+resolveDefNote ld name = case lookupDef (ldIndex ld) name of
+  Just d  -> Just ("", d)
   Nothing ->
     let name' = stripLineTag name
         matches d = let nm = stripLineTag (defName d)
                     in isDottedSuffix name' nm
     in case filter matches (realDefs ld) of
-         [d] -> Just d
-         _   -> Nothing
+         [d] -> Just ("", d)
+         _   | ldAutoResolveUnique ld
+             , [d] <- rankedMatches ld name
+                 -> Just ( "(auto-resolved `" <> name <> "` to `"
+                             <> defName d <> "`)\n", d )
+             | otherwise -> Nothing
 
 -- | The enclosing top-level definition of a @where@-/anonymous-module
 -- helper: the nearest non-local def at or above the helper's start line,
@@ -273,9 +336,9 @@ modulePrefixPred mp d = maybe True (`T.isPrefixOf` defModule d) mp
 -- ---------------------------------------------------------------------
 
 queryLocate :: Loaded -> Text -> Text
-queryLocate ld name = case resolveDef ld name of
+queryLocate ld name = case resolveDefNote ld name of
   Nothing -> notFound ld name
-  Just d  ->
+  Just (note, d)  -> (note <>) $
     let ix      = ldIndex ld
         i       = defId d
         synth   = i >= idxRealCount ix
@@ -328,9 +391,9 @@ edgesQuery wantReverse ld transitive mPrefix mProvTxt byMod lim name =
     Just p | parseProv p == Nothing ->
       "Unknown provenance filter `" <> p
         <> "` — use one of signature / body / where / with / unknown."
-    _ -> case resolveDef ld name of
-      Nothing -> notFound ld name
-      Just d  -> render d
+    _ -> case resolveDefNote ld name of
+      Nothing        -> notFound ld name
+      Just (note, d) -> note <> render d
   where
     mProv = mProvTxt >>= parseProv
     render d =
@@ -394,9 +457,9 @@ provBulletList ld lim xs =
        <> (if extra > 0 then "\n  …and " <> tshow extra <> " more" else "")
 
 queryImpact :: Loaded -> Int -> Text -> Text
-queryImpact ld lim name = case resolveDef ld name of
+queryImpact ld lim name = case resolveDefNote ld name of
   Nothing -> notFound ld name
-  Just d  ->
+  Just (note, d) -> (note <>) $
     let ix     = ldIndex ld
         i      = defId d
         direct = IS.delete i (directIn ix i)
@@ -430,13 +493,14 @@ queryImpact ld lim name = case resolveDef ld name of
 -- intermediate nodes to a module subtree.
 queryPath :: Loaded -> Int -> Maybe Text -> Text -> Text -> Text
 queryPath ld k mPrefix fromName toName =
-  case (resolveDef ld fromName, resolveDef ld toName) of
+  case (resolveDefNote ld fromName, resolveDefNote ld toName) of
     (Nothing, _) -> notFound ld fromName
     (_, Nothing) -> notFound ld toName
-    (Just a, Just b)
-      | defId a == defId b ->
+    (Just (noteA, a), Just (noteB, b)) -> (<>) (sideNote "from" noteA <> sideNote "to" noteB) $
+      if defId a == defId b
+      then
           "`" <> defName a <> "` and `" <> defName b <> "` are the same definition."
-      | otherwise ->
+      else
           let ix    = ldIndex ld
               allow n = maybe True (`T.isPrefixOf` defModule (defAt ix n)) mPrefix
               paths = kShortestPathsVia ix allow (defId a) (defId b) kEff
@@ -462,6 +526,13 @@ queryPath ld k mPrefix fromName toName =
   where
     kEff  = max 1 k
     kNote = if k < 1 then "(k=" <> tshow k <> " ≤ 0; clamped to 1)\n" else ""
+    -- 'path' takes two names that resolve independently; tag the
+    -- breadcrumb with which side ("from"/"to") was auto-resolved so the
+    -- two cannot be confused. Empty note (exact / suffix tier) ⇒ no tag.
+    sideNote side note
+      | T.null note = ""
+      | otherwise   = T.replace "(auto-resolved "
+                                ("(auto-resolved " <> side <> "-name ") note
 
 -- | Render a node-id path as an indented chain. Hops after the first are
 -- prefixed with the provenance of the edge that justifies them
@@ -560,9 +631,9 @@ queryRoots :: Loaded -> Int -> Bool -> Bool -> Maybe Text -> Maybe Text -> Maybe
 queryRoots ld lim byMod chains mModPrefix mKindTxt mStateTxt name =
   case filterError mKindTxt mStateTxt of
     Just err -> err
-    Nothing  -> case resolveDef ld name of
+    Nothing  -> case resolveDefNote ld name of
       Nothing -> notFound ld name
-      Just d  ->
+      Just (note, d) -> (note <>) $
         let ix    = ldIndex ld
             i     = defId d
             reach = descendants ix (IS.singleton i)
@@ -642,9 +713,9 @@ queryRoots ld lim byMod chains mModPrefix mKindTxt mStateTxt name =
 -- analysis clusters on — so a high-similarity pair here is exactly a
 -- structural-twin candidate there (an equal fingerprint scores 1.0).
 querySimilarTypes :: Loaded -> Int -> Double -> Text -> Text
-querySimilarTypes ld lim minSim name = case resolveDef ld name of
+querySimilarTypes ld lim minSim name = case resolveDefNote ld name of
   Nothing -> notFound ld name
-  Just d  ->
+  Just (note, d) -> (note <>) $
     let ix   = ldIndex ld
         sbf  = ldSigBodyFp ld
         i    = defId d
@@ -680,9 +751,9 @@ querySimilarTypes ld lim minSim name = case resolveDef ld name of
 -- batch @term-cluster@ analysis buckets over — so counting occurrences
 -- (not mere membership) matches @term-cluster@'s notion of body structure.
 querySimilarBodies :: Loaded -> Int -> Double -> Text -> Text
-querySimilarBodies ld lim minSim name = case resolveDef ld name of
+querySimilarBodies ld lim minSim name = case resolveDefNote ld name of
   Nothing -> notFound ld name
-  Just d  -> case ldSubtermFp ld of
+  Just (note, d) -> (note <>) $ case ldSubtermFp ld of
     Nothing ->
       "This graph carries no AST term-hashes, so body similarity is unavailable.\n"
         <> "Rebuild with term hashes enabled (the daemon does this by default; if you "
@@ -721,6 +792,165 @@ rankedList lim xs =
             <> renderKind (defKind d) <> "]  " <> loc d
     | (s, d) <- take lim xs ]
   where pct s = T.pack (show (fromIntegral (round (s * 1000) :: Int) / 10 :: Double)) <> "%"
+
+pctOf :: Double -> Text
+pctOf s = T.pack (show (fromIntegral (round (s * 1000) :: Int) / 10 :: Double)) <> "%"
+
+-- ---------------------------------------------------------------------
+-- find_lemma  (goal-directed lemma search)
+-- ---------------------------------------------------------------------
+
+-- | Goal-directed lemma search: given /either/ a free-text goal type
+-- /or/ an existing definition (the @anchor@) whose result type is the
+-- goal shape, surface existing definitions whose conclusion (result
+-- type) resembles the goal, so a proving agent can reuse a lemma rather
+-- than hand-maintaining a memory inventory. Exactly one of @goal@ /
+-- @anchor@ must be supplied; the @find_lemma@ tool enforces this before
+-- calling here (this function trusts the precondition and treats
+-- @anchor@-given as anchor mode, otherwise free-text mode keyed on
+-- @goal@).
+--
+-- Two complementary code paths, both grounded in existing machinery:
+--
+--   * __Anchor mode__ (Weisfeiler–Leman fingerprints) reuses
+--     'querySimilarTypes'' exact ranking core — weighted Jaccard over
+--     the shared 'ldSigBodyFp' signature fingerprints — restricted by an
+--     optional @kind@/@module_prefix@ filter, and annotates each hit
+--     with its conclusion text. A WL fingerprint requires a graph node
+--     with edges, which a free-text string is not, so only this path is
+--     WL-based.
+--
+--   * __Free-text mode__ (token overlap) canonicalises the goal with
+--     'canonicalizeGoal', takes its 'conclusionOf', extracts its name
+--     'identTokens', and ranks every real def carrying a 'defSig' by
+--     'tokenJaccard' of those tokens against the candidate's own
+--     canonicalised-conclusion tokens (keeping hits @>= minSim@). This
+--     is a name-set overlap proxy — strictly weaker than WL, but the
+--     honest mechanism available for an out-of-graph string. If /every/
+--     def's 'defSig' is 'Nothing' (graph built without
+--     @--with-signatures@) it returns an explicit rebuild note, not a
+--     silent empty list.
+--
+-- All ranking sorts are total orders (similarity then name) so output is
+-- reproducible.
+queryFindLemma
+  :: Loaded
+  -> Int            -- ^ limit
+  -> Double         -- ^ min similarity
+  -> Maybe Text     -- ^ kind filter
+  -> Maybe Text     -- ^ module_prefix filter
+  -> Maybe Text     -- ^ goal (free-text mode)
+  -> Maybe Text     -- ^ anchor (anchor mode)
+  -> Text
+queryFindLemma ld lim minSim mKindTxt mModPrefix mGoal mAnchor =
+  case badParse parseKind mKindTxt of
+    Just bad -> "Unknown kind filter `" <> bad <> "` — use one of function / "
+                  <> "projection / datatype / record / constructor / postulate / primitive / other."
+    Nothing -> case mAnchor of
+      Just anchor -> anchorMode anchor
+      Nothing     -> case mGoal of
+        Just goal -> freeTextMode goal
+        Nothing   -> "find_lemma requires exactly one of `goal` or `anchor`."
+  where
+    mKind = mKindTxt >>= parseKind
+    -- shared candidate filter: optional kind + optional module prefix.
+    candKeep d = maybe True (== defKind d) mKind && modulePrefixPred mModPrefix d
+    filterNote = T.concat
+      [ maybe "" (\k -> " kind=" <> k) mKindTxt
+      , maybe "" (\p -> " module_prefix=" <> p) mModPrefix ]
+    -- conclusion text annotation for a candidate (blank when no sig).
+    concSuffix d = case defSig d of
+      Just sig | not (T.null (T.strip (conclusionOf sig))) ->
+        "  ⊢ " <> T.strip (conclusionOf sig)
+      _ -> ""
+
+    -- ----------------------------------------------------------------
+    -- Anchor mode: WL signature fingerprints (querySimilarTypes core).
+    anchorMode anchor = case resolveDefNote ld anchor of
+      Nothing        -> notFound ld anchor
+      Just (note, d) -> (note <>) $
+        let ix   = ldIndex ld
+            sbf  = ldSigBodyFp ld
+            i    = defId d
+            mine = sbfSig sbf V.! i
+            size = fingerprintSize mine
+        in if size < 2
+             then "`" <> anchor <> "` has too small a type-signature footprint ("
+                    <> tshow size <> " WL-fingerprint node(s)) for a meaningful "
+                    <> "type-similarity comparison."
+             else
+               let cands = [ (s, dj)
+                           | j <- [0 .. idxRealCount ix - 1], j /= i
+                           , let dj = defAt ix j
+                           , defKind dj /= KOther
+                           , candKeep dj
+                           , let s = weightedJaccard mine (sbfSig sbf V.! j)
+                           , s >= minSim ]
+                   ranked = take lim
+                              (sortBy (comparing (\(s, dj) -> (Down s, defName dj))) cands)
+                   provNote = if sbfHasProvenance sbf then ""
+                              else "\n(note: graph lacks edge provenance, so the "
+                                   <> "signature/body split is unavailable — fingerprints "
+                                   <> "cover all edges, like `silhouette`'s fallback)"
+               in if null ranked
+                    then "No lemmas with signature-shape similarity ≥ "
+                           <> tshow minSim <> " to `" <> anchor <> "`"
+                           <> filterNote <> "." <> provNote
+                    else "Candidate lemmas matching the type shape of `" <> anchor
+                           <> "`" <> filterNote
+                           <> " (Weisfeiler–Leman signature fingerprint — the `similar_types`/"
+                           <> "`silhouette` metric):\n"
+                           <> lemmaList ranked <> provNote
+
+    -- ----------------------------------------------------------------
+    -- Free-text mode: canonicalise + conclusion token Jaccard.
+    freeTextMode goal =
+      let withSigs = [ (d, ts)
+                     | d <- realDefs ld
+                     , candKeep d
+                     , Just sig <- [defSig d]
+                     , let ts = sigConclTokens sig ]
+          gtoks    = sigConclTokens (unCanonical (canonicalizeGoal goal))
+          -- does ANY real def carry a signature at all? (ignores filters,
+          -- so the "rebuild" note fires only on a truly sig-less graph.)
+          anySig   = any (isJust . defSig) (realDefs ld)
+          cands    = [ (s, d)
+                     | (d, ts) <- withSigs
+                     , let s = tokenJaccard gtoks ts
+                     , s >= minSim ]
+          ranked   = take lim
+                       (sortBy (comparing (\(s, d) -> (Down s, defName d))) cands)
+      in if not anySig
+           then "This graph carries no type signatures, so free-text lemma "
+                  <> "search is unavailable.\nRebuild with signatures enabled "
+                  <> "(the daemon does this by default; if you loaded a fixed "
+                  <> "--graph, regenerate it with `agda-deps --with-signatures`)."
+           else if null ranked
+             then "No lemmas with conclusion-token overlap ≥ " <> tshow minSim
+                    <> " for goal `" <> goal <> "`" <> filterNote
+                    <> ".\n(goal conclusion tokens: " <> renderTokens gtoks <> ")"
+             else "Candidate lemmas whose conclusion resembles the goal `" <> goal
+                    <> "`" <> filterNote
+                    <> " (identifier-token Jaccard over canonicalised "
+                    <> "conclusions — NOT WL; use `anchor` for WL shape matching):\n"
+                    <> lemmaList ranked
+                    <> "\n(goal conclusion tokens: " <> renderTokens gtoks <> ")"
+
+    -- canonicalise a signature, take its conclusion, extract name tokens.
+    sigConclTokens :: Text -> Set Text
+    sigConclTokens sig =
+      identTokens (conclusionOf (unCanonical (canonicalizeGoal sig)))
+
+    renderTokens ts = case [ "`" <> t <> "`" | t <- Set.toAscList ts ] of
+      [] -> "(none)"
+      xs -> T.intercalate ", " xs
+
+    -- one ranked bullet, with the matched conclusion annotation.
+    lemmaList ranked = T.intercalate "\n"
+      [ "- " <> pctOf s <> "  `" <> defName d <> "`  ["
+              <> renderKind (defKind d) <> "/" <> renderState (defState d)
+              <> "]  " <> loc d <> concSuffix d
+      | (s, d) <- ranked ]
 
 -- ---------------------------------------------------------------------
 -- search / stats
@@ -818,14 +1048,21 @@ queryStats ld =
 -- back to source either way. @normalised@ / @showImplicit@ describe how
 -- the reified type was built (daemon-level — they're baked into the
 -- graph, so the disclaimer reports the mode rather than re-reifying).
-readSignature :: Loaded -> Bool -> Bool -> Bool -> Text -> IO (Either Text Text)
-readSignature ld preferSource normalised showImplicit name = case resolveDef ld name of
+--
+-- @entries@ are the configured entry modules ('cfgEntries'), used only to
+-- enrich the not-in-graph message so it matches the @type_of@ fast-path
+-- ('AgdaMcp.Tools.withFreshFailFast') byte-for-byte — a name that vanishes
+-- between the fast-path check and this call still renders the same text.
+readSignature :: Loaded -> [FilePath] -> Bool -> Bool -> Bool -> Text -> IO (Either Text Text)
+readSignature ld entries preferSource normalised showImplicit name = case resolveDefNote ld name of
   -- "Name not found" is a normal lookup outcome, not a tool error —
   -- return it as ordinary output so `type_of` matches `locate`. The
   -- genuine failures below (no source file, unreadable, no isolable
-  -- signature) stay as 'Left'.
-  Nothing -> pure (Right (notFound ld name))
-  Just d  -> case if preferSource then Nothing else defSig d of
+  -- signature) stay as 'Left'. The auto-resolution breadcrumb prefixes
+  -- the 'Right' output only (a 'Left' is a genuine failure, no result
+  -- to annotate).
+  Nothing -> pure (Right (notInGraph ld entries name))
+  Just (arNote, d) -> fmap (fmap (arNote <>)) $ case if preferSource then Nothing else defSig d of
     -- Authoritative path: the producer emitted the reified type. The
     -- disclaimer reflects the daemon's signature settings.
     Just t0 ->

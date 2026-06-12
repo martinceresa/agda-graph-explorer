@@ -9,5 +9,10 @@ dist-newstyle
 # Local Claude Code agent definitions
 .claude/
 
+# Battle-test artifacts and generated optimization HTML — scratch output,
+# not tracked.
+BattleTest/
+OptSite/
+
 # Note: .agda-explore/deps.json IS tracked here as a query/test fixture
 # (it is not this project's own generated graph — this repo links no Agda).

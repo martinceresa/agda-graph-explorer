@@ -30,8 +30,11 @@ module AgdaMcp.State
     -- * Live regeneration
   , ensureFresh
   , forceRebuild
+    -- * Query telemetry
+  , appendQueryLog
     -- * Background file-watch
   , startWatcher
+  , ensureWorker
   , isWatching
     -- * Binary discovery
   , findBin
@@ -46,7 +49,7 @@ import           Control.Concurrent.MVar  (MVar, newEmptyMVar, newMVar,
 import           Control.DeepSeq      (force)
 import           Control.Exception    (SomeException, evaluate, try)
 import           Control.Monad        (filterM, forM, forever, void)
-import           Data.Aeson           (eitherDecode)
+import           Data.Aeson           (Value, eitherDecode, encode)
 import qualified Data.ByteString.Lazy as BL
 import           Data.IORef
 import qualified Data.IntMap.Strict   as IM
@@ -73,6 +76,7 @@ import           System.Process       (CreateProcess (..), proc,
 
 import           AgdaGraph.Index      (Index, buildIndex, idxDefs, idxRealCount)
 import           AgdaGraph.Schema     (Definition (..), ExpandedGraph (..))
+import           AgdaGraph.Union      (unionExpandedGraphs)
 import           AgdaGraph.Similarity (SigBodyFingerprints,
                                        buildSigBodyFingerprints,
                                        silhouetteDefaultWlK, subtermMultisetsVec)
@@ -80,7 +84,14 @@ import           AgdaGraph.WL         (Fingerprint)
 
 -- | How the daemon (re)builds and reads the graph.
 data Config = Config
-  { cfgEntry        :: !(Maybe FilePath) -- ^ Agda entry module for rebuilds.
+  { cfgEntries      :: ![FilePath]
+    -- ^ Agda entry modules for rebuilds (absolute paths). @[]@ = no entry
+    -- configured (preloaded mode, or the daemon couldn't discover one).
+    -- With more than one entry the daemon runs @agda-deps@ once per entry
+    -- and unions the parsed graphs in-process (see 'runBuild' +
+    -- 'AgdaGraph.Union.unionExpandedGraphs'); a single entry takes the
+    -- one-subprocess path and is byte-identical to the historical
+    -- single-@cfgEntry@ behaviour.
   , cfgIncludes     :: ![FilePath]       -- ^ @-i@ include dirs (and scan roots).
   , cfgProjectRoot  :: !FilePath         -- ^ cwd for the @agda-deps@ subprocess.
   , cfgOutDir       :: !FilePath         -- ^ where the generated @deps.json@ lives.
@@ -95,11 +106,13 @@ data Config = Config
   , cfgMinTermDepth :: !Int              -- ^ @--min-term-depth@ on rebuild.
   , cfgAutoRebuild  :: !Bool             -- ^ auto-rebuild on detected staleness.
   , cfgWatch        :: !Bool             -- ^ use an fsnotify watcher (live mode) instead of per-query polling.
+  , cfgQueryLog     :: !Bool             -- ^ append one JSON line per @tools/call@ to @cfgOutDir/query-log.jsonl@.
+  , cfgAutoResolveUnique :: !Bool        -- ^ auto-resolve a name to the sole "did you mean" candidate (tier 3 of 'AgdaMcp.Query.resolveDefNote').
   }
 
 defaultConfig :: Config
 defaultConfig = Config
-  { cfgEntry        = Nothing
+  { cfgEntries      = []
   , cfgIncludes     = []
   , cfgProjectRoot  = "."
   , cfgOutDir       = ".agda-explore"
@@ -114,6 +127,8 @@ defaultConfig = Config
   , cfgMinTermDepth = 3
   , cfgAutoRebuild  = True
   , cfgWatch        = True
+  , cfgQueryLog     = True
+  , cfgAutoResolveUnique = True
   }
 
 -- | A cheap fingerprint of the source tree: file count + newest mtime.
@@ -159,6 +174,12 @@ data Loaded = Loaded
     -- ^ per-real-def occurrence-weighted subterm multiset — the
     -- @term-cluster@ core, reused by @similar_bodies@. 'Nothing' when the
     -- graph carries no term hashes.
+  , ldAutoResolveUnique :: !Bool
+    -- ^ Whether the pure query layer's name resolver auto-resolves a name
+    -- to the sole "did you mean" candidate (tier 3 of
+    -- 'AgdaMcp.Query.resolveDefNote'). Carried on the snapshot — rather
+    -- than read from 'Config' — so "AgdaMcp.Query" needs no 'Config'
+    -- import. Set in 'loadLoaded' from 'cfgAutoResolveUnique'.
   }
 
 -- | Is this snapshot's node-key format current? When 'False' in live
@@ -170,12 +191,32 @@ data ServerState = ServerState
   { ssConfig      :: !Config
   , ssLoaded      :: !(IORef (Maybe Loaded))
   , ssStartedAt   :: !UTCTime               -- ^ when this daemon process started.
-  , ssDirty       :: !(IORef Bool)          -- ^ set by the watcher; a rebuild is pending.
+  , ssDirty       :: !(IORef Bool)          -- ^ set by the watcher (or a serve-stale query); a rebuild is pending.
   , ssRebuildLock :: !(MVar ())             -- ^ serialises rebuilds (watch worker vs. query).
-  , ssWake        :: !(MVar ())             -- ^ coalescing watcher→worker wakeup.
+  , ssWake        :: !(MVar ())             -- ^ coalescing watcher/query→worker wakeup.
   , ssWatcher     :: !(IORef (Maybe WatchManager))
     -- ^ the live fsnotify manager (also keeps it from being collected);
     -- 'Nothing' when watching is disabled or failed to start (poll fallback).
+  , ssWorkerUp    :: !(MVar ())
+    -- ^ start-at-most-once gate for the background rebuild worker
+    -- ('watchWorker'). Starts /full/ (holds the single permit); the first
+    -- caller that manages 'tryTakeMVar' wins the right to fork the worker.
+    -- Both the fsnotify path ('startWatcher') and the polled serve-stale
+    -- fallback ('ensureWorker') go through this, so exactly one worker ever
+    -- drains 'ssWake' — otherwise two workers could double-build.
+  , ssLastRebuilt :: !(IORef Bool)
+    -- ^ Telemetry (E6): whether the /most recent/ tool runner served a
+    -- stale snapshot — i.e. a rebuild was pending/in-flight (the @stale@
+    -- column), NOT "this query itself ran a rebuild". The tool runners
+    -- write it via the E1 @(Loaded, Bool)@ plumbing;
+    -- 'AgdaMcp.Tools.handleCall' reads and
+    -- resets it after each @tools/call@. (status sets it 'False'; the
+    -- @rebuild@ tool sets it 'True'.)
+  , ssLogLock     :: !(MVar ())
+    -- ^ Serialises 'appendQueryLog' appends to @query-log.jsonl@. A
+    -- /dedicated/ lock — never 'ssRebuildLock' — so a telemetry append can
+    -- never block behind a (minutes-long) @agda-deps@ rebuild, and two
+    -- threads (a query and the watcher worker) cannot interleave a line.
   }
 
 newServerState :: Config -> IO ServerState
@@ -187,6 +228,9 @@ newServerState c =
     <*> newMVar ()
     <*> newEmptyMVar
     <*> newIORef Nothing
+    <*> newMVar ()
+    <*> newIORef False
+    <*> newMVar ()
 
 -- ---------------------------------------------------------------------
 -- Source scanning
@@ -343,47 +387,72 @@ stalenessBanner ss = do
 -- Load / build
 -- ---------------------------------------------------------------------
 
-loadLoaded :: [FilePath] -> FilePath -> IO (Either String Loaded)
-loadLoaded includes graphFile = do
+loadLoaded :: Bool -> [FilePath] -> FilePath -> IO (Either String Loaded)
+loadLoaded autoResolveUnique includes graphFile = do
   e <- try (BL.readFile graphFile) :: IO (Either SomeException BL.ByteString)
   case e of
     Left err -> pure (Left ("cannot read " ++ graphFile ++ ": " ++ show err))
     Right bs -> case eitherDecode bs of
       Left perr -> pure (Left ("cannot parse " ++ graphFile ++ ": " ++ perr))
-      Right (eg :: ExpandedGraph) -> do
-        let !ix = buildIndex eg
-        _   <- evaluate (force ix)
-        -- Materialise the real-def list and the owner lookup once. Both
-        -- are forced (the queries rescan them per request and the snapshot
-        -- never changes); the similarity caches below stay lazy by design.
-        let !rds      = V.toList (V.take (idxRealCount ix) (idxDefs ix))
-            !ownerMap = buildOwnerMap rds
-        _   <- evaluate (force (length rds))
-        _   <- evaluate (force (IM.size ownerMap))
-        now <- getCurrentTime
-        sig <- scanSources includes
-        let nkv = egNodeKeyVersion eg
-        if nkv < currentNodeKeyVersion
-          then hPutStrLn stderr
-                 ("agda-explore: " ++ graphFile ++ " uses node-key format v"
-                    ++ show nkv ++ " < v" ++ show currentNodeKeyVersion
-                    ++ " (stale) — queries may key nodes by an older "
-                    ++ "convention; rebuild to refresh.")
-          else pure ()
-        pure $ Right Loaded
-          { ldGraph    = eg
-          , ldIndex    = ix
-          , ldModFiles = egModuleFiles eg
-          , ldBuiltAt  = now
-          , ldScanSig  = sig
-          , ldFailed   = egFailedModules eg
-          , ldProducer = egProducer eg
-          , ldNodeKeyV = nkv
-          , ldRealDefs = rds
-          , ldOwnerMap = ownerMap
-          , ldSigBodyFp = buildSigBodyFingerprints silhouetteDefaultWlK ix
-          , ldSubtermFp = subtermMultisetsVec ix
-          }
+      Right (eg :: ExpandedGraph) ->
+        Right <$> loadedFromGraph autoResolveUnique includes (Just graphFile) eg
+
+-- | Decode an expanded @graph.json@ from disk, returning the parsed
+-- 'ExpandedGraph' (or a clean diagnostic). Shared by the single-entry
+-- ('loadLoaded') and the multi-entry-union ('runBuild') paths — the latter
+-- decodes one graph per entry before unioning them in-process.
+decodeGraphFile :: FilePath -> IO (Either String ExpandedGraph)
+decodeGraphFile graphFile = do
+  e <- try (BL.readFile graphFile) :: IO (Either SomeException BL.ByteString)
+  pure $ case e of
+    Left err -> Left ("cannot read " ++ graphFile ++ ": " ++ show err)
+    Right bs -> case eitherDecode bs of
+      Left perr            -> Left ("cannot parse " ++ graphFile ++ ": " ++ perr)
+      Right (eg :: ExpandedGraph) -> Right eg
+
+-- | Build a 'Loaded' snapshot from an already-parsed 'ExpandedGraph'. The
+-- @mGraphFile@ is purely cosmetic — it names the source in the stale-format
+-- warning; 'Nothing' for an in-memory union (no single backing file). All
+-- the index-construction / forcing / similarity-cache wiring that used to
+-- live inline in 'loadLoaded' is here so the disk path and the union path
+-- produce identical snapshots.
+loadedFromGraph :: Bool -> [FilePath] -> Maybe FilePath -> ExpandedGraph -> IO Loaded
+loadedFromGraph autoResolveUnique includes mGraphFile eg = do
+  let !ix = buildIndex eg
+  _   <- evaluate (force ix)
+  -- Materialise the real-def list and the owner lookup once. Both
+  -- are forced (the queries rescan them per request and the snapshot
+  -- never changes); the similarity caches below stay lazy by design.
+  let !rds      = V.toList (V.take (idxRealCount ix) (idxDefs ix))
+      !ownerMap = buildOwnerMap rds
+  _   <- evaluate (force (length rds))
+  _   <- evaluate (force (IM.size ownerMap))
+  now <- getCurrentTime
+  sig <- scanSources includes
+  let nkv = egNodeKeyVersion eg
+  if nkv < currentNodeKeyVersion
+    then hPutStrLn stderr
+           ("agda-explore: " ++ maybe "graph" id mGraphFile
+              ++ " uses node-key format v"
+              ++ show nkv ++ " < v" ++ show currentNodeKeyVersion
+              ++ " (stale) — queries may key nodes by an older "
+              ++ "convention; rebuild to refresh.")
+    else pure ()
+  pure Loaded
+    { ldGraph    = eg
+    , ldIndex    = ix
+    , ldModFiles = egModuleFiles eg
+    , ldBuiltAt  = now
+    , ldScanSig  = sig
+    , ldFailed   = egFailedModules eg
+    , ldProducer = egProducer eg
+    , ldNodeKeyV = nkv
+    , ldRealDefs = rds
+    , ldOwnerMap = ownerMap
+    , ldSigBodyFp = buildSigBodyFingerprints silhouetteDefaultWlK ix
+    , ldSubtermFp = subtermMultisetsVec ix
+    , ldAutoResolveUnique = autoResolveUnique
+    }
 
 -- | Precompute the @where@-/anonymous-module owner lookup consumed by
 -- 'AgdaMcp.Query.ownerOf'. For every /local/ def with a known line, find
@@ -419,38 +488,108 @@ buildOwnerMap rds =
       outer == inner || (outer <> ".") `T.isPrefixOf` inner
 
 -- | Run @agda-deps@ to regenerate the graph, then parse and index it.
+--
+-- Three paths:
+--
+--   * /preloaded/ — read the fixed graph from disk (never spawns
+--     @agda-deps@).
+--   * /single entry/ — one @agda-deps@ subprocess into 'cfgOutDir', then
+--     decode + index 'cfgGraphPath'. Byte-identical to the historical
+--     single-@cfgEntry@ behaviour (one trailing positional, the committed
+--     fixtures + docs assume this).
+--   * /multiple entries/ — a single @agda-deps@ invocation only compiles
+--     /one/ entry's import closure, so we run it once per entry into a
+--     separate out-dir, decode each 'ExpandedGraph', and union them
+--     in-process ('AgdaGraph.Union.unionExpandedGraphs') before building a
+--     single 'Index' over the result.
 runBuild :: Config -> IO (Either String Loaded)
 runBuild Config{..}
-  | cfgPreloaded = loadLoaded cfgIncludes cfgGraphPath
-  | otherwise = case cfgEntry of
-      Nothing -> pure (Left "no entry module configured; start the server with --entry FILE or --graph FILE")
-      Just entry -> do
-        mdeps <- findBin "agda-deps" cfgDepsBin "AGDA_DEPS_BIN"
-        case mdeps of
-          Nothing   -> pure (Left "could not locate the agda-deps binary (set AGDA_DEPS_BIN or pass --agda-deps-bin)")
-          Just deps -> do
-            createDirectoryIfMissing True cfgOutDir
-            let args = [ "--format=json", "--json-mode=expanded"
-                       , "--no-externals", "--keep-going" ]
-                    ++ [ a | cfgWithHashes
-                           , a <- ["--with-term-hashes"
-                                  , "--min-term-depth=" ++ show cfgMinTermDepth] ]
-                    ++ ["--with-signatures" | cfgWithSigs]
-                    ++ ["--normalise-signatures" | cfgWithSigs && cfgNormaliseSigs]
-                    ++ ["--signature-implicits"  | cfgWithSigs && cfgShowImplicit]
-                    ++ concatMap (\d -> ["-i", d]) cfgIncludes
-                    ++ ["-o", cfgOutDir, entry]
-            (ec, _out, err) <-
-              readCreateProcessWithExitCode
-                (proc deps args) { cwd = Just cfgProjectRoot } ""
-            exists <- doesFileExist cfgGraphPath
-            if not exists
-              then pure (Left ("agda-deps produced no graph (" ++ showEc ec
-                                ++ "):\n" ++ lastLines 25 err))
-              else loadLoaded cfgIncludes cfgGraphPath
+  | cfgPreloaded = loadLoaded cfgAutoResolveUnique cfgIncludes cfgGraphPath
+  | null cfgEntries =
+      pure (Left "no entry module configured; start the server with --entry FILE (repeatable), \
+                 \config `entries:`, or --graph FILE")
+  | otherwise = do
+      mdeps <- findBin "agda-deps" cfgDepsBin "AGDA_DEPS_BIN"
+      case mdeps of
+        Nothing   -> pure (Left "could not locate the agda-deps binary (set AGDA_DEPS_BIN or pass --agda-deps-bin)")
+        Just deps -> case cfgEntries of
+          [entry] -> singleEntry deps entry
+          _       -> multiEntry deps cfgEntries
   where
     showEc ExitSuccess     = "exit 0"
     showEc (ExitFailure n) = "exit " ++ show n
+
+    -- The shared producer flag list (everything except the out-dir + the
+    -- trailing entry positional). Identical to the historical args, so the
+    -- single-entry invocation below is byte-for-byte the old command.
+    baseArgs =
+      [ "--format=json", "--json-mode=expanded"
+      , "--no-externals", "--keep-going" ]
+        ++ [ a | cfgWithHashes
+               , a <- ["--with-term-hashes"
+                      , "--min-term-depth=" ++ show cfgMinTermDepth] ]
+        ++ ["--with-signatures" | cfgWithSigs]
+        ++ ["--normalise-signatures" | cfgWithSigs && cfgNormaliseSigs]
+        ++ ["--signature-implicits"  | cfgWithSigs && cfgShowImplicit]
+        ++ concatMap (\d -> ["-i", d]) cfgIncludes
+
+    -- One agda-deps run into @outDir@ for @entry@; returns the graph file
+    -- path on success (so the caller decodes it where it wants).
+    runOne :: FilePath -> FilePath -> FilePath -> IO (Either String FilePath)
+    runOne deps outDir entry = do
+      createDirectoryIfMissing True outDir
+      let args      = baseArgs ++ ["-o", outDir, entry]
+          graphPath = outDir </> "deps.json"
+      (ec, _out, err) <-
+        readCreateProcessWithExitCode
+          (proc deps args) { cwd = Just cfgProjectRoot } ""
+      exists <- doesFileExist graphPath
+      pure $ if not exists
+        then Left ("agda-deps produced no graph for " ++ entry ++ " ("
+                     ++ showEc ec ++ "):\n" ++ lastLines 25 err)
+        else Right graphPath
+
+    -- Single entry: preserve the historical one-subprocess path exactly —
+    -- emit into 'cfgOutDir' and read back 'cfgGraphPath' via 'loadLoaded'.
+    singleEntry :: FilePath -> FilePath -> IO (Either String Loaded)
+    singleEntry deps entry = do
+      createDirectoryIfMissing True cfgOutDir
+      let args = baseArgs ++ ["-o", cfgOutDir, entry]
+      (ec, _out, err) <-
+        readCreateProcessWithExitCode
+          (proc deps args) { cwd = Just cfgProjectRoot } ""
+      exists <- doesFileExist cfgGraphPath
+      if not exists
+        then pure (Left ("agda-deps produced no graph (" ++ showEc ec
+                          ++ "):\n" ++ lastLines 25 err))
+        else loadLoaded cfgAutoResolveUnique cfgIncludes cfgGraphPath
+
+    -- Multiple entries: one agda-deps run per entry into a per-entry
+    -- sub-dir of 'cfgOutDir', decode each graph, then union in-process and
+    -- index the result. Entry order is preserved (deterministic union /
+    -- representative entryModule). A single entry that fails aborts the
+    -- whole build with that entry's diagnostic (matches the single-entry
+    -- "produced no graph" semantics).
+    multiEntry :: FilePath -> [FilePath] -> IO (Either String Loaded)
+    multiEntry deps entries = do
+      egsE <- forM (zip [0 :: Int ..] entries) $ \(i, entry) -> do
+        let outDir = cfgOutDir </> ("entry-" ++ show i)
+        r <- runOne deps outDir entry
+        case r of
+          Left err  -> pure (Left err)
+          Right gp  -> decodeGraphFile gp
+      case sequence egsE of
+        Left err  -> pure (Left err)
+        Right egs -> do
+          let !eg = unionExpandedGraphs egs
+          -- Materialise the unioned graph at 'cfgGraphPath' so out-of-process
+          -- consumers that read it directly see the SAME graph the in-memory
+          -- Index is built from. In particular the @unused@ tool shells out
+          -- to @agda-unused --json=cfgGraphPath@; without this it would read
+          -- a missing file (first run) or a stale single-entry leftover and
+          -- silently disagree with every in-process query.
+          BL.writeFile cfgGraphPath (encode eg)
+          Right <$> loadedFromGraph cfgAutoResolveUnique cfgIncludes Nothing eg
 
 lastLines :: Int -> String -> String
 lastLines n = unlines . reverse . take n . reverse . lines
@@ -459,51 +598,98 @@ lastLines n = unlines . reverse . take n . reverse . lines
 -- Live regeneration entry points
 -- ---------------------------------------------------------------------
 
--- | Return the current snapshot, regenerating first if the sources have
--- changed since it was built (unless preloaded or auto-rebuild is off).
--- On a rebuild failure with a prior snapshot in hand, the stale snapshot
--- is reused and a note is written to stderr.
+-- | Return the current snapshot for a query, /serving stale/: when a
+-- snapshot already exists and a rebuild is warranted, the existing
+-- snapshot is returned /immediately/ tagged stale and the rebuild is
+-- scheduled in the background — the daemon never blocks a query (or the
+-- stdio loop behind it) on the ~minutes-long @agda-deps@ subprocess. The
+-- one exception is the genuine first build (no snapshot yet): there is
+-- nothing to serve, so that single case blocks synchronously.
 --
--- Two staleness-detection paths share 'rebuildLocked':
+-- The returned 'Bool' is the /stale/ flag: 'True' means a rebuild is in
+-- flight (or pending) and the results reflect a previously-built snapshot
+-- rather than a guaranteed-fresh one. Callers ('AgdaMcp.Tools.withFresh'
+-- /etc./) surface it as a one-line footer. The flag is the foundation the
+-- telemetry (E6) and other-tool fast-paths (E2) build on, so it is kept
+-- explicit here. Serve-stale is /always on/ — there is no opt-out.
+--
+-- Two staleness-detection paths decide whether a rebuild is warranted:
 --
 --   * /watched/ — when an fsnotify watcher is live ('startWatcher'
 --     succeeded), changes set 'ssDirty', so a query only has to read a
 --     flag (O(1)) instead of re-scanning the source tree. The watcher's
---     worker has usually already rebuilt between queries; a query that
---     races ahead of it still rebuilds synchronously here.
+--     worker has usually already rebuilt between queries; if a query
+--     races ahead of it the snapshot is served stale while the worker
+--     finishes.
 --   * /polled/ (portable fallback) — no watcher, so we re-scan the
 --     source tree's file-count + newest mtime and compare to the
---     snapshot's 'ScanSig', exactly as before.
-ensureFresh :: ServerState -> IO (Either String Loaded)
+--     snapshot's 'ScanSig'. On a mismatch we also (lazily) ensure the
+--     background worker is running so 'ssWake' actually drains.
+ensureFresh :: ServerState -> IO (Either String (Loaded, Bool))
 ensureFresh ss@ServerState{..}
   | cfgPreloaded ssConfig = do
       cur <- readIORef ssLoaded
       case cur of
-        Just ld -> pure (Right ld)
+        Just ld -> pure (Right (ld, False))   -- preloaded never rebuilds: never stale
         Nothing -> withMVar ssRebuildLock $ \_ -> do
           -- Re-check under the lock in case a concurrent caller seeded it.
           cur' <- readIORef ssLoaded
           case cur' of
-            Just ld -> pure (Right ld)
-            Nothing -> seedFrom (loadLoaded (cfgIncludes ssConfig) (cfgGraphPath ssConfig))
+            Just ld -> pure (Right (ld, False))
+            Nothing -> seedFrom (loadLoaded (cfgAutoResolveUnique ssConfig) (cfgIncludes ssConfig) (cfgGraphPath ssConfig))
   | otherwise = do
+      cur <- readIORef ssLoaded
+      case cur of
+        -- No snapshot yet: nothing to serve, so block on the one build.
+        -- This is the only synchronous-build path left in 'ensureFresh'.
+        Nothing -> firstBuild
+        Just ld -> do
+          warranted <- rebuildWarranted ld
+          if not warranted
+            then pure (Right (ld, False))      -- fresh enough
+            else do
+              -- Serve stale + schedule an async rebuild. Coalescing:
+              -- setting ssDirty and a single tryPutMVar is idempotent under
+              -- concurrent callers; 'rebuildLocked' still serialises the
+              -- actual subprocess. 'ensureWorker' guarantees a drain thread
+              -- exists even on the polled/no-watch path.
+              if cfgAutoRebuild ssConfig
+                then do
+                  writeIORef ssDirty True
+                  ensureWorker ss
+                  void (tryPutMVar ssWake ())
+                  pure (Right (ld, True))
+                -- Auto-rebuild off: do not schedule a (looping) background
+                -- rebuild; serve the snapshot as-is, not flagged stale.
+                else pure (Right (ld, False))
+  where
+    -- Is a rebuild warranted for the current snapshot? Watched: trust the
+    -- dirty flag (no scan); polled: re-scan and compare the ScanSig. Both
+    -- also rebuild when the on-disk node-key format is stale.
+    rebuildWarranted ld = do
       watching <- isWatching ss
+      dirty    <- readIORef ssDirty
       if watching
-        -- Watched: the worker has usually rebuilt already (dirty cleared);
-        -- a query only rebuilds if it raced ahead of the worker, or the
-        -- on-disk format is stale. No source-tree scan.
-        then rebuildLocked ss $ \dirty ld ->
-               pure (dirty || not (loadedFormatCurrent ld))
+        then pure (dirty || not (loadedFormatCurrent ld))
         else do
           newSig <- scanSources (cfgIncludes ssConfig)
-          rebuildLocked ss $ \dirty ld ->
-            -- Poll decision: rebuild when sources moved or the format is stale.
-            pure (dirty || ldScanSig ld /= newSig || not (loadedFormatCurrent ld))
-  where
+          pure (dirty || ldScanSig ld /= newSig || not (loadedFormatCurrent ld))
+
+    -- The genuine first build: no snapshot exists, so we must block. Reuse
+    -- the serialised gate. If a concurrent caller already seeded a snapshot
+    -- while we waited for the lock, 'rebuildLocked' re-reads it under the
+    -- lock and the predicate then only rebuilds if it is actually stale —
+    -- avoiding a redundant synchronous build in that race. A result here is
+    -- always treated as "fresh" (stale = False): we blocked for it.
+    firstBuild = do
+      r <- rebuildLocked ss $ \dirty ld ->
+             pure (dirty || not (loadedFormatCurrent ld))
+      pure (fmap (\ld -> (ld, False)) r)
+
     seedFrom act = do
       r <- act
       case r of
-        Right ld -> writeIORef ssLoaded (Just ld) >> pure (Right ld)
+        Right ld -> writeIORef ssLoaded (Just ld) >> pure (Right (ld, False))
         Left e   -> pure (Left e)
 
 -- | The single serialised rebuild gate, shared by 'ensureFresh' (both
@@ -534,6 +720,11 @@ rebuildLocked ServerState{..} needBuild = withMVar ssRebuildLock $ \_ -> do
         Right ld -> writeIORef ssLoaded (Just ld) >> pure (Right ld)
         Left err -> case cur of
           Just ld -> do
+            -- A failed rebuild keeps the stale snapshot AND re-marks it
+            -- dirty so the background worker retries (after a backoff — see
+            -- 'watchWorker'). Without re-dirtying, a transient failure
+            -- would freeze the snapshot until the next source edit.
+            writeIORef ssDirty True
             hPutStrLn stderr ("agda-explore: rebuild failed, serving stale graph: " ++ err)
             pure (Right ld)
           Nothing -> pure (Left err)
@@ -550,6 +741,38 @@ forceRebuild ServerState{..} = withMVar ssRebuildLock $ \_ -> do
     Left err -> pure (Left err)
 
 -- ---------------------------------------------------------------------
+-- Query telemetry (E6)
+-- ---------------------------------------------------------------------
+
+-- | Append one telemetry record (a pre-built aeson 'Value') as a single
+-- line to @cfgOutDir/query-log.jsonl@. Called from
+-- 'AgdaMcp.Tools.handleCall' once per @tools/call@ (never for
+-- @initialize@/@ping@/@tools\/list@). The caller decides /whether/ to call
+-- this (it gates on 'cfgQueryLog'); this function unconditionally writes.
+--
+-- IO discipline (mirrors 'catchA' / 'safeMtime'): a telemetry write must
+-- /never/ fail a query, so the whole append — directory creation included
+-- — is wrapped in 'try' and any exception (read-only fs, full disk) is
+-- silently dropped. Appends are serialised through the dedicated
+-- 'ssLogLock' (not 'ssRebuildLock'): a log append must never block behind
+-- a long @agda-deps@ rebuild, and the query thread + watcher worker must
+-- not interleave a partial line.
+--
+-- The line carries a wall-clock @ts@ / @dur_ms@, so the file is
+-- intentionally /not/ byte-reproducible. Note it grows unbounded
+-- (append-only); rotation is out of scope.
+appendQueryLog :: ServerState -> Value -> IO ()
+appendQueryLog ServerState{..} v =
+  withMVar ssLogLock $ \_ -> do
+    _ <- (try act :: IO (Either SomeException ())) -- swallow everything
+    pure ()
+  where
+    logPath = cfgOutDir ssConfig </> "query-log.jsonl"
+    act = do
+      createDirectoryIfMissing True (cfgOutDir ssConfig)
+      BL.appendFile logPath (encode v <> "\n")
+
+-- ---------------------------------------------------------------------
 -- Background file-watch (optional; portable poll path is the fallback)
 -- ---------------------------------------------------------------------
 
@@ -557,6 +780,13 @@ forceRebuild ServerState{..} = withMVar ssRebuildLock $ \_ -> do
 -- editor "save" emits (temp-file write + rename, etc.) before rebuilding.
 watchDebounceMicros :: Int
 watchDebounceMicros = 250000  -- 0.25s
+
+-- | Backoff after a /failed/ background rebuild before the worker retries.
+-- A failed rebuild leaves the snapshot dirty (so it retries); without this
+-- pause a persistently-failing @agda-deps@ would spin in a tight loop,
+-- re-spawning the subprocess as fast as it can fail.
+rebuildBackoffMicros :: Int
+rebuildBackoffMicros = 2000000  -- 2s
 
 -- | Is a live watcher attached? When 'True', 'ensureFresh' trusts
 -- 'ssDirty' instead of re-scanning the source tree.
@@ -594,7 +824,7 @@ startWatcher ss@ServerState{..}
     setup roots = do
       mgr <- startManager
       mapM_ (\root -> void (watchTree mgr root relevantEvent onEvent)) roots
-      void (forkIO (watchWorker ss))
+      ensureWorker ss     -- start-at-most-once; shares the gate with the polled path
       writeIORef ssWatcher (Just mgr)
     -- A change worth a rebuild: an Agda source file outside VCS/build/output
     -- dirs. The extension filter also stops our own @deps.json@ writes
@@ -608,9 +838,32 @@ startWatcher ss@ServerState{..}
       writeIORef ssDirty True
       void (tryPutMVar ssWake ())   -- coalescing: one pending wakeup is enough
 
--- | The watcher's debounce + rebuild loop. Blocks on 'ssWake', waits out
+-- | Start the single background rebuild worker, at most once per daemon.
+-- Both the fsnotify path ('startWatcher') and the polled serve-stale
+-- fallback (a stale-serving 'ensureFresh' query, which has no watcher to
+-- fork the worker for it) call this; the 'ssWorkerUp' MVar — created full,
+-- holding one permit — ensures exactly one of them actually forks the
+-- thread. (Two workers draining 'ssWake' could double-build.) A no-op
+-- outside live/auto-rebuild mode, since nothing schedules an async
+-- rebuild there.
+ensureWorker :: ServerState -> IO ()
+ensureWorker ss@ServerState{..}
+  | cfgPreloaded ssConfig || not (cfgAutoRebuild ssConfig) = pure ()
+  | otherwise = do
+      won <- tryTakeMVar ssWorkerUp     -- claim the single start permit
+      case won of
+        Just () -> void (forkIO (watchWorker ss))   -- this caller starts it
+        Nothing -> pure ()                          -- already running
+
+-- | The background debounce + rebuild loop. Blocks on 'ssWake', waits out
 -- the debounce window draining any further wakeups, then rebuilds if a
--- change is still pending. Runs forever; one per daemon.
+-- change is still pending. Started exactly once via 'ensureWorker' and
+-- runs forever.
+--
+-- A failed rebuild re-marks the snapshot dirty (see 'rebuildLocked'); this
+-- loop then waits 'rebuildBackoffMicros' and re-wakes itself so the retry
+-- happens without a tight failing loop. A successful rebuild clears the
+-- dirty flag, so the self-rewake is skipped.
 watchWorker :: ServerState -> IO ()
 watchWorker ss = forever $ do
   takeMVar (ssWake ss)
@@ -623,3 +876,13 @@ watchWorker ss = forever $ do
   case r of
     Right _ -> pure ()
     Left e  -> hPutStrLn stderr ("agda-explore: file-watch rebuild raised: " ++ show e)
+  -- Retry path: if the snapshot is still dirty (a failed rebuild re-dirtied
+  -- it, an exception left it set, or a fresh edit landed mid-build), back
+  -- off and re-wake so the retry actually fires instead of stalling until
+  -- the next external wakeup.
+  stillDirty <- readIORef (ssDirty ss)
+  if stillDirty
+    then do
+      threadDelay rebuildBackoffMicros
+      void (tryPutMVar (ssWake ss) ())
+    else pure ()

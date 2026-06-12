@@ -344,6 +344,87 @@ instance FromJSON ExpandedGraph where
                 , egSubtermDepths    = stds
                 }
 
+-- ---------------------------------------------------------------------
+-- ToJSON — the faithful inverse of the FromJSON instances above.
+--
+-- The @agda-explore@ daemon's multi-entry path unions several graphs
+-- in-process and must materialise the result back to @cfgGraphPath@ so
+-- out-of-process consumers (the @unused@ tool shells out to
+-- @agda-unused --json=cfgGraphPath@) read the SAME graph the in-memory
+-- 'AgdaGraph.Index.Index' was built from. These instances round-trip
+-- through the 'FromJSON' instances above (they are defined alongside the
+-- types, so they are not orphans and are the canonical encoders).
+-- ---------------------------------------------------------------------
+
+instance A.ToJSON State where
+  toJSON s = A.toJSON (st :: Text)
+    where st = case s of
+            Defined   -> "D"; Postulate -> "P"; Hole -> "H"; Failed -> "F"
+
+instance A.ToJSON Kind where
+  toJSON k = A.toJSON (kt :: Text)
+    where kt = case k of
+            KFunction -> "function"; KProjection -> "projection"
+            KDatatype -> "datatype"; KRecord -> "record"
+            KConstructor -> "constructor"; KPostulate -> "postulate"
+            KPrimitive -> "primitive"; KOther -> "other"
+
+instance A.ToJSON Access where
+  toJSON Public  = A.toJSON ("public" :: Text)
+  toJSON Private = A.toJSON ("private" :: Text)
+
+instance A.ToJSON Provenance where
+  toJSON p = A.toJSON (pt :: Text)
+    where pt = case p of
+            ProvSignature -> "signature"; ProvBody -> "body"
+            ProvWhere -> "where"; ProvWith -> "with"; ProvUnknown -> "unknown"
+
+instance A.ToJSON Definition where
+  toJSON d = A.object
+    [ "id"     A..= defId d
+    , "name"   A..= defName d
+    , "module" A..= defModule d
+    , "state"  A..= defState d
+    , "kind"   A..= defKind d
+    , "line"   A..= defLine d
+    , "access" A..= defAccess d
+    , "type"   A..= defSig d
+    , "x"      A..= defX d
+    , "y"      A..= defY d
+    ]
+
+instance A.ToJSON ReExport where
+  toJSON r = A.object
+    [ "from" A..= rxFrom r, "to" A..= rxTo r, "names" A..= rxNames r ]
+
+instance A.ToJSON ExternalsSummary where
+  toJSON e = A.object
+    [ "modules"              A..= esModules e
+    , "postulates_by_module" A..= esPostulatesByModule e
+    ]
+
+instance A.ToJSON ExpandedGraph where
+  toJSON g = A.object
+    [ "v"                         A..= (2 :: Int)
+    , "schemaVersion"             A..= (2 :: Int)
+    , "mode"                      A..= ("expanded" :: Text)
+    , "definitions"               A..= egDefinitions g
+      -- Edges go back out as 2-element arrays, matching 'toPair' on read.
+    , "definitionEdges"           A..= map (\(a, b) -> [a, b]) (egDefinitionEdges g)
+    , "modules"                   A..= egModules g
+    , "entryModule"               A..= egEntryModule g
+    , "externalModules"           A..= egExternalModules g
+    , "failedModules"             A..= egFailedModules g
+    , "moduleFiles"               A..= egModuleFiles g
+    , "producer"                  A..= egProducer g
+    , "nodeKeyVersion"            A..= egNodeKeyVersion g
+    , "reexports"                 A..= egReExports g
+    , "externals_summary"         A..= egExternalsSummary g
+    , "definitionEdgesProvenance" A..= egEdgeProvenance g
+    , "definitionSubtermHashes"   A..= egSubtermHashes g
+    , "definitionSubtermDepths"   A..= egSubtermDepths g
+    ]
+
 -- | Edges arrive as @[a, b]@ JSON arrays of length 2. Anything else is a
 -- producer bug; surface it as a decode error rather than a Haskell crash.
 toPair :: [Text] -> (Text, Text)

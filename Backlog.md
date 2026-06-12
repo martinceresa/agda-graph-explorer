@@ -126,3 +126,43 @@ consumers that isn't ready to be picked up. For shipped work see
   forcing them to share a module added coupling without payoff.
   The original umbrella design came from the proof-simplification
   proposal; the rationale for splitting it is recorded above.
+
+---
+
+## From the Jolteon-FastBFT agent-usage analysis (2026-06-12) — SHIPPED
+
+Source: `Jolteon-FastBFT/docs/MCP/UsageAnalysis.md` — a mining pass
+over all 60 Claude-agent session transcripts in that consumer project.
+Key context: of 154 MCP calls only ~20 were organic; agents otherwise
+fell back to grep/Bash (307 CLI calls). The items below came from that
+*negative space* — why agents with the MCP available chose not to use
+it. Producer-side items live in `AgdaDependencies/Backlog.md`.
+
+**All nine recommendations were implemented 2026-06-12 — see
+[Changelog.md](Changelog.md) for the shipped detail.** Summary:
+
+- `agda-explore`: serve-stale + async background rebuild (the highest-
+  value item; `status` never blocks). The packed-graph-form load is the
+  one piece left deferred — see below.
+- `agda-explore`: fail-fast `type_of` on out-of-snapshot symbols.
+- `agda-explore`: multi-entry roots — `entries:` list, unioned
+  in-process (the producer compiles one entry's closure per run, so
+  the daemon unions per-entry graphs via `AgdaGraph.Union`).
+- `agda-explore`: universal unique-candidate auto-resolution across
+  every name-taking tool.
+- `agda-explore`: `find_lemma` — two modes (anchor=WL fingerprints,
+  free-text goal=conclusion token-overlap).
+- `agda-explore`: query telemetry (`query-log.jsonl`).
+- `agda-unused`: never silently return 0 (absolutise roots; hard-error
+  on a scanned-but-unmatched scope).
+- `agda-unused`: close the inliner gap (low-confidence tagging of
+  trivial-bodied dead findings + source-level suppression).
+- `agda-unused`: aggregation output (`--group-by=dir|file|kind`,
+  `--count-only`) on the CLI and the MCP tool.
+
+- **Still deferred — `agda-explore`: load the packed (~5×-smaller)
+  graph form.** The serve-stale work removed the latency cliff; loading
+  the packed form instead of the expanded one is an orthogonal,
+  larger schema-decoder change (`AgdaGraph.Schema` currently hard-fails
+  any `mode /= "expanded"`). Worth revisiting if graph size itself
+  becomes the bottleneck on a large corpus.

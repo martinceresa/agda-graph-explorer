@@ -23,15 +23,20 @@ import           Control.Monad     ( foldM, when )
 import qualified Data.Aeson           as A
 import           Data.Aeson           ( (.=) )
 import qualified Data.ByteString.Lazy.Char8 as BLC
-import           Data.List         ( intercalate, isPrefixOf, isSuffixOf, sortOn
-                                   , stripPrefix )
+import           Data.List         ( intercalate, isPrefixOf, isSuffixOf, sortBy
+                                   , sortOn, stripPrefix )
+import           Data.Ord          ( Down(..), comparing )
+import qualified Data.Map.Strict   as M
+import qualified Data.Set          as S
+import           Data.Text         ( Text )
 import qualified Data.Text         as T
 import qualified Data.Text.IO      as TIO
 
-import           System.Directory ( doesDirectoryExist, doesFileExist, listDirectory )
+import           System.Directory ( doesDirectoryExist, doesFileExist, listDirectory
+                                   , makeAbsolute )
 import           System.Environment ( getArgs )
 import           System.Exit ( exitFailure, exitSuccess )
-import           System.FilePath ( (</>) )
+import           System.FilePath ( (</>), normalise, takeDirectory )
 import           System.IO ( hPutStrLn, stderr )
 
 import           AgdaUnused.Analysis
@@ -39,29 +44,33 @@ import           AgdaUnused.Config   ( ConfigTarget(..)
                                      , applyConfig, discoverConfigPath, loadConfig
                                      , parseKindsToken
                                      )
-import           AgdaUnused.Json     ( loadExpandedGraph )
+import           AgdaUnused.Json     ( ExpandedGraph(..), loadExpandedGraph )
 
 -- ** CLI options
 
 data Options = Options
-  { optJsonPath :: !FilePath
-  , optRoots    :: ![FilePath]
-  , optKinds    :: ![FindingKind]
-  , optRelTo    :: !(Maybe FilePath)
-  , optFormat   :: !OutFormat
-  , optExclude  :: ![String]
+  { optJsonPath  :: !FilePath
+  , optRoots     :: ![FilePath]
+  , optKinds     :: ![FindingKind]
+  , optRelTo     :: !(Maybe FilePath)
+  , optFormat    :: !OutFormat
+  , optExclude   :: ![String]
+  , optGroupBy   :: !(Maybe GroupBy)
+  , optCountOnly :: !Bool
   }
 
 data OutFormat = OutPlain | OutJson
 
 defaultOptions :: Options
 defaultOptions = Options
-  { optJsonPath = ""
-  , optRoots    = []
-  , optKinds    = [UnusedInUsing, DuplicateUsingForModule]
-  , optRelTo    = Nothing
-  , optFormat   = OutPlain
-  , optExclude  = []
+  { optJsonPath  = ""
+  , optRoots     = []
+  , optKinds     = [UnusedInUsing, DuplicateUsingForModule]
+  , optRelTo     = Nothing
+  , optFormat    = OutPlain
+  , optExclude   = []
+  , optGroupBy   = Nothing
+  , optCountOnly = False
   }
 
 usage :: String
@@ -83,6 +92,15 @@ usage = unlines
   , "                      `?` one char — e.g. `--exclude='**/Init.agda'` or"
   , "                      `--exclude='Prelude.*'`."
   , "  --json-out        emit findings as a JSON array instead of plain text."
+  , "  --group-by=G      aggregate findings into per-group counts instead of"
+  , "                      one line per finding. G is one of:"
+  , "                      dir   — bucket by directory of the (relativised) path"
+  , "                      file  — bucket by the (relativised) file path"
+  , "                      kind  — bucket by finding kind"
+  , "                      Output is sorted by descending count, ties broken by"
+  , "                      group key ascending."
+  , "  --count-only      print only the grand total (`# total: N finding(s)`)."
+  , "                      Wins over --group-by if both are given."
   , "  --kinds=K[,K…]    which checks to run (default: 'using,duplicate')."
   , "                      using          — symbols in `using (…)` not referenced in body"
   , "                      duplicate      — same module opened twice from same file"
@@ -124,6 +142,10 @@ parseArgs seed = go ParseState { psOpts = seed, psCliRoots = [], psHadRoots = Fa
       | Just v <- stripPrefix "--kinds="   a = case parseKinds v of
           Left e   -> Left e
           Right ks -> go st { psOpts = (psOpts st) { optKinds = ks } } rest
+      | Just v <- stripPrefix "--group-by=" a = case parseGroupBy v of
+          Left e  -> Left e
+          Right g -> go st { psOpts = (psOpts st) { optGroupBy = Just g } } rest
+      | a == "--count-only" = go st { psOpts = (psOpts st) { optCountOnly = True } } rest
       | a == "--json-out" = go st { psOpts = (psOpts st) { optFormat = OutJson } } rest
       | a == "-h" || a == "--help" = Left ""
       | "--" `isPrefixOf` a = Left $ "unrecognised flag: " ++ a
@@ -219,7 +241,13 @@ main = do
       exitFailure
     Right g -> return g
 
-  files  <- concat <$> mapM discoverAgdaFiles (optRoots opts)
+  -- Absolutise every ROOT before discovery so the file paths
+  -- 'discoverAgdaFiles' builds (via @root </> e@) are absolute and line
+  -- up with the graph's absolute 'egModuleFiles' values. A relative
+  -- root would otherwise yield relative file paths that never match any
+  -- graph key, skipping every file and silently reporting 0 findings.
+  absRoots <- mapM makeAbsolute (optRoots opts)
+  files  <- concat <$> mapM discoverAgdaFiles absRoots
   caps   <- getNumCapabilities
   let poolSize  = max 1 (min 8 caps)
       readOne f = do
@@ -229,6 +257,22 @@ main = do
       chunks    = chunksOf (max 1 ((length files + poolSize - 1) `div` poolSize)) files
   bodies <- concat <$> mapConcurrently (mapM readOne) chunks
   let pairs = [ p | Just p <- bodies ]
+
+  -- Never silently return 0 on a mis-scoped run. Compare the scanned
+  -- source paths against the graph's moduleFiles values (both under
+  -- 'normalise'); if we scanned files but none matched the graph, the
+  -- ROOT and the @--json@ don't line up. Hard-error to stderr (stdout
+  -- must stay byte-stable for --json-out) instead of printing a
+  -- deceptive @# total: 0@. A genuine zero (files matched, no findings)
+  -- still falls through to the normal output below.
+  let graphPaths  = S.fromList (map normalise (M.elems (egModuleFiles graph)))
+      matchedCnt  = length [ () | (p, _) <- pairs, normalise p `S.member` graphPaths ]
+  when (not (null pairs) && matchedCnt == 0) $ do
+    hPutStrLn stderr $
+      "agda-unused: scanned " ++ show (length pairs)
+        ++ " source file(s) but none matched the graph's moduleFiles "
+        ++ "(paths don't line up — pass an absolute ROOT, or check --json is for this project)"
+    exitFailure
 
   let allFindings = analyse graph pairs
       -- Tokenise each exclude pattern once (partial application of
@@ -243,15 +287,38 @@ main = do
       -- an over-broad exclude.
       suppressed  = length (filter excluded kindMatched)
 
-  case optFormat opts of
-    OutPlain -> do
-      mapM_ (putStrLn . formatLine opts) sorted
-      putStrLn $ "# total: " ++ show (length sorted) ++ " finding(s)"
-      when (not (null (optExclude opts))) $
+  -- Output dispatch. Precedence: --count-only wins over --group-by;
+  -- --group-by replaces the per-line body with aggregated rows; neither
+  -- keeps the historical per-line behaviour. The `# total:` and
+  -- `# excluded:` breadcrumbs survive in every plain-text mode so a low
+  -- count can't be mistaken for an over-broad exclude.
+  let total       = length sorted
+      excludeLine = when (not (null (optExclude opts))) $
         putStrLn $ "# excluded: " ++ intercalate ", " (optExclude opts)
                      ++ " (" ++ show suppressed ++ " suppressed)"
-    OutJson ->
-      BLC.putStrLn (A.encode (toJson opts sorted))
+  case optFormat opts of
+    OutPlain
+      | optCountOnly opts -> do
+          putStrLn $ "# total: " ++ show total ++ " finding(s)"
+          excludeLine
+      | Just g <- optGroupBy opts -> do
+          mapM_ (\(k, n) -> putStrLn $ T.unpack k ++ "\t" ++ show n)
+                (aggregate opts g sorted)
+          putStrLn $ "# total: " ++ show total ++ " finding(s)"
+          excludeLine
+      | otherwise -> do
+          mapM_ (putStrLn . formatLine opts) sorted
+          putStrLn $ "# total: " ++ show total ++ " finding(s)"
+          excludeLine
+    OutJson
+      | optCountOnly opts ->
+          BLC.putStrLn (A.encode (A.object ["total" .= total]))
+      | Just g <- optGroupBy opts ->
+          BLC.putStrLn (A.encode (A.toJSON
+            [ A.object ["group" .= k, "count" .= n]
+            | (k, n) <- aggregate opts g sorted ]))
+      | otherwise ->
+          BLC.putStrLn (A.encode (toJson opts sorted))
 
 -- | Take 'renderFindingLine's absolute-path output and rewrite the
 -- file prefix to the user's preferred relative form. The renderer
@@ -263,6 +330,29 @@ formatLine opts f =
   in case stripPrefix (fileFinding f) raw of
        Just rest -> shown ++ rest
        Nothing   -> raw
+
+-- | Bucket findings into @(group-key, count)@ pairs for @--group-by@.
+-- Counting uses 'M.insertWith (+)', an associative-commutative reduce,
+-- so the result is order-independent (determinism-safe under @+RTS -N@).
+-- Rendering order is a TOTAL order — descending count, ties broken by
+-- group key ascending — so two groups with equal counts can never flip
+-- between @-N1@ and @-NK@ runs. Group keys are derived AFTER
+-- relativisation (so @--rel-to@ collapses paths sharing a subdir) and a
+-- @dir@ with no directory component is bucketed under @\".\"@ rather
+-- than dropped.
+aggregate :: Options -> GroupBy -> [Finding] -> [(Text, Int)]
+aggregate opts g fs =
+  sortBy (comparing (Down . snd) <> comparing fst)
+    (M.toList (M.fromListWith (+) [ (groupKey opts g f, 1) | f <- fs ]))
+
+-- | The group key for one finding under a given 'GroupBy'.
+groupKey :: Options -> GroupBy -> Finding -> Text
+groupKey opts g f = case g of
+  GByKind -> kindTag (kindFinding f)
+  GByFile -> T.pack shown
+  GByDir  -> T.pack (takeDirectory shown)
+  where
+    shown = displayPath (optRelTo opts) (fileFinding f)
 
 chunksOf :: Int -> [a] -> [[a]]
 chunksOf n xs
@@ -317,12 +407,14 @@ extractConfigFlag = go []
 -- internal 'Options' record without importing it.
 configTarget :: ConfigTarget Options
 configTarget = ConfigTarget
-  { ctSetJson    = \v o -> o { optJsonPath = v }
-  , ctSetRelTo   = \v o -> o { optRelTo    = Just v }
-  , ctSetJsonOut = \v o -> o { optFormat   = if v then OutJson else OutPlain }
-  , ctSetKinds   = \v o -> o { optKinds    = v }
-  , ctSetRoots   = \v o -> o { optRoots    = v }
-  , ctSetExclude = \v o -> o { optExclude  = v }
+  { ctSetJson      = \v o -> o { optJsonPath  = v }
+  , ctSetRelTo     = \v o -> o { optRelTo     = Just v }
+  , ctSetJsonOut   = \v o -> o { optFormat    = if v then OutJson else OutPlain }
+  , ctSetKinds     = \v o -> o { optKinds     = v }
+  , ctSetRoots     = \v o -> o { optRoots     = v }
+  , ctSetExclude   = \v o -> o { optExclude   = v }
+  , ctSetGroupBy   = \v o -> o { optGroupBy   = Just v }
+  , ctSetCountOnly = \v o -> o { optCountOnly = v }
   }
 
 -- ** JSON-out
@@ -335,17 +427,14 @@ toJson :: Options -> [Finding] -> A.Value
 toJson opts fs = A.toJSON (map (one opts) fs)
   where
     one o f = A.object
-      [ "file"   .= displayPath (optRelTo o) (fileFinding f)
-      , "line"   .= lineFinding f
-      , "module" .= moduleFinding f
-      , "symbol" .= symbolFinding f
-      , "kind"   .= kindTag (kindFinding f)
+      [ "file"       .= displayPath (optRelTo o) (fileFinding f)
+      , "line"       .= lineFinding f
+      , "module"     .= moduleFinding f
+      , "symbol"     .= symbolFinding f
+      , "kind"       .= kindTag (kindFinding f)
+      , "confidence" .= confTag (confFinding f)
       ]
 
-    kindTag :: FindingKind -> T.Text
-    kindTag UnusedInUsing           = "unused-in-using"
-    kindTag UnusedBlanketOpen       = "unused-blanket-open"
-    kindTag DefinedDead             = "defined-dead"
-    kindTag DefinedInternalOnly     = "defined-internal-only"
-    kindTag DuplicateUsingForModule = "duplicate-using"
-    kindTag PublicWithoutDownstream = "public-no-downstream"
+    confTag :: Confidence -> T.Text
+    confTag High = "high"
+    confTag Low  = "low"

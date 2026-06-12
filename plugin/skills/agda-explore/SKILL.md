@@ -53,6 +53,7 @@ fixed graph with `--graph`.
 | What's the type of `X`?                              | `type_of`      |
 | What else has a type like `X`'s?                     | `similar_types` |
 | What else is *implemented* like `X`?                 | `similar_bodies` |
+| Is there an existing lemma whose conclusion matches my goal? | `find_lemma` |
 | What's the exact name? List all postulates/holes?    | `search`       |
 | Which imports are unused / what's dead?              | `unused`       |
 | Graph size / freshness / config                     | `status`       |
@@ -112,6 +113,23 @@ the `agda-optimization` `silhouette` / `term-cluster` analyses — use those
 batch tools when you want a whole-project clustering rather than "what
 resembles this one definition".
 
+`find_lemma` is the goal-directed sibling: *before* writing a proof, ask it
+whether the project already has a lemma whose **conclusion** (result type)
+matches your goal. It has **two modes — pass exactly one**:
+
+- `anchor=<existing def>` — true structural matching by the same
+  Weisfeiler–Leman signature fingerprint as `similar_types`. Use when the
+  goal shape is already named by some definition in the graph (it needs a
+  graph node with edges to fingerprint).
+- `goal="<rendered goal type>"` — free-text: it canonicalises the goal,
+  takes the conclusion (after the last top-level `→`), and ranks candidate
+  signatures by identifier/operator-token overlap (Jaccard) over *their*
+  conclusions. This is a name-overlap proxy, **not** WL — an out-of-graph
+  string has no edges. Free-text mode needs a signatures-enabled graph (the
+  daemon's default); against a signature-less `--graph` it returns a rebuild
+  note rather than an empty list. Filter candidates with `kind` /
+  `module_prefix`; tune the cutoff with `min_sim` (default 0.3).
+
 ## Interpreting `unused` (important caveats)
 
 `unused` runs `agda-unused`. Its findings are not all equal:
@@ -142,6 +160,8 @@ is always self-describing — never silently mis-scoped.
 
 - Lead with `locate`/`type_of` to orient, `callers`/`impact` before editing,
   `similar_bodies`/`similar_types` when looking for a lemma to reuse or a
-  pattern to factor.
+  pattern to factor. When proving, try `find_lemma` (free-text `goal=` or an
+  `anchor=` def) *before* hand-deriving — it surfaces an existing lemma whose
+  conclusion already matches the goal.
 - Only fall back to reading files or grepping when you need the *prose*
   around a definition, or to verify an `unused` finding.

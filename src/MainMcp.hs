@@ -21,7 +21,7 @@ module Main (main) where
 
 import           Control.Exception  (SomeException, try)
 import           Control.Monad      (forM)
-import           Data.List          (isSuffixOf, sortOn)
+import           Data.List          (intercalate, isSuffixOf, sortOn)
 import           Data.Maybe         (fromMaybe)
 import           System.Directory   (doesDirectoryExist, doesFileExist,
                                      getCurrentDirectory, listDirectory,
@@ -49,10 +49,12 @@ import qualified BuildInfo
 
 defOpts :: Opts
 defOpts = Opts
-  { oGraph = Nothing, oEntry = Nothing, oIncl = [], oProj = Nothing
+  { oGraph = Nothing, oEntries = [], oIncl = [], oProj = Nothing
   , oOut = Nothing, oDeps = Nothing, oUnused = Nothing
   , oHashes = True, oSigs = True, oNormSigs = False, oShowImpl = False
-  , oMinDepth = 3, oAuto = True, oWatch = True, oHelp = False, oVer = False
+  , oMinDepth = 3, oAuto = True, oWatch = True, oQueryLog = True
+  , oAutoResolve = True
+  , oHelp = False, oVer = False
   }
 
 -- | Split @--key=value@ into two tokens so the parser only deals with the
@@ -74,7 +76,7 @@ parseOpts (x : xs) o = case x of
   "--version"         -> parseOpts xs o { oVer = True }
   "-V"                -> parseOpts xs o { oVer = True }
   "--graph"           -> need $ \v -> o { oGraph = Just v }
-  "--entry"           -> need $ \v -> o { oEntry = Just v }
+  "--entry"           -> need $ \v -> o { oEntries = oEntries o ++ [v] }
   "-i"                -> need $ \v -> o { oIncl = oIncl o ++ [v] }
   "--include"         -> need $ \v -> o { oIncl = oIncl o ++ [v] }
   "--include-path"    -> need $ \v -> o { oIncl = oIncl o ++ [v] }
@@ -91,7 +93,9 @@ parseOpts (x : xs) o = case x of
   "--show-implicit"   -> parseOpts xs o { oShowImpl = True }
   "--no-auto-rebuild" -> parseOpts xs o { oAuto = False }
   "--no-watch"        -> parseOpts xs o { oWatch = False }
-  _ | isAgdaFile x    -> parseOpts xs o { oEntry = Just x }
+  "--no-query-log"    -> parseOpts xs o { oQueryLog = False }
+  "--no-auto-resolve" -> parseOpts xs o { oAutoResolve = False }
+  _ | isAgdaFile x    -> parseOpts xs o { oEntries = oEntries o ++ [x] }
     | otherwise       -> Left ("unknown argument: " ++ x)
   where
     need f = case xs of
@@ -106,6 +110,17 @@ isAgdaFile f = any (`isSuffixOf` f)
 orElse :: Maybe a -> Maybe a -> Maybe a
 orElse (Just x) _ = Just x
 orElse Nothing  y = y
+
+-- | Order-preserving dedup (first occurrence wins). Used so duplicate
+-- entries (config + CLI + env) aren't handed to agda-deps twice and the
+-- include-default dirs aren't repeated.
+orderNub :: Eq a => [a] -> [a]
+orderNub = go []
+  where
+    go _    []       = []
+    go seen (x : xs)
+      | x `elem` seen = go seen xs
+      | otherwise     = x : go (x : seen) xs
 
 -- ---------------------------------------------------------------------
 -- Project discovery
@@ -165,7 +180,17 @@ buildConfig o = do
   proj     <- makeAbsolute (fromMaybe cwd (oProj o `orElse` envProj))
   let inclRaw  = if not (null (oIncl o)) then oIncl o
                  else maybe [] splitSearchPath envIncl
-      entryRaw = oEntry o `orElse` envEntry
+      -- Entries: the CLI/config list ('oEntries', already appended in
+      -- precedence order), order-preserving deduped. AGDA_EXPLORE_ENTRY is a
+      -- FALLBACK only — used when no --entry/config entry was given (the
+      -- historical env-as-fallback semantics, so a CLI --entry is never
+      -- silently unioned with a stray env value). When it IS the source it is
+      -- PATH-separator-splittable, mirroring AGDA_EXPLORE_INCLUDE. Several
+      -- entries union their import closures into one graph (see
+      -- "AgdaGraph.Union").
+      entriesRaw = orderNub $ if null (oEntries o)
+                                then maybe [] splitSearchPath envEntry
+                                else oEntries o
       graphRaw = oGraph o `orElse` envGraph
       base bin = defaultConfig
         { cfgProjectRoot  = proj
@@ -177,40 +202,56 @@ buildConfig o = do
         , cfgShowImplicit = oShowImpl o
         , cfgMinTermDepth = oMinDepth o
         , cfgWatch        = oWatch o
+        , cfgQueryLog     = oQueryLog o
+        , cfgAutoResolveUnique = oAutoResolve o
         , cfgIncludes     = bin
         }
       preloaded g incl = do
         gAbs   <- makeAbsolute g
         incl'  <- mapM makeAbsolute (if null incl then [proj] else incl)
+        -- Telemetry OFF by default in preloaded mode: cfgOutDir there is the
+        -- default ".agda-explore" relative to a cwd that may be unwritable
+        -- or unexpected, so we do not write a query-log unless asked.
         pure (base incl') { cfgPreloaded = True, cfgGraphPath = gAbs
-                          , cfgAutoRebuild = False, cfgEntry = Nothing }
-      live mEntry incl = do
+                          , cfgAutoRebuild = False, cfgEntries = []
+                          , cfgQueryLog = False }
+      -- @entries@ are already absolute; @incl@ is the resolved include list.
+      live entries incl = do
         out   <- makeAbsolute (fromMaybe (proj </> ".agda-explore") (oOut o))
         incl' <- mapM makeAbsolute incl
-        pure (base incl') { cfgPreloaded = False, cfgEntry = mEntry
+        pure (base incl') { cfgPreloaded = False, cfgEntries = entries
                           , cfgOutDir = out, cfgGraphPath = out </> "deps.json"
                           , cfgAutoRebuild = oAuto o }
   case graphRaw of
     Just g  -> preloaded g inclRaw
     Nothing -> do
-      mEntry <- case entryRaw of
-        Just e  -> Just <$> makeAbsolute e
-        Nothing -> discoverEntry proj
-      case mEntry of
-        Just e  -> live (Just e) (if null inclRaw then [takeDirectory e] else inclRaw)
-        Nothing -> do
+      -- User-supplied entries win; otherwise fall back to a single
+      -- discovered entry (wrapped as a singleton list).
+      entries <- case entriesRaw of
+        [] -> maybe [] pure <$> discoverEntry proj
+        es -> mapM makeAbsolute es
+      case entries of
+        (_ : _) ->
+          -- Default include dirs cover /every/ entry's tree (else
+          -- agda-deps can't resolve some closures), order-preserving nub.
+          live entries (if null inclRaw
+                          then orderNub (map takeDirectory entries)
+                          else inclRaw)
+        [] -> do
           mg <- firstExisting [ proj </> "deps.json"
                               , proj </> ".agda-explore" </> "deps.json" ]
           case mg of
             Just g  -> preloaded g inclRaw
-            Nothing -> live Nothing (if null inclRaw then [proj] else inclRaw)
+            Nothing -> live [] (if null inclRaw then [proj] else inclRaw)
 
 modeDesc :: Config -> String
 modeDesc c
   | cfgPreloaded c = "preloaded graph " ++ cfgGraphPath c
-  | otherwise = case cfgEntry c of
-      Just e  -> "live, entry " ++ e
-      Nothing -> "live, no entry discovered — set --entry or AGDA_EXPLORE_ENTRY"
+  | otherwise = case cfgEntries c of
+      []  -> "live, no entry discovered — set --entry or AGDA_EXPLORE_ENTRY"
+      [e] -> "live, entry " ++ e
+      es  -> "live, entries " ++ intercalate ", " es
+                ++ " (union of import closures)"
 
 -- ---------------------------------------------------------------------
 -- main
@@ -229,7 +270,9 @@ usage = unlines
   , "Claude Code plugin, not by hand."
   , ""
   , "Options:"
-  , "  --entry FILE          Agda entry module to build the graph from."
+  , "  --entry FILE          Agda entry module to build the graph from"
+  , "                        (repeatable; several entries union their import"
+  , "                        closures into one graph — see config `entries:`)."
   , "  -i, --include DIR     Agda include directory (repeatable)."
   , "  --graph FILE          Serve a fixed graph.json; disables rebuilds."
   , "  --project DIR         Project root / subprocess cwd (default: cwd)."
@@ -245,6 +288,11 @@ usage = unlines
   , "  --min-term-depth N    Term-hash depth filter (default 3)."
   , "  --no-auto-rebuild     Do not regenerate the graph when sources change."
   , "  --no-watch            Disable the fsnotify watcher; poll on each query instead."
+  , "  --no-query-log        Disable per-query telemetry (else appends one JSON line"
+  , "                        per tools/call to <out-dir>/query-log.jsonl; on by default"
+  , "                        in live mode, off in preloaded mode)."
+  , "  --no-auto-resolve     Do not auto-resolve a name to its sole near-match candidate"
+  , "                        (on by default; a one-line note flags any auto-resolution)."
   , "  --config FILE         Load this .agda-explore.yml (else discovered; see below)."
   , "  -h, --help            This help."
   , "  -V, --version         Version."
@@ -254,7 +302,8 @@ usage = unlines
   , "Keys are kebab-case mirrors of the flags above (e.g. no-watch, min-term-depth);"
   , "merge order is defaults < config < CLI."
   , ""
-  , "Environment fallbacks: AGDA_EXPLORE_ENTRY, AGDA_EXPLORE_INCLUDE (PATH-sep),"
+  , "Environment fallbacks: AGDA_EXPLORE_ENTRY (PATH-sep, multi-entry),"
+  , "AGDA_EXPLORE_INCLUDE (PATH-sep),"
   , "AGDA_EXPLORE_GRAPH, AGDA_EXPLORE_PROJECT, AGDA_EXPLORE_CONFIG, AGDA_DEPS_BIN,"
   , "AGDA_UNUSED_BIN."
   ]

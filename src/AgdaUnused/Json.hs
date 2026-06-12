@@ -6,6 +6,7 @@
 module AgdaUnused.Json
   ( ExpandedGraph(..)
   , Definition(..)
+  , Kind(..)
   , Access(..)
   , ReExport(..)
   , loadExpandedGraph
@@ -14,6 +15,7 @@ module AgdaUnused.Json
 import AgdaGraph.Schema
   ( ExpandedGraph(..)
   , Definition(..)
+  , Kind(..)
   , Access(..)
   , ReExport(..)
   , loadExpandedGraph

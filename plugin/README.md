@@ -121,6 +121,7 @@ export AGDA_EXPLORE_GRAPH=/abs/path/to/deps.json
 | `type_of`        | What's the type of `X`? (elaborated, numeric literals de-sugared; `source=true` for as-written) |
 | `similar_types`  | What else has a type like `X`'s?                              |
 | `similar_bodies` | What else is implemented like `X`?                            |
+| `find_lemma`     | Goal-directed lemma search: is there an existing def whose conclusion matches my goal? Two modes (pass one) — `anchor=<def>` (WL signature-fingerprint shape, like `similar_types`) or `goal="<type>"` (free-text conclusion token-overlap; needs a signatures-enabled graph). Filter with `kind` / `module_prefix`. |
 | `search`         | Find by name substring, or list by `kind` / `state` / `module_prefix` (`top_level_only`). |
 | `unused`         | Unused imports / dead code (`scope` / `exclude`; reports an excluded/suppressed count; FP caveats). |
 | `rebuild`        | Force-regenerate the graph now.                               |

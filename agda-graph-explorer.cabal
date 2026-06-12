@@ -23,8 +23,10 @@ library agda-graph
   hs-source-dirs:   src-agda-graph
   exposed-modules:  AgdaGraph.Schema
                     AgdaGraph.Index
+                    AgdaGraph.Union
                     AgdaGraph.WL
                     AgdaGraph.Similarity
+                    AgdaGraph.GoalCanon
                     AgdaGraph.ConfigCore
   build-depends:    base >= 4.10 && < 4.23,
                     aeson >= 2.0 && < 3,
@@ -36,6 +38,7 @@ library agda-graph
                     deepseq,
                     directory,
                     filepath,
+                    murmur-hash >= 0.1 && < 0.2,
                     yaml >= 0.11 && < 0.12,
                     parallel >= 3.2 && < 3.4
   default-language: Haskell2010
@@ -80,7 +83,6 @@ executable agda-goals
                        deepseq,
                        directory,
                        filepath,
-                       murmur-hash >= 0.1 && < 0.2,
                        process >= 1.6 && < 2,
                        text,
                        yaml >= 0.11 && < 0.12

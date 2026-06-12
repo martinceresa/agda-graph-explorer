@@ -215,16 +215,31 @@ roots: [src/]
 
 ### `.agda-explore.yml`
 
-Mirrors the daemon's CLI flags. Path keys: `entry` (the Agda entry
-module), `include` (include paths, list), `graph` (a prebuilt
-`graph.json` for preloaded mode), `project`, `out-dir`, `agda-deps-bin`,
-`agda-unused-bin`. Behaviour toggles (bools): `no-term-hashes`,
-`no-signatures`, `normalise-signatures`, `show-implicit`,
-`no-auto-rebuild`, `no-watch`; plus `min-term-depth` (int).
+Mirrors the daemon's CLI flags. Path keys: `entry` (a single Agda entry
+module), `entries` (a *list* of entry modules — see below), `include`
+(include paths, list), `graph` (a prebuilt `graph.json` for preloaded
+mode), `project`, `out-dir`, `agda-deps-bin`, `agda-unused-bin`.
+Behaviour toggles (bools): `no-term-hashes`, `no-signatures`,
+`normalise-signatures`, `show-implicit`, `no-auto-rebuild`, `no-watch`;
+plus `min-term-depth` (int).
+
+**Multiple entry modules.** `--entry` is repeatable on the CLI and the
+config accepts an `entries:` list alongside the back-compat scalar
+`entry:` (the two are unioned, deduplicated). When more than one entry
+is configured the daemon builds **one graph over the union of all the
+listed entries' import closures** (it runs `agda-deps` once per entry
+and unions the results in-process), so `locate` / `callers` / `type_of`
+/ `search` etc. resolve names anywhere across the combined closures. A
+single entry is unchanged (one `agda-deps` run). CLI `--entry` *appends*
+to any config `entry:` / `entries:`, mirroring how `-i` appends to
+config includes.
 
 ```yaml
 project: .
-entry: src/Everything.agda
+entry: src/Everything.agda          # back-compat single entry
+entries:                            # …and/or a list (unioned with `entry`)
+  - src/Main.agda
+  - src/Extras/All.agda
 include: [src/]
 agda-deps-bin: /usr/local/bin/agda-deps   # else found on $PATH
 no-watch: false

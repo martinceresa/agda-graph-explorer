@@ -9,6 +9,10 @@
 module AgdaUnused.Analysis
   ( Finding(..)
   , FindingKind(..)
+  , Confidence(..)
+  , GroupBy(..)
+  , parseGroupBy
+  , kindTag
   , analyse
   , renderFindingLine
   ) where
@@ -21,7 +25,7 @@ import qualified Data.Set        as S
 import           Data.Text       ( Text )
 import qualified Data.Text       as T
 
-import           AgdaUnused.Json   ( ExpandedGraph(..), Definition(..), Access(..), ReExport(..) )
+import           AgdaUnused.Json   ( ExpandedGraph(..), Definition(..), Kind(..), Access(..), ReExport(..) )
 import           AgdaUnused.Source ( ImportLine(..), scanImports, bodyTokens )
 
 -- | Per-finding payload. The 'fileFinding' is an absolute path; the
@@ -33,7 +37,23 @@ data Finding = Finding
   , moduleFinding :: !Text
   , symbolFinding :: !(Maybe Text)
   , noteFinding   :: !(Maybe Text)
+  , confFinding   :: !Confidence
+    -- ^ Confidence in the finding. Currently only the 'DefinedDead'
+    -- branch ever downgrades to 'Low' (when the def's body is trivial,
+    -- so the elaborator may have inlined it — see 'ctxTrivialBody');
+    -- every other finding is 'High'.
   } deriving (Show)
+
+-- | How much trust to place in a finding. Surfaced as a parenthetical
+-- in plain-text output and as a @"confidence"@ key in @--json-out@.
+-- An agent should verify 'Low'-confidence @dead@ findings (they may be
+-- inlined callees the dependency graph dropped) but can treat 'High'
+-- ones as safe.
+data Confidence = High | Low
+  deriving (Show, Eq, Ord)
+
+instance NFData Confidence where
+  rnf c = c `seq` ()
 
 data FindingKind
   = UnusedInUsing
@@ -62,9 +82,39 @@ data FindingKind
 instance NFData FindingKind where
   rnf k = k `seq` ()
 
+-- | The stable string tag for a 'FindingKind'. The single source of
+-- truth shared by @--json-out@ (the @"kind"@ key) and grouping by
+-- kind, so the two never drift apart.
+kindTag :: FindingKind -> Text
+kindTag UnusedInUsing           = "unused-in-using"
+kindTag UnusedBlanketOpen       = "unused-blanket-open"
+kindTag DefinedDead             = "defined-dead"
+kindTag DefinedInternalOnly     = "defined-internal-only"
+kindTag DuplicateUsingForModule = "duplicate-using"
+kindTag PublicWithoutDownstream = "public-no-downstream"
+
+-- | How to aggregate the flat finding list for @--group-by@. @GByDir@
+-- buckets by the directory of each finding's (relativised) file path,
+-- @GByFile@ by the whole file path, @GByKind@ by 'kindTag'.
+data GroupBy = GByDir | GByFile | GByKind
+  deriving (Show, Eq)
+
+instance NFData GroupBy where
+  rnf g = g `seq` ()
+
+-- | Parse a @--group-by@ / @group-by:@ token. Mirrors 'parseKinds'
+-- error style ("unknown …: <token>") so the CLI and YAML report the
+-- same message on a bad value.
+parseGroupBy :: String -> Either String GroupBy
+parseGroupBy "dir"  = Right GByDir
+parseGroupBy "file" = Right GByFile
+parseGroupBy "kind" = Right GByKind
+parseGroupBy s      = Left $ "unknown group-by: " ++ s
+
 instance NFData Finding where
-  rnf (Finding a b c d e f) =
+  rnf (Finding a b c d e f g) =
     rnf a `seq` rnf b `seq` rnf c `seq` rnf d `seq` rnf e `seq` rnf f
+      `seq` rnf g
 
 -- ** Top-level driver
 
@@ -150,6 +200,16 @@ data Context = Context
     -- ^ (module, short-name) -> declared access. Absent entries default
     -- to 'Public'. Used to suppress the @internal-only@ "wrap in
     -- private" suggestion for names already declared @private@.
+  , ctxTrivialBody      :: !(S.Set (Text, Text))
+    -- ^ (module, short-name) of every definition with a *trivial body*,
+    -- a proxy for "the elaborator may have inlined this callee" (the
+    -- schema has no clause count). A def is trivial iff
+    -- @defKind == KFunction@ AND its 'egSubtermHashes' row has length
+    -- <= 1 AND the maximum 'egSubtermDepths' entry is <= 3. Empty when
+    -- the producer wasn't run with @--with-term-hashes@ (the subterm
+    -- arrays are absent) — in that case we never fabricate triviality,
+    -- so every @dead@ finding stays 'High'. Drives both the Phase A
+    -- confidence downgrade and the Phase B synthetic-user suppression.
   }
 
 buildContext :: ExpandedGraph -> [(FilePath, Text)] -> Context
@@ -186,6 +246,26 @@ buildContext ExpandedGraph{..} bodies =
         [ ((defModule d, shortNameOf (defName d) (defModule d)), defAccess d)
         | d <- egDefinitions
         ]
+
+      -- (module, short-name) of every trivial-bodied function. Built by
+      -- zipping each definition with its parallel 'egSubtermHashes' /
+      -- 'egSubtermDepths' rows (index @i@ of every array describes the
+      -- @i@-th definition). When the producer did not emit the subterm
+      -- arrays they are @[]@; 'zip3' then yields no rows, the set stays
+      -- empty, and NOTHING is treated as trivial — never fabricate
+      -- triviality on older JSON. Order-preserving 'S.fromList' over a
+      -- deterministic zip keeps this gate-safe.
+      trivialBody :: S.Set (Text, Text)
+      trivialBody = S.fromList
+        [ (defModule d, shortNameOf (defName d) (defModule d))
+        | (d, hs, ds) <- zip3 egDefinitions egSubtermHashes egSubtermDepths
+        , defKind d == KFunction
+        , length hs <= 1
+        , maxDepth ds <= 3
+        ]
+      maxDepth :: [Int] -> Int
+      maxDepth [] = 0
+      maxDepth xs = maximum xs
 
       -- Per-edge ingest, building the four usage indices in one pass.
       -- Intra-module edges still populate 'intraModUsedQ' (used by the
@@ -262,6 +342,7 @@ buildContext ExpandedGraph{..} bodies =
        , ctxSourceBodies     = sourceBodies
        , ctxDefLineByQ       = defLineByQ
        , ctxDefAccessByQ     = defAccessByQ
+       , ctxTrivialBody      = trivialBody
        }
 
 -- ** Per-file logic
@@ -325,6 +406,7 @@ checkUsing ctx fp thisMod bodyToks lineNo modName sym
           , moduleFinding = modName
           , symbolFinding = Just sym
           , noteFinding   = Nothing
+          , confFinding   = High
           }
       ]
   where
@@ -364,6 +446,7 @@ checkBlanket ctx _fp thisMod _bodyToks lineNo modName =
                  , moduleFinding = modName
                  , symbolFinding = Nothing
                  , noteFinding   = Just "no symbol from this module is referenced (best-effort)"
+                 , confFinding   = High
                  }
              ]
         else []
@@ -391,12 +474,31 @@ definedButUnused ctx fp thisMod shorts =
       , moduleFinding = thisMod
       , symbolFinding = Just sh
       , noteFinding   = Just $ if S.null intra
-          then "deletion candidate"
+          then if trivial
+                 -- PHASE A: a surviving dead finding whose body is
+                 -- trivial is more likely an inlined callee than a
+                 -- true orphan; say so and downgrade the confidence.
+                 then "deletion candidate (low confidence: trivial body, possibly inlined)"
+                 else "deletion candidate"
           else "intra-module callers only"
+      , confFinding   = if S.null intra && trivial then Low else High
       }
   | sh <- S.toAscList shorts
+  , let trivial = (thisMod, sh) `S.member` ctxTrivialBody ctx
   , S.null (usersClosure ctx (thisMod, sh))
   , let intra = M.findWithDefault S.empty (thisMod, sh) (ctxIntraModUsedQ ctx)
+  -- PHASE B (the principled fix): a TRIVIAL-bodied def whose short
+  -- name appears as a use in ANOTHER file is treated as having a
+  -- synthetic external user — the elaborator inlined the callee and
+  -- the dependency graph dropped the edge, but the source text still
+  -- mentions it. Such a def is never dead. We gate this on
+  -- trivial-bodied only (the inliner only inlines trivial RHSs) so we
+  -- don't mask a genuinely-dead non-trivial def whose short name
+  -- collides with an unrelated live identifier elsewhere. (This is a
+  -- formalisation of the cross-file half of 'mentionedAsUse' below,
+  -- restricted to inline-eligible defs; the wider 'mentionedAsUse'
+  -- guard still applies to the in-file-count case for all defs.)
+  , S.null intra `implies` not (trivial && mentionedCrossFile ctx fp sh)
   -- Suppress dead false positives caused by Agda's elaborator
   -- inlining the callee: when there are *no* intra-module graph
   -- users either, double-check the source text. If the short name
@@ -423,12 +525,19 @@ definedButUnused ctx fp thisMod shorts =
 -- definition, so the third occurrence is a use). Suppresses dead/
 -- internal-only FPs from Agda's elaborator inlining.
 mentionedAsUse :: Context -> FilePath -> Text -> Bool
-mentionedAsUse ctx fp sh =
-  let crossFile = any (\(p, toks) -> p /= fp && S.member sh toks)
-                      (M.toList (ctxSourceTokens ctx))
-      ownBody   = M.findWithDefault T.empty fp (ctxSourceBodies ctx)
-      occ       = countToken sh ownBody
-  in crossFile || occ > 2
+mentionedAsUse ctx fp sh = mentionedCrossFile ctx fp sh
+  || let ownBody = M.findWithDefault T.empty fp (ctxSourceBodies ctx)
+     in countToken sh ownBody > 2
+
+-- | True if @sh@ appears in the body tokens of some file OTHER than
+-- @fp@. Pulled out of 'mentionedAsUse' so Phase B's synthetic external
+-- user (in 'definedButUnused') can consult the cross-file half on its
+-- own, without the in-file occurrence-count heuristic. Iterates the
+-- key-ordered 'M.toList' so it stays determinism-safe.
+mentionedCrossFile :: Context -> FilePath -> Text -> Bool
+mentionedCrossFile ctx fp sh =
+  any (\(p, toks) -> p /= fp && S.member sh toks)
+      (M.toList (ctxSourceTokens ctx))
 
 -- | Count whole-token occurrences of @needle@ in @haystack@. A
 -- "whole token" occurrence requires that the character before the
@@ -502,6 +611,7 @@ publicReexportFindings ctx fp thisMod imports =
             , moduleFinding = ilModule il
             , symbolFinding = Just sym
             , noteFinding   = Just "no other module references this re-export"
+            , confFinding   = High
             }
         | il <- imports
         , ilPublic il
@@ -532,6 +642,7 @@ publicReexportFindings ctx fp thisMod imports =
                             , symbolFinding = Nothing
                             , noteFinding   =
                                 Just "blanket re-export with no downstream user"
+                            , confFinding   = High
                             }
                         | il <- imports
                         , ilPublic il
@@ -583,6 +694,7 @@ duplicateUsingFindings fp imports =
          , moduleFinding = m
          , symbolFinding = Nothing
          , noteFinding   = Just $ "another `open import` of this module already exists in the file"
+         , confFinding   = High
          }
      | ((m, _scope), ils) <- M.toList byMod
      , length ils > 1
