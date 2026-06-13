@@ -229,6 +229,14 @@ data ServerState = ServerState
     -- sessions, keyed by loaded module file. Guarded by an 'MVar' (not a
     -- bare 'IORef') because the background file-watcher thread flips each
     -- entry's 'seDirty' flag concurrently with the (serialised) tool calls.
+  , ssColdError   :: !(IORef (Maybe Text))
+    -- ^ Cold-start diagnostic. Set when the /first/ graph build fails (no
+    -- snapshot exists to serve). While set, queries return this actionable
+    -- message immediately instead of each re-running a full synchronous
+    -- @agda-deps@ build, and the background worker keeps retrying so the
+    -- daemon self-heals once the offending module is fixed — no reconnect.
+    -- Cleared on the first successful build. (Serve-stale only covers the
+    -- /after one good build/ case; this covers the cold start.)
   }
 
 newServerState :: Config -> IO ServerState
@@ -244,6 +252,7 @@ newServerState c =
     <*> newIORef False
     <*> newMVar ()
     <*> newMVar M.empty
+    <*> newIORef Nothing
 
 -- ---------------------------------------------------------------------
 -- Source scanning
@@ -690,9 +699,28 @@ ensureFresh ss@ServerState{..}
     -- avoiding a redundant synchronous build in that race. A result here is
     -- always treated as "fresh" (stale = False): we blocked for it.
     firstBuild = do
-      r <- rebuildLocked ss $ \dirty ld ->
-             pure (dirty || not (loadedFormatCurrent ld))
-      pure (fmap (\ld -> (ld, False)) r)
+      cold <- readIORef ssColdError
+      case cold of
+        -- A prior cold-start failure is cached: serve the diagnostic
+        -- immediately rather than blocking this query on another full
+        -- (likely-failing) build, and make sure a background worker is
+        -- retrying so we self-heal once the corpus is fixed.
+        Just diag -> do
+          ensureWorker ss
+          void (tryPutMVar ssWake ())
+          pure (Left (T.unpack diag))
+        Nothing -> do
+          r <- rebuildLocked ss $ \dirty ld ->
+                 pure (dirty || not (loadedFormatCurrent ld))
+          case r of
+            Right ld  -> pure (Right (ld, False))
+            Left raw  -> do
+              -- 'doBuild' stored the clean diagnostic + re-dirtied; kick
+              -- the worker so retries happen off the query path.
+              ensureWorker ss
+              void (tryPutMVar ssWake ())
+              diag <- readIORef ssColdError
+              pure (Left (maybe raw T.unpack diag))
 
     seedFrom act = do
       r <- act
@@ -725,7 +753,10 @@ rebuildLocked ServerState{..} needBuild = withMVar ssRebuildLock $ \_ -> do
       writeIORef ssDirty False
       built <- runBuild ssConfig
       case built of
-        Right ld -> writeIORef ssLoaded (Just ld) >> pure (Right ld)
+        Right ld -> do
+          writeIORef ssColdError Nothing       -- a good build clears cold-start state
+          writeIORef ssLoaded (Just ld)
+          pure (Right ld)
         Left err -> case cur of
           Just ld -> do
             -- A failed rebuild keeps the stale snapshot AND re-marks it
@@ -735,7 +766,13 @@ rebuildLocked ServerState{..} needBuild = withMVar ssRebuildLock $ \_ -> do
             writeIORef ssDirty True
             hPutStrLn stderr ("agda-explore: rebuild failed, serving stale graph: " ++ err)
             pure (Right ld)
-          Nothing -> pure (Left err)
+          Nothing -> do
+            -- Cold start: no snapshot to serve. Record an actionable
+            -- diagnostic and re-dirty so the background worker keeps
+            -- retrying; the daemon self-heals once the corpus builds.
+            writeIORef ssColdError (Just (coldStartDiag err))
+            writeIORef ssDirty True
+            pure (Left err)
 
 -- | Force a regeneration regardless of staleness (the @rebuild@ tool).
 -- Serialised through 'ssRebuildLock' and clears 'ssDirty' so it composes
@@ -745,8 +782,27 @@ forceRebuild ServerState{..} = withMVar ssRebuildLock $ \_ -> do
   writeIORef ssDirty False
   built <- runBuild ssConfig
   case built of
-    Right ld -> writeIORef ssLoaded (Just ld) >> pure (Right ld)
-    Left err -> pure (Left err)
+    Right ld -> do
+      writeIORef ssColdError Nothing
+      writeIORef ssLoaded (Just ld)
+      pure (Right ld)
+    Left err -> do
+      cur <- readIORef ssLoaded
+      case cur of
+        Nothing -> writeIORef ssColdError (Just (coldStartDiag err))   -- still cold
+        Just _  -> pure ()
+      pure (Left err)
+
+-- | A clean, actionable cold-start message wrapping the raw producer
+-- error, shown by every graph tool (and @status@) while the first build
+-- has never succeeded — instead of echoing the bare @exit 120@.
+coldStartDiag :: String -> Text
+coldStartDiag raw = T.pack $
+  "the dependency graph has never built — the configured entry's import \
+  \closure does not type-check, so there is no snapshot to serve yet. Fix \
+  \the failing module reported below, or point `entries:` / `--entry` at a \
+  \module that builds; the daemon retries in the background and self-heals \
+  \once it does (no reconnect needed).\n\n" ++ raw
 
 -- ---------------------------------------------------------------------
 -- Query telemetry (E6)

@@ -157,6 +157,7 @@ goal / case-split / refine workflow instead of blind string replacement:
 | `case_split`   | Split a goal on a variable → unified diff of the generated clauses.               |
 | `refine`       | Refine a goal by a head symbol (`f ?`) → unified diff.                            |
 | `give`         | Fill a goal with a complete term, **Agda-validated** → unified diff (or the localized type error). |
+| `give_many`    | Fill SEVERAL goals in one session load → one combined diff; atomic (any rejection applies nothing). For many independent holes in a slow-to-load module. |
 | `auto`         | Mimer search (unavailable on Agda 2.9.0 — its reader rejects the command; degrades cleanly). |
 
 Each mutator **returns a unified diff and never writes the file** — apply

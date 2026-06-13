@@ -16,7 +16,9 @@ module AgdaInteract.Tools
 import           Control.Concurrent.MVar (modifyMVar, modifyMVar_, readMVar)
 import           Control.Exception       (SomeException, try)
 import           Control.Monad           (foldM)
-import           Data.Aeson              (Value)
+import           Data.Aeson              (FromJSON (..), Value, object, withObject,
+                                          (.:), (.=))
+import           Data.Aeson.Types        (parseMaybe)
 import qualified Data.Map.Strict         as M
 import           Data.Maybe              (fromMaybe)
 import           Data.Text               (Text)
@@ -127,6 +129,22 @@ interactTools =
                  ] ["goal", "term"])
       runGive
 
+  , Tool "give_many"
+      "Fill SEVERAL open goals in one shot against a single live session — \
+      \pays the (possibly expensive) module load ONCE instead of reloading \
+      \between each give, so it's the tool for closing many independent \
+      \holes in a slow-to-load module. Takes a `gives` list of \
+      \{goal, term}; each term is Agda-validated and guarded (no \
+      \postulate / escape hatches). Returns ONE combined unified diff for \
+      \all the fills (the bridge does not write the file). Atomic: if ANY \
+      \term is rejected, NOTHING is applied and the error names the \
+      \offending goal. For case-split / refine, or fills that depend on a \
+      \previous one, use the single-goal tools."
+      (objSchema [ ("gives", givesSchema)
+                 , ("file", sp "Module file, if more than one is loaded (else inferred).")
+                 ] ["gives"])
+      runGiveMany
+
   , Tool "auto"
       "Search for a term that solves the goal (Agda's Mimer / auto). On \
       \success returns a diff filling the hole. NOTE: Agda 2.9.0's \
@@ -199,6 +217,93 @@ runCaseSplit ss a = withGoal ss a $ \sess file e iid ->
     Just var -> do
       out <- runRaw sess (iotcmMakeCase file iid (T.unpack var))
       mutateFromMakeCase ss file e out
+
+-- | One @{goal, term}@ fill request for 'runGiveMany'.
+data GiveSpec = GiveSpec !Text !Text
+instance FromJSON GiveSpec where
+  parseJSON = withObject "give" $ \o -> GiveSpec <$> o .: "goal" <*> o .: "term"
+
+-- | JSON schema for the @gives@ array argument.
+givesSchema :: Value
+givesSchema = object
+  [ "type"        .= ("array" :: Text)
+  , "description" .= ("Goals to fill, in order — a list of \
+                      \{\"goal\":\"g0\",\"term\":\"…\"} objects." :: Text)
+  , "items" .= object
+      [ "type"       .= ("object" :: Text)
+      , "properties" .= object
+          [ "goal" .= sp "Stable goal id, e.g. g0."
+          , "term" .= sp "Term to fill that goal with." ]
+      , "required" .= (["goal", "term"] :: [Text])
+      ]
+  ]
+
+-- | Fill several goals in one live session. Agda keeps a session's
+-- surviving interaction ids stable across gives (no reload between them),
+-- so we resolve every goal from the one loaded goal map, give each in
+-- turn against the live state, accumulate the edits, and emit ONE combined
+-- diff. Atomic w.r.t. disk: on any failure the session is marked dirty
+-- (so the partial in-session gives are dropped on the next load) and
+-- nothing is written.
+runGiveMany :: ToolRunner
+runGiveMany ss a = case argLookup a "gives" >>= parseMaybe parseJSON of
+  Nothing    -> pure (Left "give_many requires a `gives` array of \
+                           \{\"goal\":\"g0\",\"term\":\"…\"} objects.")
+  Just []    -> pure (Left "give_many: `gives` is empty.")
+  Just specs ->
+    -- Fail fast: run the no-postulate guard on every term before touching agda.
+    case [ (g, why) | GiveSpec g t <- specs, Rejected why <- [checkGiveInput t] ] of
+      ((g, why):_) -> pure (Left ("give_many refused " <> g <> ": " <> why))
+      [] -> do
+        r <- resolveLoaded ss (argText a "file")
+        case r of
+          Left err -> pure (Left err)
+          Right (file, sess, gm) -> do
+            ef <- readFileSafe file
+            case ef of
+              Left e     -> pure (Left e)
+              Right orig -> do
+                res <- giveLoop sess file gm (codeBlocksFor file orig) specs []
+                markSessionDirty ss file        -- drop the in-session state; we serve disk
+                pure $ case res of
+                  Left err    -> Left err
+                  Right edits -> case spliceRanges orig edits of
+                    Left ov   -> Left ov
+                    Right new -> Right (batchMsg (length edits) (unifiedDiff file orig new))
+
+-- | Validate + give each spec against the live session, accumulating
+-- (start, end, replacement) edits. Stops at the first failure.
+giveLoop :: Session -> FilePath -> GoalMap -> CodeBlocks -> [GiveSpec]
+         -> [(Int, Int, Text)] -> IO (Either Text [(Int, Int, Text)])
+giveLoop _    _    _  _  []                 acc = pure (Right (reverse acc))
+giveLoop sess file gm cb (GiveSpec g t : rest) acc =
+  case parseStableId g >>= \sid -> (,) sid <$> lookupStable gm sid of
+    Nothing          -> pure (Left ("give_many: not an open goal id: " <> g))
+    Just (_sid, e)   -> case (geIid e, geRange e) of
+      (Just iid, Just (GoalRange s en))
+        | not (isInsideCode cb (rpPos s)) ->
+            pure (Left (g <> ": the hole is not inside an Agda code block."))
+        | otherwise -> do
+            out <- runRaw sess (iotcmGive file iid (T.unpack t))
+            case out of
+              Left err -> pure (Left ("give_many: session error on " <> g <> ": " <> err))
+              Right rs -> case firstError rs of
+                Just m  -> pure (Left ("give_many: agda rejected " <> g
+                                         <> " — nothing applied:\n" <> m))
+                Nothing -> case [gr | ReplyGiveAction _ gr <- rs] of
+                  (gr:_) ->
+                    let repl = case gr of
+                          GiveStr st  -> st
+                          GiveParen p -> if p then "(" <> t <> ")" else t
+                    in giveLoop sess file gm cb rest ((rpPos s, rpPos en, repl) : acc)
+                  [] -> pure (Left ("give_many: no give action for " <> g))
+      _ -> pure (Left (g <> ": not an open goal."))
+
+batchMsg :: Int -> String -> Text
+batchMsg n diff =
+  "Filled " <> showT n <> " goal(s) against a single session load. Apply this \
+  \combined diff, then `load` to refresh — the bridge does not write the file:\n\n"
+    <> T.pack diff
 
 runAuto :: ToolRunner
 runAuto ss a = withGoal ss a $ \sess file e iid -> do

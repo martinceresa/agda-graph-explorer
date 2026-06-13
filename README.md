@@ -12,7 +12,7 @@ shared library plus four executables that read `agda-deps`' v2
 | **`agda-graph`** (library) | Typed view of the expanded `graph.json` + an in-memory `Index`. The substrate the executables share.                                      |
 | **`agda-unused`**          | Flags unused imports / definitions / blanket opens / public re-exports.                                                                   |
 | **`agda-optimization`**    | ~20 subcommand-driven graph-level analyses (centrality, clustering, motif mining, axiom footprint, …).                                    |
-| **`agda-goals`**           | Drives `agda --interaction-json` (one persistent process) and buckets goal states by canonical hash. Needs `agda` on `$PATH`.            |
+| **`agda-goals`**           | Drives `agda --interaction-json` over a pool of persistent processes and buckets goal states by canonical hash. Needs `agda` on `$PATH`. |
 | **`agda-explore`**         | Interactive MCP server: a daemon that answers point queries over the graph for coding agents, regenerating it on the fly via `agda-deps`. |
 
 The single coupling to `agda-deps` is the **v2 `graph.json` wire
@@ -90,11 +90,13 @@ output. Config: [`.agda-optimization.yml`](#agda-optimizationyml)
 
 ## `agda-goals` — bucket goal states
 
-Drives `agda --interaction-json` over the root files as a subprocess —
-one **persistent** Agda process reused across files (the same session
-driver `agda-explore`'s interaction bridge uses) — canonicalises each
-open goal type, and buckets by hash to surface recurring missing
-lemmas. Needs `agda` on `$PATH`. Config:
+Drives `agda --interaction-json` over the root files via a **pool of
+persistent** Agda processes (the same session driver `agda-explore`'s
+interaction bridge uses; one process per RTS capability — run `+RTS -NK`
+to cap the pool, e.g. to bound memory on a heavy corpus), canonicalises
+each open goal type, and buckets by hash to surface recurring missing
+lemmas. Output is reassembled in input order, so it is byte-identical
+between `+RTS -N1` and `-NK`. Needs `agda` on `$PATH`. Config:
 [`.agda-goals.yml`](#agda-goalsyml).
 (Experimental; not yet a polished end-user surface.)
 
@@ -130,8 +132,12 @@ queries above:
 
 ```
 load · goal_type · goal_context · infer · normalize ·
-case_split · refine · give · auto
+case_split · refine · give · give_many · auto
 ```
+
+`give_many` fills several goals in one session load (one combined diff,
+atomic) — the tool for closing many independent holes in a slow-to-load
+module without paying the reload between each.
 
 `load` opens a module and lists its open goals with ids (`g0, g1, …`) and
 their source positions. An id stays put for a hole whose position is

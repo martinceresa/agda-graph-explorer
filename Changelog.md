@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+### Bridge batching, cold-start fallback, parallel goals (2026-06-13)
+
+- **`agda-explore`: `give_many`** (bridge) — fill several open goals in one
+  shot against a single live session, so the (possibly minutes-long) module
+  load is paid ONCE instead of reloaded between gives. Each term is
+  Agda-validated + guarded; returns one combined unified diff; atomic — if
+  any term is rejected, nothing is applied and the error names the goal.
+- **`agda-explore`: cold-start fallback.** Serve-stale only covered the
+  *after one good build* case; a corpus that fails to build from the very
+  first load left the daemon dark (every tool echoed `agda-deps exit 120`).
+  Now the first-build failure is cached as an actionable diagnostic
+  (`status` and every tool report "the graph has never built — module X
+  doesn't type-check; fix it or point `entries:` at a clean module"), the
+  background worker keeps retrying, and the daemon self-heals once the
+  corpus builds — no reconnect. (Observed dark on the Jolteon-FastBFT
+  corpus whose auto-discovered `Main` entry never built.)
+- **`agda-goals`: parallel sessions.** Drives the root files over a pool of
+  persistent `agda --interaction-json` sessions (work-stealing queue, pool
+  size = RTS capabilities; `+RTS -N4` to cap memory on a heavy corpus)
+  instead of one serial process. Output is reassembled in input order, so
+  it stays **byte-identical** between `+RTS -N1` and `-NK` (human and
+  `--format=json`).
+- **Packed graph form — refused with guidance, not silently degraded.**
+  `AgdaGraph.Schema` now rejects a `--json-mode=packed` graph with an
+  actionable message: packed omits the per-definition kind / line / access /
+  type / subterm-hashes the analyses need (it is the HTML-viewer form), so a
+  consumer load would cripple `type_of`/`similar_*`/`unused`/etc. The format
+  + gap are documented in `test/packed/README.md`; the real fix is a
+  producer `packed-complete` mode (see `Backlog.md`).
+
 ### Write-side interaction bridge for `agda-explore` (2026-06-12)
 
 An opt-in (`--enable-interact`, or `enable-interact: true` in

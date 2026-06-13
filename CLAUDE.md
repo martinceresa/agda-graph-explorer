@@ -24,11 +24,14 @@ The repo ships one shared library and four executables:
   `chokepoint`, `silhouette`, `entwine`, `fiedler`, `horizon`,
   `strata` — round 4 — plus `term-cluster`, `concept-bundle`).
 - **`agda-goals`** — *process driver* (not a `Backend`): drives
-  `agda --interaction-json` over the root files using a **single
-  persistent process** (`AgdaInteract.Session`, shared with
-  `agda-explore`'s bridge — reuses one `.agdai` cache across files),
-  captures each `AllGoalsWarnings` reply, and buckets goal states by
-  canonical hash. Needs `agda` on `$PATH`; links no Agda library.
+  `agda --interaction-json` over the root files using a **pool of
+  persistent processes** (`AgdaInteract.Session`, shared with
+  `agda-explore`'s bridge — each reuses its `.agdai` cache across files;
+  one session per RTS capability, work-stealing queue, `+RTS -NK` caps
+  it), captures each `AllGoalsWarnings` reply, and buckets goal states by
+  canonical hash. Results reassembled in input order ⇒ output is
+  byte-identical across `-N1`/`-NK`. Needs `agda` on `$PATH`; links no
+  Agda library.
 - **`agda-explore`** — *interactive MCP (Model Context Protocol)
   server*: a long-running daemon that loads the expanded `graph.json`
   once into `AgdaGraph.Index` and answers point queries over stdio
@@ -38,9 +41,9 @@ The repo ships one shared library and four executables:
   **subprocess** (see [Cross-repo runtime link](#cross-repo-runtime-link)).
   Under `--enable-interact` it *also* exposes a **write-side interaction
   bridge** (`load` / `goal_type` / `goal_context` / `infer` /
-  `normalize` / `case_split` / `refine` / `give` / `auto`) backed by a
-  long-lived `agda --interaction-json` **subprocess** — every `give` /
-  `refine` is Agda-validated and returns a unified diff (the bridge
+  `normalize` / `case_split` / `refine` / `give` / `give_many` / `auto`)
+  backed by a long-lived `agda --interaction-json` **subprocess** — every
+  `give` / `refine` is Agda-validated and returns a unified diff (the bridge
   never writes the file). This is a *second, independent* subprocess
   model beside the graph daemon: interaction tools reflect live on-disk
   state and deliberately bypass `ensureFresh`. Needs `agda` on `$PATH`
@@ -115,8 +118,8 @@ Two tools shell out:
   not-found message. Preloaded mode (point the daemon at an existing
   `graph.json`) needs no `agda-deps` at all.
 - **`agda-goals` → `agda`.** Drives `agda --interaction-json` over the
-  root files as one persistent subprocess (via `AgdaInteract.Session`);
-  needs `agda` on `$PATH`.
+  root files as a pool of persistent subprocesses (via
+  `AgdaInteract.Session`, one per RTS capability); needs `agda` on `$PATH`.
 
 ## Module map
 
@@ -165,9 +168,12 @@ src/
     Protocol.hs                 thin re-export of
                                 AgdaGraph.Interaction.Protocol (kept for
                                 the historical name; mirrors Canon.hs).
-    Driver.hs                   batch driver over a single persistent
-                                AgdaInteract.Session (one process for all
-                                files; respawn-on-poison fallback).
+    Driver.hs                   batch driver over a POOL of persistent
+                                AgdaInteract.Sessions (runPooled: a
+                                work-stealing queue, one session per RTS
+                                capability, respawn-on-poison; runSerial
+                                for -N1). Results reassembled in input
+                                order (deterministic across -NK).
     Canon.hs                    textual goal-type canonicaliser +
                                 local Murmur64 hashString (vendored from
                                 murmur-hash to keep this repo Agda-free).
@@ -183,7 +189,12 @@ src/
                                 regeneration: ensureFresh/forceRebuild
                                 spawn agda-deps and hot-swap the Index;
                                 sibling-binary discovery; fsnotify
-                                watcher with poll fallback.
+                                watcher with poll fallback; cold-start
+                                fallback (ssColdError: first-build failure
+                                → actionable diagnostic + background retry,
+                                no dark daemon); the interaction-session
+                                registry (ssSessions) + its watcher
+                                dirty-marking.
     Query.hs                    pure point queries over Index.
     Tools.hs                    MCP lifecycle + read-side tool catalogue
                                 + tools/call dispatch; `unused` shells to
@@ -209,10 +220,14 @@ src/
                                 give/refine input (hard zero-axiom contract).
     Literate.hs                 .lagda.md code-block detection + the
                                 isInsideCode splice guard.
-    Edit.hs                     splice / clause re-indent / unified-diff
-                                helpers (Data.Text char offsets).
+    Edit.hs                     splice / multi-range splice / clause
+                                re-indent / unified-diff helpers (Data.Text
+                                char offsets).
     Tools.hs                    the interaction tool runners + session
                                 registry management + interactTools list.
+                                give_many fills N goals against one live
+                                session (survivors keep interaction ids
+                                without a reload) → one combined diff, atomic.
 
 src-agda-graph/AgdaGraph/       Shared library.
   Interaction/Protocol.hs       FromJSON mirror of the --interaction-json
@@ -352,14 +367,26 @@ plugin/                         Claude Code plugin bundling the
   (`AgdaInteract.Session`), but it must stay goal-id-free.** The
   daemon's per-session goal-id state lives in `AgdaInteract.Registry`
   (`SessionEntry`), NOT in `Session`, so `agda-goals` can reuse the bare
-  transport without pulling in `AgdaInteract.GoalId`. `agda-goals` now
-  drives all files over ONE persistent process (`runDriverBatch`); its
-  goal extraction is **byte-identical** to the old one-process-per-file
-  driver — a `Cmd_load` yields the same `AllGoalsWarnings` whether the
-  process is fresh or reused, and `scanReplies` is unchanged. That
-  byte-identity is the acceptance test for the unification; re-check it
-  (human + `--format=json`) against a known corpus if you touch the
-  driver or the session reader.
+  transport without pulling in `AgdaInteract.GoalId`. `agda-goals` drives
+  files over a POOL of these sessions (`runDriverBatch` → `runPooled`,
+  work-stealing queue, one session per RTS capability; `runSerial` at
+  `-N1`); its goal extraction is **byte-identical** to the old
+  one-process-per-file driver AND independent of the pool size because
+  results are reassembled in input order — a `Cmd_load` yields the same
+  `AllGoalsWarnings` whether the process is fresh or reused, and
+  `scanReplies` is unchanged. That byte-identity (human + `--format=json`,
+  `-N1` vs `-NK`) is the acceptance test; re-check it against a known
+  corpus if you touch the driver, the pool, or the session reader.
+
+- **Cold start must degrade, not go dark.** Serve-stale only protects you
+  *after* one good build. When the FIRST build emits no graph (a corpus
+  broken from the start), `ensureFresh`/`firstBuild` records an actionable
+  diagnostic in `ssColdError` and serves it from every tool + `status`
+  (instead of echoing the producer's raw `exit`), while the background
+  worker keeps retrying so the daemon self-heals once the corpus builds —
+  no reconnect. Don't "simplify" the cold path back into a synchronous
+  re-build on every query (that blocks the stdio loop on a ~minutes-long
+  agda-deps run, repeatedly).
 
 ## v2 graph.json schema (consumer view)
 

@@ -280,9 +280,22 @@ instance FromJSON ExpandedGraph where
     if v /= 2
       then fail $ "expected schema v: 2, got: " ++ show v
       else do
+        -- The expanded form always emits @"mode":"expanded"@; the packed
+        -- form emits no @mode@ key at all (so it defaults to "packed"
+        -- here). Refuse packed with an ACTIONABLE message: it is the
+        -- HTML-viewer wire form and drops the per-definition fields the
+        -- analyses need (kind, source line, access, type signature, and
+        -- subterm hashes), so it cannot back these tools — see
+        -- test/packed/README.md.
         mode <- o .:? "mode" .!= ("packed" :: Text)
         if mode /= "expanded"
-          then fail $ "expected --json-mode=expanded, got: " ++ T.unpack mode
+          then fail $
+            "this graph is --json-mode=" ++ T.unpack mode ++ " (the HTML-viewer \
+            \form). The analysis tools need the expanded form: packed omits \
+            \per-definition kind, source line, access, type signature, and \
+            \subterm hashes. Re-generate with `agda-deps --json-mode=expanded` \
+            \(the agda-explore daemon does this by default). See \
+            \test/packed/README.md for the packed layout and the gap."
           else do
             defs   <- o .:  "definitions"
             edges  <- o .:  "definitionEdges"

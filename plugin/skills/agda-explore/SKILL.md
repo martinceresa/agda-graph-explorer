@@ -174,6 +174,7 @@ drives Agda's own hole workflow and validates every step:
 | Case-split a goal on a variable                        | `case_split`   |
 | Refine a goal by a head symbol (`f ?`)                 | `refine`       |
 | Fill a goal with a complete term (type-checked)        | `give`         |
+| Fill SEVERAL independent goals in one load (one diff)  | `give_many`    |
 
 Workflow: `load <file>` first — it returns goals as `g0, g1, …` with their
 `(line:col)`. Pass an id to the other tools. `case_split` / `refine` /
@@ -184,7 +185,12 @@ preserved while a hole's position is unchanged), so always re-`load` after
 an edit and re-select — matching on the reported `(line:col)` is the robust
 way to track a specific goal. A `give` whose term doesn't typecheck
 comes back as the localized Agda error with the file untouched, so you can
-iterate safely. Note: the bridge **refuses** any `give` / `refine` that uses
+iterate safely. When you have several *independent* holes to fill and the
+module is slow to load, prefer **`give_many`** (a list of `{goal, term}`):
+it fills them all against one session load and returns a single combined
+diff, instead of paying a reload between each — and it's atomic (if any
+term is rejected, nothing is applied and the error names the goal). Note:
+the bridge **refuses** any `give` / `refine` / `give_many` that uses
 `postulate`, a termination/coverage/`OPTIONS` pragma, or another escape
 hatch — it will not close a goal by weakening soundness; supply a real term.
 `auto` (Mimer) is unavailable on Agda 2.9.0 (the interaction reader rejects

@@ -33,8 +33,12 @@ module AgdaGoals.Driver
   ) where
 
 import           Control.Applicative    ( (<|>) )
+import           Control.Concurrent       ( getNumCapabilities )
+import           Control.Concurrent.Async ( mapConcurrently )
+import           Control.Concurrent.MVar  ( modifyMVar, newMVar )
 import           Control.Monad          ( forM, when )
-import           Data.IORef             ( newIORef, readIORef, writeIORef )
+import           Data.IORef             ( IORef, newIORef, readIORef, writeIORef )
+import           Data.List              ( sortOn )
 import           Data.Text              ( Text )
 import qualified Data.Text              as T
 import           System.FilePath        ( takeBaseName )
@@ -139,33 +143,87 @@ goalsTimeoutMicros = 600 * 1000000   -- 10 min per module
 -- reports a 'DriverError'. If @agda@ can't be started at all, every file
 -- reports 'MissingBinary' (matching the per-file one-shot behaviour).
 runDriverBatch :: DriverConfig -> [FilePath] -> IO [DriverResult]
-runDriverBatch _    []              = pure []
-runDriverBatch tmpl files@(first:_) = do
-  let scfg = SessionConfig
-               { scAgdaBin       = dcAgdaBin tmpl
-               , scExtraArgs     = dcExtraArgs tmpl
-               , scTimeoutMicros = goalsTimeoutMicros
-               }
+runDriverBatch _    []    = pure []
+runDriverBatch tmpl files = do
+  -- One agda session per worker. The pool size follows the RTS capability
+  -- count (the binary is built @-with-rtsopts=-N@; run @+RTS -N4@ to cap
+  -- it — e.g. to bound memory on a heavy corpus). @-N1@ ⇒ a single serial
+  -- session, byte-identical to the pre-parallel driver.
+  caps <- getNumCapabilities
+  let nWorkers = max 1 (min caps (length files))
+  if nWorkers <= 1 then runSerial tmpl files
+                   else runPooled tmpl nWorkers files
+
+-- | The IOTCM session config shared by every worker.
+mkSessionConfig :: DriverConfig -> SessionConfig
+mkSessionConfig tmpl = SessionConfig
+  { scAgdaBin       = dcAgdaBin tmpl
+  , scExtraArgs     = dcExtraArgs tmpl
+  , scTimeoutMicros = goalsTimeoutMicros
+  }
+
+-- | Drive all files through one persistent session, in order.
+runSerial :: DriverConfig -> [FilePath] -> IO [DriverResult]
+runSerial _    []              = pure []
+runSerial tmpl files@(first:_) = do
+  let scfg = mkSessionConfig tmpl
   est <- startSession scfg first
   case est of
-    Left err ->
-      pure [ DriverError (MissingBinary (dcAgdaBin tmpl) (T.unpack err)) | _ <- files ]
-    Right sess0 -> do
-      ref     <- newIORef sess0
-      results <- forM files $ \f -> do
-        sess  <- readIORef ref
-        alive <- sessionAlive sess
-        sess' <- if alive
-                   then pure sess
-                   else do                       -- prior file poisoned it: respawn
-                     closeSession sess
-                     r <- startSession scfg f
-                     case r of
-                       Right s -> writeIORef ref s >> pure s
-                       Left _  -> pure sess       -- respawn failed; load will SendDied
-        loadInSession sess' (tmpl { dcModuleFile = f })
+    Left err -> pure [ DriverError (MissingBinary (dcAgdaBin tmpl) (T.unpack err)) | _ <- files ]
+    Right s0 -> do
+      ref     <- newIORef s0
+      results <- forM files (loadOnWorker ref scfg tmpl)
       readIORef ref >>= closeSession
       pure results
+
+-- | Drive files through @nWorkers@ persistent sessions pulling from a
+-- shared queue (work-stealing — load balances skewed typecheck times like
+-- a 60s Lemma5 against trivial leaves). Results are reassembled in input
+-- order, so the output is independent of which worker handled which file:
+-- byte-identical to 'runSerial' for any @nWorkers@.
+runPooled :: DriverConfig -> Int -> [FilePath] -> IO [DriverResult]
+runPooled tmpl nWorkers files = do
+  let scfg = mkSessionConfig tmpl
+  queue <- newMVar (zip [0 :: Int ..] files)
+  let pull = modifyMVar queue $ \q -> pure $ case q of
+        []     -> ([], Nothing)
+        (x:xs) -> (xs, Just x)
+      -- A worker that couldn't even start agda drains its share as
+      -- MissingBinary (matches the serial all-files-fail behaviour).
+      drainMissing err = go []
+        where go acc = pull >>= \m -> case m of
+                Nothing     -> pure acc
+                Just (i, _) -> go ((i, DriverError (MissingBinary (dcAgdaBin tmpl) (T.unpack err))) : acc)
+      worker = do
+        est <- startSession scfg "agda-goals-worker"
+        case est of
+          Left err -> drainMissing err
+          Right s0 -> do
+            ref <- newIORef s0
+            let loop acc = pull >>= \m -> case m of
+                  Nothing     -> readIORef ref >>= closeSession >> pure acc
+                  Just (i, f) -> do
+                    res <- loadOnWorker ref scfg tmpl f
+                    loop ((i, res) : acc)
+            loop []
+  perWorker <- mapConcurrently (const worker) [1 .. nWorkers]
+  pure (map snd (sortOn fst (concat perWorker)))
+
+-- | Load one module on a worker's session, respawning first if a previous
+-- file poisoned it (timeout / crash).
+loadOnWorker :: IORef Session -> SessionConfig -> DriverConfig -> FilePath -> IO DriverResult
+loadOnWorker ref scfg tmpl f = do
+  sess  <- readIORef ref
+  alive <- sessionAlive sess
+  sess' <- if alive
+             then pure sess
+             else do
+               closeSession sess
+               r <- startSession scfg f
+               case r of
+                 Right s -> writeIORef ref s >> pure s
+                 Left _  -> pure sess        -- respawn failed; the load will SendDied
+  loadInSession sess' (tmpl { dcModuleFile = f })
 
 -- | Drive a single module: one process, loaded once, then closed. A thin
 -- wrapper over 'runDriverBatch' so the one-shot and batch paths share the

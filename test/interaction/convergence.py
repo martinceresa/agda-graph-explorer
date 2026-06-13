@@ -142,6 +142,20 @@ def main():
     try:
         # 1. give-only convergence on a plain .agda module.
         converge(d, scratch, "Nat.agda", {10: "1", 13: "2", 16: "suc n"})
+        # 1b. give_many: fill all of Nat.agda's holes in ONE session load,
+        #     apply the single combined diff, and typecheck.
+        shutil.copy(os.path.join(PROJ, "Nat.agda"), os.path.join(scratch, "Nat.agda"))  # restore holes
+        natp = os.path.join(scratch, "Nat.agda")
+        text, _ = d.tool("load", {"file": natp})
+        terms = {10: "1", 13: "2", 16: "suc n"}
+        gives = [{"goal": g, "term": terms[ln]} for g, _ty, ln in sorted(goals(text), key=lambda t: t[2])]
+        out, err = d.tool("give_many", {"file": natp, "gives": gives})
+        check("give_many: one combined diff, no error", not err, out)
+        check("give_many: combined diff applies", apply_diff(natp, out), out)
+        text2, _ = d.tool("load", {"file": natp})
+        check("give_many: 0 goals after applying the batch", len(goals(text2)) == 0, text2)
+        okb, logb = agda_clean(scratch, "Nat.agda")
+        check("give_many: agda typechecks the batch-filled module", okb, logb[-300:])
         # 2. give convergence inside a literate .lagda.md module (edit must
         #    land in the code fence; agda must typecheck the literate file).
         converge(d, scratch, "Doc.lagda.md", {12: "6"})

@@ -53,15 +53,13 @@ For shipped work see [Changelog.md](Changelog.md).
        resolution differ between surface and internal forms).
   Both paths documented in `AgdaGoals.Canon`'s module haddock.
 
-- [ ] **Round-6 P5 follow-up: corpus scaling.** Still single-threaded,
-  but as of 2026-06-12 `agda-goals` drives all files over **one
-  persistent `agda` process** (`AgdaInteract.Session`, `runDriverBatch`)
-  instead of respawning per file — so the `.agdai` cache is reused across
-  the corpus. True parallelism (several Agda sessions via
-  `Control.Concurrent.Async.mapConcurrently` with a bounded pool,
-  mirroring `agda-unused`'s `getNumCapabilities` pattern) is still open;
-  the determinism / byte-identical acceptance test must hold under
-  `+RTS -NK`.
+- [x] **Round-6 P5 follow-up: corpus scaling.** Shipped 2026-06-13.
+  `agda-goals` drives the root files over a pool of persistent
+  `agda --interaction-json` sessions (`runDriverBatch` → `runPooled`, a
+  work-stealing queue, pool size = `getNumCapabilities`; `+RTS -NK`
+  controls it). Results reassembled in input order, so output is
+  byte-identical between `+RTS -N1` and `-NK` (human and `--format=json`)
+  — verified. `-N1` falls back to the single-session serial path.
 
 - [x] **Round-6 P5 follow-up: protocol-skew fixture.** Shipped
   2026-06-12 (with the write-side interaction bridge). Golden

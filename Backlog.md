@@ -223,6 +223,154 @@ consumers that isn't ready to be picked up. For shipped work see
   Natural to land alongside or just after P5, since they share the
   driver.
 
+- **Scratch / staging buffer + `promote` — a first-class write-bridge
+  mode (proposed 2026-06-13).** Direct extension of the shipped
+  write-side interaction bridge above. Today, adding a *new* definition
+  through the bridge means editing the real target module to drop in a
+  signature + `?` hole, then `load` / `give` / `refine` against it — so
+  the real file sits half-written for the whole construction, and every
+  `load` re-type-checks that module's *full* import closure. A staging
+  buffer inverts this: the agent constructs and validates a definition
+  in an *ephemeral scratch module*, isolated from real source, and only
+  materialises it into a real file with an explicit `promote` once it
+  type-checks. Files become **late-bound** — the real module is touched
+  exactly once, with a finished, Agda-validated definition.
+
+  This is the achievable form of a "graph-first, file-last" editing
+  model (explored in a session note 2026-06-13). The fully-general
+  version — edit the dependency graph as if it were the source,
+  serialise to a file only when needed, Unison-style — does **not** fit
+  Agda: the graph `agda-explore` serves is a *derived, lossy
+  read-projection* (the producer emits it *after* elaboration; it does
+  not round-trip to surface syntax — layout, comments, `where`-structure
+  are gone), and Agda only type-checks *files* — there is no "validate a
+  free-floating node" primitive. So the smallest unit Agda can validate
+  is a definition-in-a-module, and a scratch module is exactly that: the
+  sandbox where construction happens, with the graph used to *plan*
+  (which imports, where it belongs, does it already exist) rather than
+  to *edit*.
+
+  **Wins**
+    - **No broken intermediate state in real modules.** The construction
+      churn (hole → case_split → refine → give, often with dead ends)
+      happens in the scratch buffer; the real file only ever sees the
+      finished definition via `promote`. Abandoning a dead end is a
+      `discard`, not a multi-step revert of real source.
+    - **Cheap iteration on heavy modules.** A scratch module's import
+      closure is tiny, so each `load` / `give` re-check is fast. Today
+      the same loop re-type-checks the target's *full* closure every
+      step — and recheck is the expensive part on this corpus (the
+      bridge's own cost open-question flags Lemma5-class `with`-hotspots).
+      The expensive real-module recheck then happens *once*, at `promote`.
+    - **Defers placement / scope commitment.** The agent can build and
+      validate before deciding which module the definition lives in and
+      where in the file — the decision a free-floating "node" was meant
+      to defer — made safe by re-validating in the real target at promote
+      time.
+    - **Matches how an agent works.** Agents reason over text but the
+      task is a validated structured artifact; the natural division is
+      graph-first *planning* (`find_lemma` to avoid duplication,
+      `callees` / `roots` for required imports / axioms, `impact` for
+      consequences) + scratch construction + a single `promote` commit.
+      It turns the ad-hoc "make a scratch `.agda`, fill it, hand-splice
+      it" dance an agent does today into a supported workflow.
+    - **Same safety contract, extended.** `promote` returns a unified
+      diff and never writes (like every other mutator), re-validates in
+      the real target so scope / instance differences are caught, and
+      preserves the zero-postulate / no-pragma escape-hatch invariant
+      across the move.
+
+  **Proposed surface** (on the `agda-explore` server, beside the existing
+  bridge tools)
+    - `stage [target=<module>]` → open an ephemeral scratch module (under
+      `.agda-explore/scratch/`, gitignored, *outside* the source roots so
+      it never enters the graph), optionally seeded with `<target>`'s
+      `open import …` preamble so scratch scope approximates the
+      destination. Returns a scratch handle.
+    - existing `load` / `goal_type` / `goal_context` / `give` / `refine` /
+      `case_split` / `infer` / `normalize` operate on the scratch handle
+      unchanged (they already take a `file`).
+    - `promote <scratch> <target> [--after <anchor> | --before <anchor>]`
+      → splice the validated definition(s) into `<target>` at the chosen
+      anchor, insert any missing imports (dedup + ordered), map into the
+      `.lagda.md` code fence when literate, then `load` the *real* target
+      to re-validate and return the unified diff. On a re-validation
+      failure (scope / instance / ordering facts the scratch didn't
+      capture) report the localized error and leave both files untouched.
+    - `discard <scratch>` → drop the buffer.
+
+  **Open questions**
+    - Fidelity of scratch scope vs. target: module parameters,
+      `private`-scoped opens, and generalizable variables can't always be
+      reproduced in a flat scratch module, so some definitions are only
+      validatable in-place — detect this and fall back to the existing
+      in-file hole workflow rather than promising a clean promote.
+    - Scratch lifetime / cleanup: session-scoped temp vs. gitignored
+      on disk, and reclaiming abandoned buffers.
+    - Multi-definition staging + dependency ordering at promote (a helper
+      lemma plus the def that uses it, spliced in the right order, perhaps
+      into different modules).
+    - Interplay with the per-module session pool (the bridge's other open
+      question): scratch sessions are cheap and many; `promote` triggers
+      the one heavy real recheck — so promote is the natural batching
+      point.
+
+  **Pick up when** the shipped write bridge is under real
+  proof-construction load — this is a direct ergonomic multiplier on it,
+  most valuable exactly where the bridge is weakest today (heavy-module
+  recheck cost) and for autonomous agents (placement deferral + isolated
+  churn). Natural follow-on to the bridge; shares its session driver.
+
+- **Cold-start fallback — degrade instead of going dark when the *first*
+  build emits no graph (found 2026-06-12).** Companion to the
+  producer-side item in `AgdaDependencies/Backlog.md` ("`--keep-going`
+  emits *no* graph on a real broken corpus"). When `agda-deps` emits no
+  `deps.json` (e.g. an entry whose closure transitively imports one
+  non-type-checking module — a WIP proof, a scratch `TestTrace`), the
+  daemon's behaviour splits on whether a snapshot already exists:
+
+    - *Rebuild failure with a prior snapshot* — **already handled well.**
+      `rebuildLocked.doBuild` keeps serving the stale snapshot and
+      re-dirties for a backoff retry (`AgdaMcp.State`:729–737), so a
+      broken edit mid-session never blanks the tools. Good. Leave it.
+    - *First build failure (no snapshot yet)* — **the gap.** `doBuild`'s
+      `Nothing` branch returns `Left err` (`State.hs`:738); `firstBuild`
+      (:692–695) propagates it, `ssLoaded` stays `Nothing`, and *every*
+      graph-backed tool then fails with the raw
+      `agda-deps produced no graph for … (exit 120)` from `runOne`
+      (:561). Serve-stale only protects you *after* one good build, so a
+      corpus that is broken from the very first load goes fully dark.
+      This was the observed behaviour on the Jolteon-FastBFT corpus: the
+      auto-discovered `Main.lagda.md` entry never builds (its closure
+      hits `TestTrace.agda:185`), so the daemon had nothing to serve and
+      `search` / `locate` / `impact` / … all returned the producer error.
+
+  **Suggested handling (consumer side):**
+    1. **Once the producer guarantees a file** (its fix #1: always write
+       at least the precomputed module-level graph + `failedModules[]`),
+       the consumer change is tiny — `loadLoaded` succeeds on a
+       defs-light graph and normal serve-stale takes over. Make sure a
+       *file-exists-but-zero-defs* graph is treated as a valid snapshot,
+       not as failure.
+    2. **Until then, surface an actionable cold-start diagnostic** rather
+       than echoing `exit 120` from every tool: have `status` (and a
+       one-line tool footer) report "first build failed — module X does
+       not type-check; fix it or set `entries:` to a clean module", and
+       keep the background worker retrying (the dirty/backoff machinery
+       in `watchWorker` already exists) so the daemon **self-heals** when
+       the user fixes the module — no reconnect needed.
+    3. **Note the multi-entry interaction.** `entries:` (shipped
+       2026-06-12, unioned via `AgdaGraph.Union`) is already the manual
+       escape hatch — a clean entry can be listed so a broken default
+       entry doesn't zero the daemon. Cold-start degradation should
+       compose with it: one entry failing to build should not discard the
+       graphs the other entries produced.
+
+  **Pick up when:** alongside or just after the producer's partial-graph
+  fix — the two together are what make `agda-explore` usable on an
+  actively-edited (hence usually-somewhere-broken) proof corpus, its
+  primary use case.
+
 ---
 
 ## From the consumer-project agent-usage analysis (2026-06-12) — SHIPPED
@@ -256,9 +404,20 @@ it. Producer-side items live in `AgdaDependencies/Backlog.md`.
 - `agda-unused`: aggregation output (`--group-by=dir|file|kind`,
   `--count-only`) on the CLI and the MCP tool.
 
-- **Still deferred — `agda-explore`: load the packed (~5×-smaller)
-  graph form.** The serve-stale work removed the latency cliff; loading
-  the packed form instead of the expanded one is an orthogonal,
-  larger schema-decoder change (`AgdaGraph.Schema` currently hard-fails
-  any `mode /= "expanded"`). Worth revisiting if graph size itself
-  becomes the bottleneck on a large corpus.
+- **Still deferred — load the packed (~5×-smaller) graph form — but it is
+  PRODUCER-GATED (confirmed 2026-06-13).** Investigated: the packed form's
+  `defs` carries only `names`/`modules`/`states`/`x`/`y`; it **omits the
+  per-definition `kind`, source `line`, `access`, type signature, and
+  subterm hashes** the analyses need (it is the HTML-viewer wire form). So
+  a consumer-only packed load would silently cripple `type_of` /
+  `similar_*` / `find_lemma` / `unused` / `locate`-line / `search --kind` —
+  unacceptable. `AgdaGraph.Schema` now refuses packed with an *actionable*
+  error (naming the missing fields + the fix) instead of an opaque hard
+  fail, and the layout + gap are documented in `test/packed/README.md`
+  with a committed example pair (`test/packed/Nat.{packed,expanded}.json`).
+  **The real fix is producer-side:** an `agda-deps` `packed-complete` mode
+  that keeps the compact CSR+base64 encoding *and* the analytical fields;
+  the consumer change is then a small fast decoder (base64-LE + CSR via
+  `base64-bytestring` + a `Storable` cast — not a hand-rolled bit loop, to
+  stay fast on a 174 MB graph) validated against the expanded form. Specced
+  as the producer item "Packed-complete" in `AgdaDependencies/TODO.md`.

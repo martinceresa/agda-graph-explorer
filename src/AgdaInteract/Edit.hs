@@ -10,12 +10,15 @@
 -- 'Data.Text' character space.
 module AgdaInteract.Edit
   ( spliceRange
+  , spliceRanges
   , lineSpanAt
   , lineIndentAt
   , renderClausesAt
   , unifiedDiff
   ) where
 
+import           Data.List ( sortBy )
+import           Data.Ord  ( comparing )
 import           Data.Text ( Text )
 import qualified Data.Text as T
 
@@ -24,6 +27,25 @@ import qualified Data.Text as T
 spliceRange :: Text -> Int -> Int -> Text -> Text
 spliceRange txt start end repl =
   T.take (start - 1) txt <> repl <> T.drop (end - 1) txt
+
+-- | Apply several replacements (1-based half-open @[start, end)@ char
+-- ranges) to a text in one shot, bottom-up so an earlier edit never
+-- shifts a later one's offsets. 'Left' if any two ranges overlap — the
+-- caller is splicing independent holes, so an overlap is a bug worth
+-- surfacing rather than silently corrupting.
+spliceRanges :: Text -> [(Int, Int, Text)] -> Either Text Text
+spliceRanges txt edits =
+  case overlap sorted of
+    Just (a, b) -> Left ("refusing to apply overlapping edits (ranges "
+                           <> tshow a <> " and " <> tshow b <> ")")
+    Nothing     -> Right (foldr (\(s, e, r) t -> spliceRange t s e r) txt sorted)
+  where
+    sorted = sortBy (comparing (\(s, _, _) -> s)) edits
+    overlap (x@(_, e1, _) : y@(s2, _, _) : rest)
+      | e1 > s2   = Just (x, y)
+      | otherwise = overlap (y : rest)
+    overlap _ = Nothing
+    tshow (s, e, _) = "[" <> T.pack (show s) <> "," <> T.pack (show e) <> ")"
 
 -- | The 1-based half-open span @[lineStart, newlinePos)@ of the line
 -- containing the given 1-based character offset — i.e. the line's

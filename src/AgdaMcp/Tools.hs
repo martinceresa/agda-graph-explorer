@@ -448,6 +448,7 @@ resolveScope c ld (Just s) = do
 statusText :: ServerState -> IO Text
 statusText ss = do
   cur      <- readIORef (ssLoaded ss)
+  cold     <- readIORef (ssColdError ss)
   bin      <- binaryIdent
   banner   <- stalenessBanner ss
   watching <- isWatching ss
@@ -483,7 +484,10 @@ statusText ss = do
         , "  term hashes:  " <> (if cfgWithHashes c then "on" else "off")
         ]
   pure $ banner <> base <> "\n" <> case cur of
-    Nothing -> "No graph built yet — it will build on the first query (or call `rebuild`)."
+    Nothing -> case cold of
+      Just diag -> "Cold start — no graph yet:\n  " <> diag
+                     <> "\n(retrying in the background; will self-heal once the corpus builds)"
+      Nothing   -> "No graph built yet — it will build on the first query (or call `rebuild`)."
     Just ld -> "Loaded snapshot built at " <> T.pack (show (ldBuiltAt ld)) <> ".\n"
                  <> "  graph built by: " <> fromMaybe "(unknown — older producer)" (ldProducer ld) <> "\n"
                  <> "  node-key format: v" <> T.pack (show (ldNodeKeyV ld))

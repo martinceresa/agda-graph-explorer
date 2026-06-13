@@ -81,6 +81,7 @@ executable agda-goals
   build-depends:       base >= 4.10 && < 4.23,
                        agda-graph,
                        aeson >= 2.0 && < 3,
+                       async >= 2.2 && < 2.3,
                        bytestring,
                        containers,
                        deepseq,

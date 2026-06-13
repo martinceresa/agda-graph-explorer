@@ -27,3 +27,6 @@ OptSite/
 
 # Note: .agda-explore/deps.json IS tracked here as a query/test fixture
 # (it is not this project's own generated graph — this repo links no Agda).
+
+# Runtime query telemetry written by the agda-explore daemon (not reproducible).
+.agda-explore/query-log.jsonl
