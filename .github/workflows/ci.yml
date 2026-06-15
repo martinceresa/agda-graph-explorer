@@ -74,7 +74,17 @@ jobs:
         echo "determinism OK"
 
     - name: agda-unused — smoke over the fixture
-      run: cabal run -v0 agda-unused -- --json=test/deps.json --json-out .
+      # test/deps.json is a producer-side fixture whose moduleFiles are
+      # absolute paths into the agda-deps repo, so source-scanning this
+      # consumer repo can never match them — and agda-unused now hard-errors
+      # on such a mis-scoped run (scanned files, none matched the graph)
+      # rather than printing a deceptive `# total: 0`. Scan an isolated dir
+      # with no .agda sources: this exercises load + parse + emit (exit 0)
+      # without tripping the guard, and stays green regardless of any
+      # incidental .agda fixtures elsewhere in the tree (e.g. test/interaction).
+      run: |
+        tmp="$(mktemp -d)"
+        cabal run -v0 agda-unused -- --json=test/deps.json --json-out "$tmp"
 
     - name: agda-explore — binary smoke
       run: cabal run -v0 agda-explore -- --version
