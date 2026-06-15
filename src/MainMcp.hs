@@ -35,6 +35,7 @@ import           System.IO          (hPutStrLn, stderr)
 import           AgdaMcp.Config     (Opts (..), applyConfig,
                                      discoverConfigPath, extractConfigArg,
                                      loadConfig, orderNub)
+import           AgdaMcp.Inspect    (startInspector)
 import           AgdaMcp.Rpc        (runStdioLoop)
 import           AgdaMcp.State
 import           AgdaInteract.Tools (closeAllSessions)
@@ -56,6 +57,7 @@ defOpts = Opts
   , oMinDepth = 3, oAuto = True, oWatch = True, oQueryLog = True
   , oAutoResolve = True
   , oEnableInteract = False, oAgdaBin = Nothing, oInteractArgs = []
+  , oInspect = False, oInspectPort = 7000
   , oHelp = False, oVer = False
   }
 
@@ -100,6 +102,8 @@ parseOpts (x : xs) o = case x of
   "--enable-interact" -> parseOpts xs o { oEnableInteract = True }
   "--agda-bin"        -> need $ \v -> o { oAgdaBin = Just v }
   "--agda-arg"        -> need $ \v -> o { oInteractArgs = oInteractArgs o ++ [v] }
+  "--inspect"         -> parseOpts xs o { oInspect = True }
+  "--inspect-port"    -> need $ \v -> o { oInspect = True, oInspectPort = readInt v (oInspectPort o) }
   _ | isAgdaFile x    -> parseOpts xs o { oEntries = oEntries o ++ [x] }
     | otherwise       -> Left ("unknown argument: " ++ x)
   where
@@ -204,6 +208,8 @@ buildConfig o = do
         , cfgEnableInteract = oEnableInteract o
         , cfgAgdaBin      = oAgdaBin o
         , cfgInteractArgs = oInteractArgs o
+        , cfgInspect      = oInspect o
+        , cfgInspectPort  = oInspectPort o
         , cfgIncludes     = bin
         }
       preloaded g incl = do
@@ -300,6 +306,11 @@ usage = unlines
   , "  --agda-bin P          Path to agda for interaction sessions (else $AGDA_BIN, $PATH)."
   , "  --agda-arg ARG        Extra flag for `agda --interaction-json` (repeatable;"
   , "                        e.g. --agda-arg --safe)."
+  , "  --inspect             Serve a localhost web inspector (activity feed + live"
+  , "                        editing view) at http://127.0.0.1:7000 over Server-Sent"
+  , "                        Events. Off by default; localhost-only, no auth."
+  , "  --inspect-port N      Inspector start port (implies --inspect; probes upward"
+  , "                        from N if busy, so several projects don't clash)."
   , "  --config FILE         Load this .agda-explore.yml (else discovered; see below)."
   , "  -h, --help            This help."
   , "  -V, --version         Version."
@@ -339,10 +350,30 @@ main = do
           cfg <- buildConfig finalOpts
           ss  <- newServerState cfg
           startWatcher ss
+          startInspect ss cfg
           hPutStrLn stderr ("agda-explore: ready (" ++ modeDesc cfg ++ ")")
           -- Reap any live interaction sessions when the stdio loop ends
           -- (stdin EOF) or throws, so child agda processes aren't orphaned.
           runStdioLoop (dispatch ss) `finally` closeAllSessions ss
+
+-- | Start the localhost web inspector when @--inspect@ is on. Binds the
+-- listening socket (probing upward from 'cfgInspectPort' so several daemons
+-- coexist) and reports the actual URL on stderr. A no-op otherwise; a bind
+-- failure is logged but never fatal — the daemon serves stdio regardless.
+startInspect :: ServerState -> Config -> IO ()
+startInspect ss cfg = case ssInspect ss of
+  Nothing  -> pure ()
+  Just hub -> do
+    mport <- startInspector hub (cfgInspectPort cfg) (cfgProjectRoot cfg)
+    case mport of
+      Just p  -> hPutStrLn stderr
+        ("agda-explore: inspector at http://127.0.0.1:" ++ show p
+           ++ (if p /= cfgInspectPort cfg
+                 then " (port " ++ show (cfgInspectPort cfg) ++ " busy)"
+                 else ""))
+      Nothing -> hPutStrLn stderr
+        ("agda-explore: inspector could not bind a port near "
+           ++ show (cfgInspectPort cfg) ++ "; continuing without it.")
 
 -- | Discover + load a config file and overlay it onto 'defOpts',
 -- returning the seed 'Opts' and the applied path (for the breadcrumb).

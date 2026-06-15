@@ -38,6 +38,10 @@ the running binary (path + mtime) and warns with a `⚠` line if a newer
 `agda-explore` build is on disk — a live daemon can't swap its own
 executable, so reconnect (`/mcp`) to pick it up.
 
+(Operator-facing only: if the server was started with `--inspect`, a human
+can watch your tool calls and proposed edits live in a browser. This doesn't
+change how you use the tools — just query and edit as normal.)
+
 If a query reports "no entry configured", the project wasn't auto-detected:
 set `AGDA_EXPLORE_ENTRY` (the entry module, e.g. `agda-src/Main.lagda.md`)
 and `AGDA_EXPLORE_INCLUDE` (the include dir) in the environment, or pass a

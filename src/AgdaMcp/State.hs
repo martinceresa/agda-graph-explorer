@@ -82,6 +82,7 @@ import           AgdaGraph.Similarity (SigBodyFingerprints,
                                        silhouetteDefaultWlK, subtermMultisetsVec)
 import           AgdaGraph.WL         (Fingerprint)
 import           AgdaInteract.Registry (SessionEntry (..))
+import           AgdaMcp.Inspect      (InspectHub, newInspectHub)
 
 -- | How the daemon (re)builds and reads the graph.
 data Config = Config
@@ -112,6 +113,8 @@ data Config = Config
   , cfgEnableInteract :: !Bool           -- ^ expose the write-side interaction-bridge tools (load/goal_type/give/…).
   , cfgAgdaBin      :: !(Maybe FilePath) -- ^ explicit @agda@ path for interaction sessions (else env/$PATH).
   , cfgInteractArgs :: ![String]         -- ^ extra flags passed to @agda --interaction-json@ (e.g. @--safe@).
+  , cfgInspect      :: !Bool             -- ^ run the localhost web inspector (@--inspect@).
+  , cfgInspectPort  :: !Int              -- ^ start port for the inspector (probes upward on conflict).
   }
 
 defaultConfig :: Config
@@ -136,6 +139,8 @@ defaultConfig = Config
   , cfgEnableInteract = False
   , cfgAgdaBin      = Nothing
   , cfgInteractArgs = []
+  , cfgInspect      = False
+  , cfgInspectPort  = 7000
   }
 
 -- | A cheap fingerprint of the source tree: file count + newest mtime.
@@ -237,6 +242,12 @@ data ServerState = ServerState
     -- daemon self-heals once the offending module is fixed — no reconnect.
     -- Cleared on the first successful build. (Serve-stale only covers the
     -- /after one good build/ case; this covers the cold start.)
+  , ssInspect     :: !(Maybe InspectHub)
+    -- ^ The localhost web-inspector event bus, or 'Nothing' when
+    -- @--inspect@ is off. When 'Nothing' every 'AgdaMcp.Inspect.emitInspect'
+    -- is a no-op and no socket/thread exists, so the feature is inert. The
+    -- listening socket itself is started separately in @Main@
+    -- ('AgdaMcp.Inspect.startInspector').
   }
 
 newServerState :: Config -> IO ServerState
@@ -253,6 +264,7 @@ newServerState c =
     <*> newMVar ()
     <*> newMVar M.empty
     <*> newIORef Nothing
+    <*> (if cfgInspect c then Just <$> newInspectHub else pure Nothing)
 
 -- ---------------------------------------------------------------------
 -- Source scanning

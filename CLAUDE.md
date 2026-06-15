@@ -48,7 +48,14 @@ The repo ships one shared library and four executables:
   never writes the file). This is a *second, independent* subprocess
   model beside the graph daemon: interaction tools reflect live on-disk
   state and deliberately bypass `ensureFresh`. Needs `agda` on `$PATH`
-  (or `--agda-bin`).
+  (or `--agda-bin`). Under `--inspect` (or `--inspect-port N`) it *also*
+  serves an opt-in **localhost web inspector** — a hand-rolled HTTP +
+  Server-Sent-Events server (`AgdaMcp.Inspect`, on the `network` dep) that
+  streams a live activity feed (every `tools/call`) and an editing view
+  (the loaded file + each proposed diff) to a browser. Off by default and
+  inert when off; localhost-only; a *side channel* that never touches the
+  JSON-RPC stdout. Probes upward from the start port so several daemons
+  coexist.
 
 A Claude Code plugin under `plugin/` bundles the `agda-explore` server
 with a skill and two Agda agents. See [plugin/README.md](plugin/README.md).
@@ -204,6 +211,19 @@ src/
     ToolDef.hs                  shared Tool/ToolRunner record + schema
                                 builders + arg accessors (so Tools.hs and
                                 AgdaInteract.Tools share them, no cycle).
+    Inspect.hs                  opt-in localhost web inspector (--inspect):
+                                hand-rolled HTTP + Server-Sent-Events server
+                                (on `network`) + the broadcast event bus
+                                (unbounded TChan fan-out + bounded ring) +
+                                the self-contained page. emitInspect is a
+                                no-op when the hub is Nothing (off ⇒ inert);
+                                a side channel that never writes stdout. Each
+                                connection leads with a `server` identity
+                                frame (project root + bound port) so a page
+                                is never anonymous — essential when several
+                                daemons each take a probed port. Imports no
+                                project module (so State can hold the hub
+                                without a cycle).
 
   AgdaInteract/                 Write-side interaction bridge (agda-explore
                                 only; the long-lived agda session model).

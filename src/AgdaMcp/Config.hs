@@ -33,7 +33,7 @@ module AgdaMcp.Config
 
 import           Control.Exception (SomeException, displayException, try)
 import           Data.Aeson        (FromJSON (..), withObject, (.:?))
-import           Data.Maybe        (fromMaybe)
+import           Data.Maybe        (fromMaybe, isJust)
 import qualified Data.Yaml         as Y
 import           System.Directory  (doesFileExist, getCurrentDirectory)
 import           System.Environment (lookupEnv)
@@ -75,6 +75,10 @@ data Opts = Opts
     -- ^ explicit @agda@ binary for interaction sessions (@--agda-bin@).
   , oInteractArgs :: [String]
     -- ^ extra flags for @agda --interaction-json@ (repeatable @--agda-arg@).
+  , oInspect   :: Bool
+    -- ^ run the localhost web inspector (@--inspect@).
+  , oInspectPort :: Int
+    -- ^ start port for the inspector (probes upward on conflict; @--inspect-port@).
   , oHelp     :: Bool
   , oVer      :: Bool
   }
@@ -111,6 +115,8 @@ data FileConfig = FileConfig
   , fcEnableInteract :: Maybe Bool
   , fcAgdaBin        :: Maybe FilePath
   , fcInteractArgs   :: Maybe [String]
+  , fcInspect        :: Maybe Bool
+  , fcInspectPort    :: Maybe Int
   }
 
 defaultFileConfig :: FileConfig
@@ -135,6 +141,8 @@ defaultFileConfig = FileConfig
   , fcEnableInteract = Nothing
   , fcAgdaBin        = Nothing
   , fcInteractArgs   = Nothing
+  , fcInspect        = Nothing
+  , fcInspectPort    = Nothing
   }
 
 instance FromJSON FileConfig where
@@ -159,6 +167,8 @@ instance FromJSON FileConfig where
     fcEnableInteract <- o .:? "enable-interact"
     fcAgdaBin        <- o .:? "agda-bin"
     fcInteractArgs   <- o .:? "agda-arg"
+    fcInspect        <- o .:? "inspect"
+    fcInspectPort    <- o .:? "inspect-port"
     pure FileConfig{..}
 
 -- ---------------------------------------------------------------------
@@ -196,6 +206,12 @@ applyConfig FileConfig{..} o = o
   , oEnableInteract = fromMaybe (oEnableInteract o) fcEnableInteract
   , oAgdaBin     = fcAgdaBin `orKeep` oAgdaBin o
   , oInteractArgs = fromMaybe (oInteractArgs o) fcInteractArgs
+    -- An explicit `inspect:` wins; otherwise a bare `inspect-port:` implies
+    -- enabling (mirrors the CLI, where --inspect-port turns the inspector on).
+  , oInspect     = case fcInspect of
+                     Just b  -> b
+                     Nothing -> oInspect o || isJust fcInspectPort
+  , oInspectPort = fromMaybe (oInspectPort o) fcInspectPort
   }
   where
     -- A present config value wins over the (default) seed; 'Maybe' field.

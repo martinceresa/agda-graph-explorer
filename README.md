@@ -163,6 +163,22 @@ sources are handled (edits land inside the code fence). `auto` runs
 Mimer to search for a solving term — a diff filling the hole, or a
 "no solution" note.
 
+**Live web inspector (opt-in).** With `--inspect` (or `inspect: true` in
+the config) the daemon serves a self-contained localhost web page — a
+live **activity feed** of every tool call (collapsed to one line, click
+to expand its args + result) plus an **editing view** (the loaded module
+with each proposed diff highlighted over the on-disk file) — over
+Server-Sent Events at `http://127.0.0.1:7000`. It is a read-only *side
+channel* for watching what an agent is doing: off by default,
+localhost-only, no auth, and it never touches the JSON-RPC stdout.
+`--inspect-port N` sets the start port (implies `--inspect`); on a clash
+the daemon probes upward so several projects coexist, and the page header
+names the project + bound port so you can tell tabs apart.
+
+```sh
+agda-explore --project /path/to/agda/project --inspect      # → http://127.0.0.1:7000
+```
+
 ## Configuration (YAML)
 
 Each tool reads an optional YAML config. **Every key is a kebab-case
@@ -264,8 +280,10 @@ module), `entries` (a *list* of entry modules — see below), `include`
 mode), `project`, `out-dir`, `agda-deps-bin`, `agda-unused-bin`.
 Behaviour toggles (bools): `no-term-hashes`, `no-signatures`,
 `normalise-signatures`, `show-implicit`, `no-auto-rebuild`, `no-watch`,
-`enable-interact` (expose the write-side interaction bridge); plus
-`min-term-depth` (int), `agda-bin` (the `agda` binary for interaction
+`enable-interact` (expose the write-side interaction bridge), `inspect`
+(serve the localhost web inspector); plus `min-term-depth` (int),
+`inspect-port` (the inspector's start port, default 7000; setting it
+implies `inspect`), `agda-bin` (the `agda` binary for interaction
 sessions, else `$AGDA_BIN` / `$PATH`), and `agda-arg` (a list of extra
 flags for `agda --interaction-json`, e.g. `--safe`).
 
@@ -290,6 +308,8 @@ include: [src/]
 agda-deps-bin: /usr/local/bin/agda-deps   # else found on $PATH
 no-watch: false
 min-term-depth: 0
+inspect: true                       # localhost web inspector
+inspect-port: 7010                  # …on this port (else probes up from 7000)
 ```
 
 ## Cross-repo runtime link

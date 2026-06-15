@@ -26,6 +26,7 @@ import           System.Process     (CreateProcess (..), proc,
                                      readCreateProcessWithExitCode)
 
 import           AgdaInteract.Tools (interactTools)
+import           AgdaMcp.Inspect    (InspectEvent (..), emitInspect)
 import           AgdaMcp.Query
 import           AgdaMcp.Rpc
 import           AgdaMcp.State
@@ -553,6 +554,17 @@ handleCall ss theId params = case argText params "name" of
                , "stale"  .= stale
                ]
         else pure ()
+      -- Tee the same event to the web inspector (no-op when --inspect is
+      -- off). This is the single point where every tools/call's name, args,
+      -- result, timing, and stale flag are all in scope.
+      emitInspect (ssInspect ss) $ EvTool
+        { evTool   = tn
+        , evArgs   = args
+        , evDurMs  = durMs
+        , evOk     = ok
+        , evStale  = stale
+        , evResult = either id id r
+        }
       pure $ resultResponse theId $ case r of
         Right txt -> callResult False txt
         Left  err -> callResult True err

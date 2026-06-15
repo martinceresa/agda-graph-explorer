@@ -12,7 +12,10 @@ It bundles:
   cache) and hot-swaps the in-memory graph. Optionally (`--enable-interact`)
   it also exposes a **write-side interaction bridge** — goal-driven editing
   tools (`load` / `goal_type` / `case_split` / `refine` / `give` / …) backed
-  by a live `agda --interaction-json` session (see below).
+  by a live `agda --interaction-json` session (see below). Optionally
+  (`--inspect`) it serves a **localhost web inspector** that streams a live
+  activity feed + editing view to a browser, for watching what the agent is
+  doing (see below).
 - **A skill (`agda-explore`)** — teaches Claude when to reach for those tools
   instead of grep, and how to read their output (including the known
   `agda-unused` false-positive caveats).
@@ -172,3 +175,29 @@ escape hatch is rejected before Agda sees it (a hard zero-axiom contract).
 ```` ```agda ```` code fence, never in the surrounding prose. To turn the
 bridge on for the plugin, add `enable-interact: true` to the project's
 `.agda-explore.yml` (the launcher otherwise starts the server read-only).
+
+## Live web inspector (opt-in)
+
+Start the server with **`--inspect`** (or `inspect: true` in
+`.agda-explore.yml`) to watch, live in a browser, what the agent is doing:
+
+- an **activity feed** of every tool call — collapsed to one line (time ·
+  tool · args preview · duration), click a row to expand its full arguments
+  and result;
+- an **editing view** — the loaded module with each proposed
+  `give` / `refine` / `case_split` / `auto` / `give_many` diff highlighted
+  over the on-disk file, plus the open goals.
+
+It streams over Server-Sent Events; the daemon prints the URL on stderr
+(`agda-explore: inspector at http://127.0.0.1:7000`). Read-only,
+localhost-only, no auth, and a pure **side channel** — it never touches the
+MCP stdio.
+
+**One inspector per daemon.** Each project's `agda-explore` server is its
+own process with its own inspector. With several projects open, give each a
+distinct `inspect-port:` in its `.agda-explore.yml` (otherwise the daemon
+probes upward from 7000 on a clash, so the port isn't predictable); the page
+header and browser-tab title name the project + bound port so you can tell
+the tabs apart. `ss -ltnp | grep ':70'` maps ports → daemons. Because a live
+daemon can't swap its own binary, reconnect (`/mcp`) after a rebuild or a
+config change to pick up the inspector.

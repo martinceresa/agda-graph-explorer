@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+### Live web inspector (`--inspect`) (2026-06-15)
+
+- **`agda-explore`: opt-in localhost web inspector.** Started with
+  `--inspect` (or `inspect: true` in `.agda-explore.yml`; `--inspect-port N`
+  sets the start port and implies it), the daemon serves a self-contained
+  web page over a hand-rolled HTTP + Server-Sent-Events server (new
+  `AgdaMcp.Inspect`, on the small `network` dep) that shows, live:
+  - an **activity feed** — every `tools/call` with its arguments, result,
+    duration, and stale flag, collapsed to one clickable line that expands on
+    demand;
+  - an **editing view** — the loaded module with each proposed
+    `give` / `refine` / `case_split` / `auto` / `give_many` diff highlighted
+    over the on-disk file, plus the open goals.
+
+  It is a read-only **side channel**: events are teed from the single
+  `handleCall` chokepoint (the feed) and the bridge's diff-producing helpers
+  (the editing view) through `emitInspect`, which is a no-op when the
+  inspector is off — so the feature is **inert unless asked for**, never
+  blocks a query (one STM transaction over an unbounded broadcast channel +
+  a bounded backlog ring for newly-connected browsers), and **never writes
+  the JSON-RPC stdout**. Localhost-only, no auth (it streams your own
+  source). On a port clash the daemon **probes upward** from the start port
+  so several projects coexist, and each connection leads with a `server`
+  identity frame so the page header + tab title name the project + bound
+  port — you can tell several inspector tabs apart. The offline test suite,
+  `-N1`/`-NK` determinism, and every other binary are unaffected (the new
+  deps `network` + `stm` are scoped to the `agda-explore` executable only).
+
 ### Staging-buffer include-path fix (2026-06-15)
 
 - **`agda-explore`: `stage` / `promote` now load on projects with an

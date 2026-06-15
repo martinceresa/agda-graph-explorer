@@ -40,6 +40,8 @@ import           AgdaInteract.Guard
 import           AgdaInteract.Literate
 import           AgdaInteract.Registry
 import           AgdaInteract.Session
+import           AgdaMcp.Inspect         (GoalLite (..), InspectEvent (..),
+                                          emitInspect)
 import           AgdaMcp.State
 import           AgdaMcp.ToolDef
 
@@ -202,9 +204,38 @@ runLoad ss a = case argText a "file" of
   Nothing -> pure (Left "load requires a `file` argument.")
   Just f  -> do
     r <- doLoad ss (absFile ss f)
-    pure $ case r of
-      Left err            -> Left err
-      Right (_, _, es, fp) -> Right (renderGoals fp es)
+    case r of
+      Left err            -> pure (Left err)
+      Right (_, _, es, fp) -> do
+        emitGoals ss fp es
+        pure (Right (renderGoals fp es))
+
+-- | Broadcast a module's on-disk body + open goals to the web inspector's
+-- editing view (a no-op when @--inspect@ is off). Best-effort: an unreadable
+-- file just yields empty content.
+emitGoals :: ServerState -> FilePath -> [GoalEntry] -> IO ()
+emitGoals ss fp es = do
+  ec <- readFileSafe fp
+  emitInspect (ssInspect ss) $ EvGoals
+    { evFile    = T.pack fp
+    , evContent = either (const "") id ec
+    , evGoals   = map toGoalLite es
+    }
+  where
+    toGoalLite e =
+      let (ln, col) = case geRange e of
+            Just (GoalRange s _) -> (Just (rpLine s), Just (rpCol s))
+            Nothing              -> (Nothing, Nothing)
+      in GoalLite (renderStableId (geStable e)) (geType e) ln col
+
+-- | Broadcast a proposed edit (the on-disk body before the edit + the
+-- unified diff) to the web inspector's editing view. The bridge never
+-- writes the file, so @old@ remains the live disk state. No-op when
+-- @--inspect@ is off.
+emitEdit :: ServerState -> FilePath -> Text -> String -> IO ()
+emitEdit ss file old diff =
+  emitInspect (ssInspect ss) $ EvEdit
+    { evFile = T.pack file, evContent = old, evDiff = T.pack diff }
 
 -- | Read-only goal-info tools (goal_type / goal_context): resolve the
 -- session + goal, run @Cmd_goal_type_context@, render with the supplied
@@ -301,11 +332,14 @@ runGiveMany ss a = case argLookup a "gives" >>= parseMaybe parseJSON of
               Right orig -> do
                 res <- giveLoop sess file gm (codeBlocksFor file orig) specs []
                 markSessionDirty ss file        -- drop the in-session state; we serve disk
-                pure $ case res of
-                  Left err    -> Left err
+                case res of
+                  Left err    -> pure (Left err)
                   Right edits -> case spliceRanges orig edits of
-                    Left ov   -> Left ov
-                    Right new -> Right (batchMsg (length edits) (unifiedDiff file orig new))
+                    Left ov   -> pure (Left ov)
+                    Right new -> do
+                      let d = unifiedDiff file orig new
+                      emitEdit ss file orig d
+                      pure (Right (batchMsg (length edits) d))
 
 -- | Validate + give each spec against the live session, accumulating
 -- (start, end, replacement) edits. Stops at the first failure.
@@ -589,8 +623,10 @@ mutateFromMakeCase ss file e (Right rs) = case firstError rs of
               contentStart      = lineStart + indent
               replTxt           = renderClausesAt (indent + 1) clauses
               new               = spliceRange old contentStart nlP replTxt
+              d                 = unifiedDiff file old new
           markSessionDirty ss file
-          pure (Right (diffMsg (unifiedDiff file old new)))
+          emitEdit ss file old d
+          pure (Right (diffMsg d))
       [] -> pure (Left "agda returned no clauses (is the variable in a pattern position?).")
 
 -- | Splice @repl@ over the hole's range, guarding that the hole is inside a
@@ -601,8 +637,10 @@ applyHoleEdit ss file e repl = case geRange e of
   Nothing              -> pure (Left "goal has no source range; cannot edit.")
   Just (GoalRange s en) -> withSourceGuarded file (rpPos s) $ \old -> do
     let new = spliceRange old (rpPos s) (rpPos en) repl
+        d   = unifiedDiff file old new
     markSessionDirty ss file
-    pure (Right (diffMsg (unifiedDiff file old new)))
+    emitEdit ss file old d
+    pure (Right (diffMsg d))
 
 -- | Read the source and run the edit only if the target offset is inside
 -- an Agda code block (a no-op for plain @.agda@; a guard for @.lagda.md@).
