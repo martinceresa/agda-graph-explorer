@@ -41,8 +41,9 @@ The repo ships one shared library and four executables:
   **subprocess** (see [Cross-repo runtime link](#cross-repo-runtime-link)).
   Under `--enable-interact` it *also* exposes a **write-side interaction
   bridge** (`load` / `goal_type` / `goal_context` / `infer` /
-  `normalize` / `case_split` / `refine` / `give` / `give_many` / `auto`)
-  backed by a long-lived `agda --interaction-json` **subprocess** — every
+  `normalize` / `case_split` / `refine` / `give` / `give_many` / `auto` /
+  `stage` / `promote` / `discard`) backed by a long-lived
+  `agda --interaction-json` **subprocess** — every
   `give` / `refine` is Agda-validated and returns a unified diff (the bridge
   never writes the file). This is a *second, independent* subprocess
   model beside the graph daemon: interaction tools reflect live on-disk
@@ -228,6 +229,12 @@ src/
                                 give_many fills N goals against one live
                                 session (survivors keep interaction ids
                                 without a reload) → one combined diff, atomic.
+                                stage/promote/discard build a def in an
+                                ephemeral .agda-explore/scratch/ module, then
+                                splice + re-validate the whole real target
+                                (promote validates a temp copy under a renamed
+                                module to dodge AmbiguousTopLevelModuleName;
+                                returns a diff, never writes the target).
 
 src-agda-graph/AgdaGraph/       Shared library.
   Interaction/Protocol.hs       FromJSON mirror of the --interaction-json
@@ -359,9 +366,10 @@ plugin/                         Claude Code plugin bundling the
   identifiers *before* the term reaches Agda; `give`/`refine` return a
   unified diff for the caller to apply, then mark the session dirty so
   the next query reloads from (unchanged) disk — keeping the bridge's
-  view consistent with disk. `auto` (Mimer) is wired but Agda 2.9.0's
-  IOTCM reader rejects `Cmd_autoOne`, so it degrades with a clear note;
-  it lights up automatically on an Agda that accepts the command.
+  view consistent with disk. `auto` runs Mimer
+  (`Cmd_autoOne Rewrite InteractionId Range String` — the leading
+  `Rewrite` is mandatory; omitting it is what made earlier attempts
+  "cannot read") and returns a fill diff, or a clear no-solution note.
 
 - **`agda-goals` and the bridge share one session driver
   (`AgdaInteract.Session`), but it must stay goal-id-free.** The

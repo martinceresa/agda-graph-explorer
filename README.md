@@ -132,12 +132,22 @@ queries above:
 
 ```
 load · goal_type · goal_context · infer · normalize ·
-case_split · refine · give · give_many · auto
+case_split · refine · give · give_many · auto ·
+stage · promote · discard
 ```
 
 `give_many` fills several goals in one session load (one combined diff,
 atomic) — the tool for closing many independent holes in a slow-to-load
 module without paying the reload between each.
+
+`stage` / `promote` / `discard` build a *new* definition in isolation:
+`stage` opens an ephemeral scratch module under `.agda-explore/scratch/`
+(seeded with a target's imports, so `load` re-checks only the scratch's
+tiny closure instead of the target's whole module); construct the def
+there with the usual tools, then `promote` splices it into the real
+target — merging missing imports and re-validating the **whole target**
+in Agda, returning a diff on success or the localized error with nothing
+changed — or `discard` to abandon it.
 
 `load` opens a module and lists its open goals with ids (`g0, g1, …`) and
 their source positions. An id stays put for a hole whose position is
@@ -149,9 +159,9 @@ that doesn't typecheck comes back as the localized Agda error with the
 file untouched. A `give` / `refine` using `postulate`, a
 termination/coverage/`OPTIONS` pragma, or another escape hatch is
 refused up front (a hard zero-axiom contract). `.lagda.md` literate
-sources are handled (edits land inside the code fence). `auto` (Mimer)
-is wired but unavailable on Agda 2.9.0 (its IOTCM reader rejects the
-command) — use `refine`/`give`.
+sources are handled (edits land inside the code fence). `auto` runs
+Mimer to search for a solving term — a diff filling the hole, or a
+"no solution" note.
 
 ## Configuration (YAML)
 

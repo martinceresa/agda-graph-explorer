@@ -496,10 +496,15 @@ entropy of the per-declared-module distribution.
 defs):**
 
 - `--min-cluster=2` — singletons are never interesting.
-- `--sort=score` (vs `size`) — composite ranking. Without it, the
-  top is dominated by trivial high-frequency shapes (Var, Sort,
-  Level applications). `--sort=size` reproduces the round-6-launch
-  ranking.
+- `--sort=score` (vs `size` / `log-score`) — composite ranking
+  (`size × meanDepth × (1 + diversity)`). Without it, the top is
+  dominated by trivial high-frequency shapes (Var, Sort, Level
+  applications). `--sort=size` reproduces the round-6-launch ranking;
+  `--sort=log-score` uses `log(1+size) × meanDepth × (1 + diversity)`,
+  dampening sheer frequency so a moderately-sized but deep/cross-cutting
+  pattern isn't buried under a huge shallow one.
+- `--min-mean-depth=N` — drop clusters whose mean AST depth is below
+  `N` (filters shallow boilerplate shapes before ranking).
 - `--span-modules=3` — minimum 3 distinct declared modules.
   Cross-file duplication is the proposal's motivation. The
   declared-module collapse strips Agda's anonymous where-helper

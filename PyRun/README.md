@@ -46,7 +46,7 @@ The bundled instance's `tests/` (for reference):
 tests/
   opt.py      agda-optimization: 18 subcommands × flags × graphs (236 cases)
   unused.py   agda-unused: all kinds, json-out, exclude, config, errors (43)
-  goals.py    agda-goals: drives `agda --interaction-json` per file (15)
+  goals.py    agda-goals: drives `agda --interaction-json` over a session pool (15)
   explore.py  agda-explore: 13 MCP tools, preloaded + live, error paths (50)
   plugin.py   plugin/: .mcp.json, manifest, launcher, frontmatter (10)
 ```

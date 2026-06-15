@@ -30,3 +30,6 @@ OptSite/
 
 # Runtime query telemetry written by the agda-explore daemon (not reproducible).
 .agda-explore/query-log.jsonl
+
+# Ephemeral scratch modules created by the interaction bridge's `stage` tool.
+.agda-explore/scratch/

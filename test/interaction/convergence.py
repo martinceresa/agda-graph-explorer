@@ -29,9 +29,9 @@ def discover_bin():
     return out.stdout.strip()
 
 class Daemon:
-    def __init__(self, binpath, graph):
+    def __init__(self, binpath, graph, extra=()):
         self.p = subprocess.Popen(
-            [binpath, "--enable-interact", "--graph", graph],
+            [binpath, "--enable-interact", "--graph", graph, *extra],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, text=True, bufsize=1)
         self._id = 0
@@ -127,6 +127,76 @@ def converge(d, scratch, module, recipe):
     ok, log = agda_clean(scratch, module)
     check(f"{module}: agda typechecks the closed proof", ok, log[-400:])
 
+STAGE_PATH_RE = re.compile(r'Staged scratch module:\s*\n\s*(\S+)')
+
+def stage_promote(binpath, graph):
+    """stage -> build a def in the scratch -> promote into a real target ->
+    apply the validated diff -> agda typechecks; plus the negative path (a
+    def that doesn't typecheck in the target leaves it untouched) and discard.
+
+    Runs its own daemon rooted at a fresh tempdir (`--project`) so the
+    scratch buffers land under <tempdir>/.agda-explore/scratch/ and are
+    cleaned up with the tempdir — never in the repo."""
+    work = tempfile.mkdtemp(prefix="agda-stage-")
+    # An .agda-lib at the project root makes Agda treat `work` as a project
+    # root, so a bare-named scratch under work/.agda-explore/scratch/ is
+    # rejected with ModuleNameDoesntMatchFileName unless its own dir is an
+    # include root — the regression `loadIncludes` fixes (the real-world
+    # `.agda-lib` case; without this file Agda accepts the scratch's own dir
+    # implicitly and the bug doesn't surface).
+    with open(os.path.join(work, "stagetest.agda-lib"), "w", encoding="utf-8") as f:
+        f.write("name: stagetest\ninclude: .\n")
+    tgt = os.path.join(work, "Tgt.agda")
+    with open(tgt, "w", encoding="utf-8") as f:
+        f.write("module Tgt where\n\nopen import Agda.Builtin.Nat\n\n"
+                "existing : Nat\nexisting = 0\n")
+    d = Daemon(binpath, graph, extra=["--project", work])
+    try:
+        # --- positive: stage, give in the scratch, promote, typecheck.
+        out, err = d.tool("stage", {"target": tgt})
+        check("stage: opens a scratch module", not err, out)
+        m = STAGE_PATH_RE.search(out)
+        check("stage: returns a scratch path", m is not None, out)
+        if not m:
+            return
+        scratch = m.group(1)
+        with open(scratch, "a", encoding="utf-8") as f:
+            f.write("\nmyConst : Nat\nmyConst = ?\n")
+        text, e = d.tool("load", {"file": scratch})
+        check("stage: scratch loads with one goal", not e and len(goals(text)) == 1, text)
+        gs = goals(text)
+        if gs:
+            gout, ge = d.tool("give", {"goal": gs[0][0], "term": "42", "file": scratch})
+            check("stage: give in scratch ok", not ge, gout)
+            check("stage: scratch give diff applies", apply_diff(scratch, gout), gout)
+        pout, pe = d.tool("promote", {"scratch": scratch, "target": tgt})
+        check("promote: validates + returns a diff", not pe, pout)
+        check("promote: diff applies to the target", apply_diff(tgt, pout), pout)
+        ok, log = agda_clean(work, "Tgt.agda")
+        check("promote: agda typechecks the spliced target", ok, log[-300:])
+        with open(tgt, encoding="utf-8") as f:
+            tgt_src = f.read()
+        check("promote: spliced def present + existing def kept",
+              "myConst" in tgt_src and "existing" in tgt_src, tgt_src)
+        # --- negative: a def that doesn't typecheck in the target is refused
+        #     and leaves the target untouched.
+        before = tgt_src
+        out2, _ = d.tool("stage", {"target": tgt})
+        m2 = STAGE_PATH_RE.search(out2)
+        if m2:
+            bad = m2.group(1)
+            with open(bad, "a", encoding="utf-8") as f:
+                f.write("\nbroken : Nat\nbroken = doesNotExist\n")
+            bout, be = d.tool("promote", {"scratch": bad, "target": tgt})
+            check("promote: rejects a def that doesn't typecheck", be, bout)
+            with open(tgt, encoding="utf-8") as f:
+                check("promote: target untouched on rejection", f.read() == before, "")
+            dout, de = d.tool("discard", {"scratch": bad})
+            check("discard: drops the scratch buffer", not de and not os.path.exists(bad), dout)
+    finally:
+        d.close()
+        shutil.rmtree(work, ignore_errors=True)
+
 def main():
     binpath = sys.argv[1] if len(sys.argv) > 1 else discover_bin()
     graph = sys.argv[2] if len(sys.argv) > 2 else os.path.join(ROOT, "test", "deps.json")
@@ -156,6 +226,20 @@ def main():
         check("give_many: 0 goals after applying the batch", len(goals(text2)) == 0, text2)
         okb, logb = agda_clean(scratch, "Nat.agda")
         check("give_many: agda typechecks the batch-filled module", okb, logb[-300:])
+        # 1c. auto (Mimer): solve a single goal, apply the diff, typecheck.
+        autop = os.path.join(scratch, "AutoOne.agda")
+        text, _ = d.tool("load", {"file": autop})
+        ag = goals(text)
+        check("AutoOne: one goal to auto", len(ag) == 1, text)
+        if ag:
+            out, err = d.tool("auto", {"goal": ag[0][0], "file": autop})
+            check("auto: returns a fill diff (Mimer found a solution)", not err, out)
+            check("auto: diff applies", apply_diff(autop, out), out)
+            text2, _ = d.tool("load", {"file": autop})
+            check("auto: 0 goals after applying", len(goals(text2)) == 0, text2)
+            oka, loga = agda_clean(scratch, "AutoOne.agda")
+            check("auto: agda typechecks the auto-filled module", oka, loga[-300:])
+
         # 2. give convergence inside a literate .lagda.md module (edit must
         #    land in the code fence; agda must typecheck the literate file).
         converge(d, scratch, "Doc.lagda.md", {12: "6"})
@@ -178,6 +262,9 @@ def main():
     finally:
         d.close()
         shutil.rmtree(scratch, ignore_errors=True)
+
+    # 4. stage -> promote -> discard (its own tempdir-rooted daemon).
+    stage_promote(binpath, graph)
 
     print()
     if FAILS:

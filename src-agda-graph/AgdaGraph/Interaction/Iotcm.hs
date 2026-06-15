@@ -92,14 +92,15 @@ iotcmRefineOrIntro modPath iid hint =
   frame modPath $
     "Cmd_refine_or_intro False " ++ show iid ++ " noRange " ++ show hint
 
--- | @Cmd_autoOne@ — Mimer search. NOTE: Agda 2.9.0's IOTCM reader
--- rejects this constructor (see the fixtures README); kept for when the
--- correct invocation is pinned. Callers must handle the @cannot read@
--- degradation.
-iotcmAutoOne :: FilePath -> Int -> String -> String
-iotcmAutoOne modPath iid opts =
+-- | @Cmd_autoOne@ — Mimer proof search at a goal. Agda 2.9's signature is
+-- @Cmd_autoOne Rewrite InteractionId Range String@; the leading 'Rewrite'
+-- is what the earlier "cannot read" attempts were missing. The trailing
+-- string carries Mimer options (empty = defaults). On success Agda replies
+-- with a @GiveAction@ carrying the found term.
+iotcmAutoOne :: FilePath -> Rewrite -> Int -> String -> String
+iotcmAutoOne modPath rw iid opts =
   frame modPath $
-    "Cmd_autoOne " ++ show iid ++ " noRange " ++ show opts
+    "Cmd_autoOne " ++ renderRewrite rw ++ " " ++ show iid ++ " noRange " ++ show opts
 
 showStringList :: [String] -> String
 showStringList ss = "[" ++ commaJoin (map show ss) ++ "]"

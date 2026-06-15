@@ -30,7 +30,7 @@ the v2 *expanded* `graph.json` produced by the separate `agda-deps` repo
 |---|---|---|---|
 | `opt` | `agda-optimization` | 18 graph-level analysis subcommands | a graph.json |
 | `unused` | `agda-unused` | flags unused imports/defs/opens/re-exports | a graph.json + corpus sources |
-| `goals` | `agda-goals` | drives `agda --interaction-json` per file, buckets goals | `agda` on `$PATH` |
+| `goals` | `agda-goals` | drives `agda --interaction-json` over a session pool, buckets goals | `agda` on `$PATH` |
 | `explore` | `agda-explore` | long-running MCP stdio daemon answering point queries | a graph.json (preloaded) or `agda-deps` (live) |
 | `plugin` | — | the Claude Code plugin under `plugin/` (config/launcher/frontmatter) | — |
 
@@ -206,8 +206,10 @@ against path **and** dotted module name (`**` spans `/`, `*` stops at `/`).
 
 ### 4.3 `agda-goals` — drive `agda` and bucket goal types
 
-Spawns `agda --interaction-json` **per file** (needs `agda` on `$PATH`),
-captures `AllGoalsWarnings`, canonicalises each `?`-hole's type, buckets by hash.
+Drives `agda --interaction-json` over a **pool of persistent sessions** (needs
+`agda` on `$PATH`; one session per RTS capability, reused across files, `+RTS -NK`
+caps it — `-N1` is the serial path), captures `AllGoalsWarnings`, canonicalises
+each `?`-hole's type, buckets by hash. Output is byte-identical across `-N1`/`-NK`.
 
 ```bash
 "$GOALS" --format=human -i "$CORPUS" "$CORPUS/DebugTrace.agda"     # solved file → 0 buckets

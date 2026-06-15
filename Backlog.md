@@ -36,7 +36,13 @@ consumers that isn't ready to be picked up. For shipped work see
   hits a deployment where Python isn't available.
 
 - **`term-cluster` — `log(size)` ranking + per-cluster mean-depth
-  floor.** Round-6 P3 surfaced the proposal's target cluster at
+  floor.** — *SHIPPED*: both refinements are implemented in
+  `AgdaOptimization.TermCluster` — `--sort=log-score`
+  (`log(1+size) × meanDepth × (1+diversity)`, behind the flag so `score`
+  stays the default) and `--min-mean-depth=N` (a cluster-level depth
+  floor) — both with `--help` text, JSON + human output, and the
+  determinism contract preserved. The original rationale follows.
+  Round-6 P3 surfaced the proposal's target cluster at
   rank 572 / 1104 on the reference corpus pre-Wave-2A snapshot — ~500
   bigger genuinely cross-cutting patterns rank ahead. To reach
   the "top 10" retroactive acceptance gate two refinements are
@@ -62,7 +68,17 @@ consumers that isn't ready to be picked up. For shipped work see
   surfaces low-value clusters.
 
 - **Round-6 P5 — goal-state clustering via
-  `agda --interaction-json`.** Second piece of the proof-simplification
+  `agda --interaction-json`.** — *SHIPPED* as the **`agda-goals`**
+  executable: drives `agda --interaction-json` over the root files (now a
+  parallel session pool, `+RTS -NK`), captures each `AllGoalsWarnings`
+  reply, and buckets goal states by canonical hash
+  (`AgdaGoals.Canon` over the vendored Murmur64). The session driver was
+  later unified with the write-side bridge (`AgdaInteract.Session`). See
+  [Changelog.md](Changelog.md). One follow-up stays open — the
+  textual-canonicaliser → structural `TermCanon` upgrade
+  (in [TODO.md](TODO.md)); corpus-scaling shipped 2026-06-13. The original
+  proposal follows.
+  Second piece of the proof-simplification
   proposal this round was scoped against.
   Drive `agda --interaction-json` per module, capture every
   `Cmd_goal_type_context` reply at every `?`-hole, canonicalise
@@ -134,12 +150,13 @@ consumers that isn't ready to be picked up. For shipped work see
   `case_split` / `refine` / `give` / `auto`); see
   [Changelog.md](Changelog.md). The session driver
   (`AgdaInteract.Session`) is shared with `agda-goals`, exactly as the
-  implementation note below anticipated. Two pieces stay deferred:
-  `auto` (Mimer) — Agda 2.9.0's IOTCM reader rejects `Cmd_autoOne`, so
-  the tool degrades until the right invocation is pinned; and a
-  one-Agda-process-per-module *pool* (the current cap closes idle
-  sessions rather than pooling). The original proposal, kept for the
-  rationale, follows. `agda-explore` gave
+  implementation note below anticipated. `auto` (Mimer), `give_many`
+  (batch fill), and a scratch/`promote` staging mode shipped on top
+  (2026-06-13; Changelog). One piece stays deferred for the *bridge*: a
+  one-Agda-process-per-module *pool* (the bridge caps + reloads rather
+  than pooling concurrent sessions — `agda-goals` got the pool, but the
+  single-threaded request/response daemon doesn't need one). The original
+  proposal, kept for the rationale, follows. `agda-explore` gave
   agents a rich *read* surface (`locate`, `type_of`, `callers`,
   `impact`, `find_lemma`, …); there was no *write* counterpart. AI
   agents editing this corpus fall back to blind exact-string
@@ -322,7 +339,17 @@ consumers that isn't ready to be picked up. For shipped work see
   churn). Natural follow-on to the bridge; shares its session driver.
 
 - **Cold-start fallback — degrade instead of going dark when the *first*
-  build emits no graph (found 2026-06-12).** Companion to the
+  build emits no graph (found 2026-06-12).** — *consumer side SHIPPED
+  2026-06-13* (commit `a30a575`; see [Changelog.md](Changelog.md)):
+  `AgdaMcp.State.ssColdError` caches the first-build-failure diagnostic,
+  `status` and every tool surface it (instead of echoing the raw
+  `agda-deps exit`), and the background worker keeps retrying so the
+  daemon self-heals when the module is fixed — no reconnect. That is
+  suggestion #2 below. **Still open:** suggestion #1 — the producer's
+  partial-graph fix (always write at least a defs-light graph), after
+  which the consumer just needs to treat a *file-exists-but-zero-defs*
+  graph as a valid snapshot (`loadLoaded` already decodes one); and the
+  multi-entry composition note (#3). Companion to the
   producer-side item in `AgdaDependencies/Backlog.md` ("`--keep-going`
   emits *no* graph on a real broken corpus"). When `agda-deps` emits no
   `deps.json` (e.g. an entry whose closure transitively imports one

@@ -175,6 +175,8 @@ drives Agda's own hole workflow and validates every step:
 | Refine a goal by a head symbol (`f ?`)                 | `refine`       |
 | Fill a goal with a complete term (type-checked)        | `give`         |
 | Fill SEVERAL independent goals in one load (one diff)  | `give_many`    |
+| Run Mimer proof search to solve a goal                 | `auto`         |
+| Build a NEW def in isolation, then splice it in        | `stage` → `promote` (or `discard`) |
 
 Workflow: `load <file>` first — it returns goals as `g0, g1, …` with their
 `(line:col)`. Pass an id to the other tools. `case_split` / `refine` /
@@ -193,9 +195,21 @@ term is rejected, nothing is applied and the error names the goal). Note:
 the bridge **refuses** any `give` / `refine` / `give_many` that uses
 `postulate`, a termination/coverage/`OPTIONS` pragma, or another escape
 hatch — it will not close a goal by weakening soundness; supply a real term.
-`auto` (Mimer) is unavailable on Agda 2.9.0 (the interaction reader rejects
-it) — reach for `refine`/`give` instead. `.lagda.md` files work; edits stay
+`auto` runs Mimer to search for a solving term — it returns a diff filling
+the hole, or a "no solution" note (then guide it with `refine` or supply a
+`give`). `.lagda.md` files work; edits stay
 inside the code block.
+
+To author a *new* definition (rather than close an existing hole), use
+**`stage`** → **`promote`**: `stage <target>` opens a throwaway scratch
+module under `.agda-explore/scratch/` seeded with the target's imports, so
+each `load` re-checks only the scratch's tiny closure instead of the
+target's whole (possibly slow) module. Build the def there with the usual
+tools, then `promote scratch=<…> target=<module>` splices it in, merges any
+missing imports, and re-validates the **whole real target** once — returning
+a diff on success, or the localized error (with the target untouched) if the
+def relies on scope/instance/ordering facts the scratch didn't capture.
+`discard` drops a dead-end scratch.
 
 ## Good habits
 

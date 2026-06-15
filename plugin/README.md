@@ -158,7 +158,10 @@ goal / case-split / refine workflow instead of blind string replacement:
 | `refine`       | Refine a goal by a head symbol (`f ?`) → unified diff.                            |
 | `give`         | Fill a goal with a complete term, **Agda-validated** → unified diff (or the localized type error). |
 | `give_many`    | Fill SEVERAL goals in one session load → one combined diff; atomic (any rejection applies nothing). For many independent holes in a slow-to-load module. |
-| `auto`         | Mimer search (unavailable on Agda 2.9.0 — its reader rejects the command; degrades cleanly). |
+| `auto`         | Mimer proof search → a diff filling the hole, or a "no solution" note. |
+| `stage`        | Open an ephemeral scratch module (`.agda-explore/scratch/`, seeded with a target's imports) to build a *new* def in isolation — each `load` re-checks only the scratch's tiny closure. |
+| `promote`      | Splice a `stage` scratch's def(s) into a real target: merge missing imports, re-validate the **whole target** → unified diff, or the localized error with nothing changed. |
+| `discard`      | Drop a `stage` scratch buffer (close its session + delete the file). |
 
 Each mutator **returns a unified diff and never writes the file** — apply
 it yourself, then `load` again to refresh the goals. A bad `give` term

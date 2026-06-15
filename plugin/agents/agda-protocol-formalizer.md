@@ -70,6 +70,23 @@ When the `agda-explore` MCP tools are available:
   its representation; gauge the cost of a signature change.
 - `unused` — after refactoring, find imports/definitions left dangling.
 
+## Construct with the interaction bridge (when `--enable-interact` is on)
+
+When the bridge tools are available, *build* through them instead of editing
+holes as text and reloading — each step is Agda-validated and returns a diff:
+
+- `load` → `goal_type` / `goal_context` to read a hole; `case_split` /
+  `refine` / `give` to drive it; `auto` to let Mimer search. `give_many` fills
+  several independent holes in one session load.
+- `stage` → `promote` to author a *new* definition in isolation: `stage` opens
+  a scratch module (seeded with a target's imports) so each `load` re-checks
+  only its tiny closure; build the def, then `promote` splices it into the real
+  target and re-validates the whole module (diff on success, or the localized
+  error with nothing changed). `discard` drops a dead end.
+- The bridge enforces the **zero-axiom contract** — it refuses any
+  `give`/`refine` using `postulate` or an escape hatch, matching this agent's
+  no-gratuitous-postulates mandate.
+
 ## Seek clarification when
 
 The source is ambiguous on a critical point; a primitive could reasonably be

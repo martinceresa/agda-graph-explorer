@@ -40,14 +40,14 @@ is a manual, agda-required step — run `bash regen.sh` (needs `agda` on `$PATH`
   - `refine_or_intro` → `GiveAction`, `giveResult={"str":"…"}` (splice this exact
     string), followed by an updated `AllGoalsWarnings` carrying any new subgoals.
 
-## Known limitation — `auto` / Mimer
+## `auto` / Mimer
 
-In Agda 2.9.0 the IOTCM command reader rejects `Cmd_autoOne` and `Cmd_autoAll`
-(`cannot read: …`) even though the constructors exist in `Agda.Interaction.Base`
-and Mimer is the backend (`Resp_Mimer`). Same arg shape as `Cmd_make_case`,
-which parses — so it is the constructor, not the arity. The `auto` MCP tool is
-wired but degrades gracefully (returns a clear "auto unavailable on this agda"
-message) until the correct invocation for this read path is pinned.
+Resolved. The earlier "cannot read `Cmd_autoOne`" was a wrong arg shape, not
+a missing constructor: Agda 2.9's signature is
+`Cmd_autoOne Rewrite InteractionId Range String` (the leading `Rewrite` is
+mandatory; we were omitting it). With it, Mimer runs and replies with a
+`GiveAction` carrying the found term — the `auto` MCP tool fills the hole
+(diff) or reports no solution.
 
 ## End-to-end convergence test (`convergence.py`)
 
@@ -55,10 +55,18 @@ message) until the correct invocation for this read path is pinned.
 through the whole editing loop — `load → give → apply the returned diff →
 reload → … → 0 goals → agda typechecks the result` — against the small
 fixture project in [`proj/`](proj/) (`Nat.agda`, a literate `Doc.lagda.md`,
-and `Proof.agda`). It works on a scratch copy, so the committed fixtures
-stay pristine. This covers the contract the offline suite can't: that diffs
-actually apply, reloads pick up edits, goals converge, and the finished
-proof compiles. Needs `agda` on `$PATH`; NOT run in CI.
+`Proof.agda`, and `AutoOne.agda`). It works on a scratch copy, so the
+committed fixtures stay pristine. Beyond the plain give-loop it also covers
+`give_many` (one combined diff), `auto` (Mimer fills `AutoOne.agda`),
+`case_split`, and the **`stage` → `give` → `promote` → `discard`** staging
+flow. This covers the contract the offline suite can't: that diffs actually
+apply, reloads pick up edits, goals converge, and the finished proof
+compiles. Needs `agda` on `$PATH`; NOT run in CI.
+
+The staging case drops an `.agda-lib` at its temp project root so the scratch
+module sits *under* a project root — the exact condition that triggered the
+`ModuleNameDoesntMatchFileName` regression `loadIncludes` fixes (it fails with
+the prepend disabled, passes with it), which a plain tempdir doesn't surface.
 
 ```
 python3 test/interaction/convergence.py        # discovers the cabal binary
@@ -81,6 +89,7 @@ IOTCM "F" None Direct (Cmd_compute DefaultCompute <id> noRange "<expr>")
 IOTCM "F" None Direct (Cmd_make_case <id> noRange "<vars>")
 IOTCM "F" None Direct (Cmd_give WithoutForce <id> noRange "<term>")
 IOTCM "F" None Direct (Cmd_refine_or_intro False <id> noRange "<hint>")
+IOTCM "F" None Direct (Cmd_autoOne AsIs <id> noRange "")
 ```
 
 `Cmd_load`'s second argument is a list of bare command-line option tokens

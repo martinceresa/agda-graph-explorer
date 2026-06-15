@@ -19,13 +19,18 @@ import           Control.Monad           (foldM)
 import           Data.Aeson              (FromJSON (..), Value, object, withObject,
                                           (.:), (.=))
 import           Data.Aeson.Types        (parseMaybe)
+import           Data.List               (stripPrefix)
 import qualified Data.Map.Strict         as M
-import           Data.Maybe              (fromMaybe)
+import           Data.Maybe              (fromMaybe, mapMaybe)
 import           Data.Text               (Text)
 import qualified Data.Text               as T
 import qualified Data.Text.IO            as TIO
-import           System.FilePath         (isAbsolute, normalise, (</>))
+import           System.Directory        (createDirectoryIfMissing,
+                                          listDirectory, removePathForcibly)
+import           System.FilePath         (dropExtension, isAbsolute, normalise,
+                                          takeDirectory, takeFileName, (</>))
 import           System.IO               (hPutStrLn, stderr)
+import           Text.Read               (readMaybe)
 
 import           AgdaGraph.Interaction.Iotcm
 import           AgdaGraph.Interaction.Protocol
@@ -146,15 +151,46 @@ interactTools =
       runGiveMany
 
   , Tool "auto"
-      "Search for a term that solves the goal (Agda's Mimer / auto). On \
-      \success returns a diff filling the hole. NOTE: Agda 2.9.0's \
-      \interaction reader rejects the auto command, so on that version this \
-      \reports auto as unavailable — use `refine` / `give` instead. Kept so \
-      \the tool lights up automatically on an Agda that accepts it."
+      "Search for a term that solves the goal with Agda's Mimer (auto). On \
+      \success returns a unified diff filling the hole (the bridge does not \
+      \write the file); if Mimer finds nothing you get a 'no solution' note \
+      \— guide it with `refine`, or `give` an explicit term."
       (objSchema [ ("goal", sp "Stable goal id to solve, e.g. `g0`.")
                  , ("file", sp "Module file, if more than one is loaded (else inferred).")
                  ] ["goal"])
       runAuto
+
+  , Tool "stage"
+      "Open an ephemeral SCRATCH module (under .agda-explore/scratch/, \
+      \outside the source tree) for building a *new* definition in \
+      \isolation — so the real module isn't left half-written and each \
+      \`load` re-checks only the scratch's tiny closure, not the target's. \
+      \Optionally seed it with `target`'s imports so scratch scope \
+      \approximates the destination. Returns the scratch file path: add \
+      \your `name : T` + `name = ?` to it, construct with the usual tools \
+      \(`load`/`goal_type`/`case_split`/`refine`/`give`), then `promote` it \
+      \into a real module (or `discard`)."
+      (objSchema [ ("target", sp "Real module to seed imports from + the eventual promote destination (optional).") ] [])
+      runStage
+
+  , Tool "promote"
+      "Splice the definition(s) you built in a `stage` scratch into a real \
+      \target module: merges any missing imports, appends the defs, then \
+      \re-validates the *whole target* in Agda. Returns a unified diff (the \
+      \bridge does not write the file) — or, if the spliced result doesn't \
+      \typecheck in the target's real scope (instance/scope/ordering facts \
+      \the scratch didn't capture), the localized error with nothing \
+      \changed. This is where the one expensive real-module recheck happens."
+      (objSchema [ ("scratch", sp "The scratch file path returned by `stage`.")
+                 , ("target", sp "The real module file to splice into.")
+                 ] ["scratch", "target"])
+      runPromote
+
+  , Tool "discard"
+      "Drop a `stage` scratch buffer: close its session and delete the \
+      \scratch file. Use to abandon a dead-end construction."
+      (objSchema [ ("scratch", sp "The scratch file path returned by `stage`.") ] ["scratch"])
+      runDiscard
   ]
 
 -- ---------------------------------------------------------------------
@@ -307,20 +343,218 @@ batchMsg n diff =
 
 runAuto :: ToolRunner
 runAuto ss a = withGoal ss a $ \sess file e iid -> do
-  out <- runRaw sess (iotcmAutoOne file iid "")
+  out <- runRaw sess (iotcmAutoOne file AsIs iid "")
   case out of
     Left err -> pure (Left err)
     Right rs -> case [gr | ReplyGiveAction _ gr <- rs] of
       (GiveStr s : _) -> applyHoleEdit ss file e s
-      -- No GiveStr give-action: surface Agda's error if it sent one, else
-      -- the degradation note — on Agda 2.9.0 the IOTCM reader rejects the
-      -- auto command (a non-JSON "cannot read" line the parser drops), so
-      -- the burst is empty.
-      _ -> pure (Left (fromMaybe autoUnavailable (firstError rs)))
+      -- No give-action: surface Agda's error if it sent one, else Mimer
+      -- simply found no solution.
+      _ -> pure (Left (fromMaybe noSolution (firstError rs)))
   where
-    autoUnavailable = "auto/Mimer is not reachable via this agda's \
-                      \--interaction-json reader (Cmd_autoOne is rejected on \
-                      \Agda 2.9.0). Use `refine` or `give` instead."
+    noSolution = "auto/Mimer found no solution for this goal — guide it with \
+                 \`refine`, or `give` an explicit term."
+
+-- ---------------------------------------------------------------------
+-- Scratch / staging buffer (stage / promote / discard)
+-- ---------------------------------------------------------------------
+
+-- | Absolute scratch directory. @cfgOutDir@ can be relative (e.g. the
+-- default ".agda-explore" in preloaded mode), so anchor it under the
+-- project root — the same base @absFile@ resolves against — so the
+-- absolute scratch path we hand back round-trips through later tool calls.
+scratchSubdir :: ServerState -> FilePath
+scratchSubdir ss =
+  let c  = ssConfig ss
+      od = cfgOutDir c
+  in (if isAbsolute od then od else cfgProjectRoot c </> od) </> "scratch"
+
+-- | Include dirs for loading @file@. A staged scratch module and the
+-- promote-validation temp live under the scratch subdir with a *bare*
+-- top-level module name, outside the project's include roots — so Agda
+-- rejects them (@ModuleNameDoesntMatchFileName@) unless their own directory
+-- is itself an include root. Add it for exactly those bridge-generated files;
+-- every normal project module resolves through @cfgIncludes@ unchanged.
+loadIncludes :: ServerState -> FilePath -> [FilePath]
+loadIncludes ss file =
+  let base = cfgIncludes (ssConfig ss)
+      d    = normalise (takeDirectory file)
+  in if d == normalise (scratchSubdir ss)
+        || d == normalise (scratchSubdir ss </> ".validate")
+       then d : base
+       else base
+
+-- | The one heavy real-target recheck happens here, so be generous.
+validateTimeoutMicros :: Int
+validateTimeoutMicros = 600 * 1000000
+
+runStage :: ToolRunner
+runStage ss a = do
+  let dir = scratchSubdir ss
+  createDirectoryIfMissing True dir
+  existing <- either (const []) id <$>
+                (try (listDirectory dir) :: IO (Either SomeException [FilePath]))
+  let used    = mapMaybe (\f -> stripPrefix "Scratch" (dropExtension f) >>= readMaybe) existing :: [Int]
+      n       = if null used then 0 else maximum used + 1
+      modName = "Scratch" ++ show n
+      file    = dir </> (modName ++ ".agda")
+  seed <- case argText a "target" of
+    Nothing -> pure ""
+    Just t  -> do
+      r <- readFileSafe (absFile ss t)
+      pure $ case r of
+        Right txt -> T.unlines (importLines txt)
+        Left _    -> ""
+  let content = T.pack ("module " ++ modName ++ " where\n\n") <> seed
+                  <> "\n" <> seedComment <> "\n"
+  w <- try (TIO.writeFile file content) :: IO (Either SomeException ())
+  pure $ case w of
+    Left e  -> Left ("could not create scratch module: " <> T.pack (show e))
+    Right _ -> Right ("Staged scratch module:\n  " <> T.pack file
+                        <> "\n\nAdd your `sig : T` + `def = ?`, `load` this file, and \
+                           \build with goal_type / case_split / refine / give. When it \
+                           \type-checks, `promote` it into a real module (scratch=" <> T.pack file
+                        <> ", target=<module>), or `discard` it.")
+
+-- | Marker line written into a fresh scratch so the user knows where to type
+-- (and 'scratchDefBody' can drop it).
+seedComment :: Text
+seedComment = "-- Add `name : Type` and `name = ?` below, then `load` this file."
+
+runDiscard :: ToolRunner
+runDiscard ss a = case argText a "scratch" of
+  Nothing -> pure (Left "discard requires a `scratch` file argument.")
+  Just sc -> do
+    let file = absFile ss sc
+    modifyMVar_ (ssSessions ss) $ \m -> case M.lookup file m of
+      Just e  -> closeSession (seSession e) >> pure (M.delete file m)
+      Nothing -> pure m
+    _ <- try (removePathForcibly file) :: IO (Either SomeException ())
+    pure (Right ("Discarded scratch " <> T.pack file <> "."))
+
+runPromote :: ToolRunner
+runPromote ss a = case (argText a "scratch", argText a "target") of
+  (Just sc, Just tg) -> do
+    let scratchFile = absFile ss sc
+        targetFile  = absFile ss tg
+    escr <- readFileSafe scratchFile
+    etgt <- readFileSafe targetFile
+    case (escr, etgt) of
+      (Left e, _)            -> pure (Left e)
+      (_, Left e)            -> pure (Left e)
+      (Right scr, Right tgt) ->
+        let missing = [ l | l <- importLines scr, l `notElem` importLines tgt ]
+            body    = scratchDefBody scr
+        in if T.null (T.strip body)
+             then pure (Left "promote: the scratch module has no definitions to promote yet.")
+             else do
+               let candidate = buildCandidate targetFile tgt missing body
+               v <- validateCandidate ss targetFile candidate
+               pure $ case v of
+                 Left err -> Left ("promote: the spliced definition does not typecheck in "
+                                     <> T.pack (takeFileName targetFile)
+                                     <> " — nothing changed:\n" <> err)
+                 Right () -> Right ("Validated in the real target. Apply this diff and \
+                                    \`load` to continue — the bridge does not write the file:\n\n"
+                                    <> T.pack (unifiedDiff targetFile tgt candidate))
+  _ -> pure (Left "promote requires both `scratch` and `target` file arguments.")
+
+-- | Lines that are Agda imports (`import` / `open import`), leading-trimmed.
+importLines :: Text -> [Text]
+importLines = filter isImp . map T.stripStart . T.splitOn "\n"
+  where isImp l = "import " `T.isPrefixOf` l || "open import " `T.isPrefixOf` l
+
+isModuleHeader :: Text -> Bool
+isModuleHeader l = "module " `T.isPrefixOf` T.stripStart l
+
+-- | Rename the first top-level (column-0) @module … where@ header to
+-- @newName@, leaving inner/indented submodules and everything else intact.
+renameTopModule :: Text -> Text -> Text
+renameTopModule newName = T.intercalate "\n" . go . T.splitOn "\n"
+  where
+    go [] = []
+    go (l:rest)
+      | "module " `T.isPrefixOf` l = rewrite l : rest   -- first col-0 module decl
+      | otherwise                  = l : go rest
+    rewrite l = case T.words l of
+      ("module" : _old : more) -> T.unwords ("module" : newName : more)
+      _                        -> l
+
+-- | The definition block of a scratch module: everything after the
+-- `module … where` header, minus the import preamble and the seed comment.
+scratchDefBody :: Text -> Text
+scratchDefBody scr =
+  let afterModule = drop 1 (dropWhile (not . isModuleHeader) (T.splitOn "\n" scr))
+      defs = [ l | l <- afterModule
+                 , let s = T.stripStart l
+                 , not ("import " `T.isPrefixOf` s)
+                 , not ("open import " `T.isPrefixOf` s)
+                 , s /= seedComment ]
+  in T.strip (T.intercalate "\n" defs)
+
+-- | Build the candidate target: missing imports right after the target's
+-- `module … where` header, scratch defs appended at the end of the last code
+-- region (EOF for .agda; inside the last ```agda fence for a literate file).
+-- Best-effort placement — 'validateCandidate' is the guard.
+buildCandidate :: FilePath -> Text -> [Text] -> Text -> Text
+buildCandidate targetFile tgt missing body =
+  let ls1   = insertAfterModule (T.splitOn "\n" tgt) missing
+      block = ["", body, ""]
+  in T.intercalate "\n" $
+       if isLiterate targetFile
+         then insertBeforeLastFenceClose ls1 block
+         else ls1 ++ block
+
+insertAfterModule :: [Text] -> [Text] -> [Text]
+insertAfterModule ls extra
+  | null extra = ls
+  | otherwise  = case break isModuleHeader ls of
+      (pre, h:rest) -> pre ++ (h : extra) ++ rest
+      (_, [])       -> extra ++ ls
+
+insertBeforeLastFenceClose :: [Text] -> [Text] -> [Text]
+insertBeforeLastFenceClose ls block =
+  case lastFence of
+    Just i  -> let (pre, post) = splitAt i ls in pre ++ block ++ post
+    Nothing -> ls ++ block
+  where
+    lastFence = case [ i | (i, l) <- zip [0 ..] ls, "```" `T.isPrefixOf` T.stripStart l ] of
+      [] -> Nothing
+      is -> Just (last is)
+
+-- | Write the candidate to a temp copy under a FRESH top-level module name
+-- and load it through a throwaway agda session. The rename matters: the real
+-- target is reachable on the include path, so a temp keeping the target's
+-- module name collides (`AmbiguousTopLevelModuleName`). A def's
+-- well-typedness doesn't depend on its enclosing module's name, so renaming
+-- validates the same thing without the clash. 'Right ()' iff it type-checks
+-- (remaining holes are fine — they are not errors).
+validateCandidate :: ServerState -> FilePath -> Text -> IO (Either Text ())
+validateCandidate ss targetFile candidate = do
+  let c          = ssConfig ss
+      tmpDir     = scratchSubdir ss </> ".validate"
+      newMod     = "AgdaExploreValidate"
+      suffix     = dropWhile (/= '.') (takeFileName targetFile)  -- ".agda" / ".lagda.md"
+      tmpFile    = tmpDir </> (newMod ++ suffix)
+      candidate' = renameTopModule (T.pack newMod) candidate
+  createDirectoryIfMissing True tmpDir
+  ew <- try (TIO.writeFile tmpFile candidate') :: IO (Either SomeException ())
+  r <- case ew of
+    Left e  -> pure (Left ("could not stage the validation copy: " <> T.pack (show e)))
+    Right _ -> do
+      mbin <- findBin "agda" (cfgAgdaBin c) "AGDA_BIN"
+      case mbin of
+        Nothing  -> pure (Left "could not locate the agda binary for validation.")
+        Just bin -> do
+          es <- startSession (SessionConfig bin (cfgInteractArgs c) validateTimeoutMicros) tmpFile
+          case es of
+            Left e     -> pure (Left ("agda could not start: " <> e))
+            Right sess -> do
+              out <- sendIotcm sess (iotcmLoad tmpFile (loadIncludes ss tmpFile))
+              closeSession sess
+              pure (either Left (const (Right ())) (interpretLoad out))
+  _ <- try (removePathForcibly tmpDir) :: IO (Either SomeException ())
+  pure r
 
 -- | Turn a give\/refine reply burst into an edit diff. An Error means the
 -- term was rejected and the file is untouched; a GiveAction carries the
@@ -431,7 +665,7 @@ doLoad ss file = modifyMVar (ssSessions ss) $ \m -> do
     Left err -> pure (m, Left err)
     Right sess -> do
       let gm0 = maybe emptyGoalMap seGoalMap (M.lookup file m)
-      out <- sendIotcm sess (iotcmLoad file (cfgIncludes (ssConfig ss)))
+      out <- sendIotcm sess (iotcmLoad file (loadIncludes ss file))
       case interpretLoad out of
         Left err    ->
           pure (M.insert file (SessionEntry sess gm0 False) m, Left err)

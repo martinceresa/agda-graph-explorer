@@ -2,13 +2,62 @@
 
 ## Unreleased
 
-### Bridge batching, cold-start fallback, parallel goals (2026-06-13)
+### Staging-buffer include-path fix (2026-06-15)
 
+- **`agda-explore`: `stage` / `promote` now load on projects with an
+  `.agda-lib`.** The scratch module (`.agda-explore/scratch/Scratch*.agda`)
+  and promote's renamed validation temp
+  (`.agda-explore/scratch/.validate/AgdaExploreValidate.*`) have *bare*
+  top-level module names, but both load sites passed Agda only the project's
+  `cfgIncludes` — never those generated dirs. On any project whose include
+  roots don't cover them (the realistic `.agda-lib` case, where the root is
+  e.g. `agda-src` and the scratch sits *under* it), Agda rejected both with
+  `ModuleNameDoesntMatchFileName`, so the whole staging workflow was dead:
+  `load` of the scratch failed, and `promote` failed in validation with
+  "nothing changed". Fix: a new `AgdaInteract.Tools.loadIncludes` prepends the
+  loaded file's own directory to the include list for *exactly* the scratch
+  dir and the `.validate` dir; `doLoad` and `validateCandidate` both use it.
+  Normal project loads are byte-identical (the directory is added only for
+  those two bridge-generated locations). The splice + import-merge logic was
+  already correct — this was purely the include/module-name setup for the
+  generated files. Observed + fixed on the Jolteon-FastBFT corpus
+  (`fastbft.agda-lib`); a `stage`→`promote` end-to-end run now type-checks the
+  promoted target (merged a missing import + appended the new def). Follow-up
+  to the 2026-06-13 staging entry below. Regression locked in the live
+  `convergence.py` harness: its `stage`→`promote` case now drops an
+  `.agda-lib` at the project root so the scratch sits *under* a project root
+  (the trigger — without it Agda accepts the scratch's own dir implicitly and
+  the bug doesn't surface); the case fails with the prepend disabled and
+  passes with it. It stays a *live* test (needs `agda`), not in the offline
+  CI suite — the bug is an Agda module-resolution behavior the transcript
+  replay can't exercise.
+
+### Bridge batching + staging, cold-start fallback, parallel goals (2026-06-13)
+
+- **`agda-explore`: `auto` now works (Mimer).** The earlier "unavailable on
+  2.9" was a wrong `Cmd_autoOne` invocation — Agda 2.9's signature is
+  `Cmd_autoOne Rewrite InteractionId Range String` and we were omitting the
+  leading `Rewrite`. `iotcmAutoOne` now sends it; `auto <goal>` returns a
+  fill diff (or a clear no-solution note).
 - **`agda-explore`: `give_many`** (bridge) — fill several open goals in one
   shot against a single live session, so the (possibly minutes-long) module
   load is paid ONCE instead of reloaded between gives. Each term is
   Agda-validated + guarded; returns one combined unified diff; atomic — if
   any term is rejected, nothing is applied and the error names the goal.
+- **`agda-explore`: `stage` / `promote` / `discard`** (bridge) — author a
+  *new* definition in isolation. `stage` opens an ephemeral scratch module
+  under `.agda-explore/scratch/` (seeded with a target's imports), so each
+  `load` re-checks only the scratch's tiny closure instead of the target's
+  whole module; build the def with the usual tools, then `promote` splices
+  it into the real target — merging missing imports and re-validating the
+  **whole target** in Agda — returning a unified diff on success or the
+  localized error with nothing changed (validation runs against a temp copy
+  under a renamed module, so it never trips `AmbiguousTopLevelModuleName`
+  against the real file). `discard` drops a dead-end scratch.
+- **`agda-optimization`: `term-cluster` ranking flags.** `--sort=`
+  `score|log-score|size` and `--min-mean-depth=N` make the AST-subterm
+  cluster report rankable/filterable (default `score`); determinism holds
+  (`+RTS -N1` ≡ `-NK`, human and `--json`).
 - **`agda-explore`: cold-start fallback.** Serve-stale only covered the
   *after one good build* case; a corpus that fails to build from the very
   first load left the daemon dark (every tool echoed `agda-deps exit 120`).
@@ -52,8 +101,8 @@ New MCP tools:
 - **write (Agda-validated):** `case_split`, `refine`, `give` — each
   returns a **unified diff** (the bridge never writes the file); a term
   that doesn't typecheck returns the localized Agda error with the file
-  left untouched. `auto` (Mimer) is wired but degrades on Agda 2.9.0,
-  whose IOTCM reader rejects `Cmd_autoOne` — use `refine`/`give`.
+  left untouched. `auto` runs Mimer proof search (fills the hole, or
+  reports no solution).
 - **hard zero-axiom contract:** `give` / `refine` input is rejected up
   front if it uses `postulate`, a termination / coverage / `OPTIONS`
   pragma, or another escape hatch (`AgdaInteract.Guard`).
