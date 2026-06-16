@@ -7,10 +7,13 @@ description: >-
   depends on, gauge the blast radius of changing it, read its type, find
   structurally or type-similar definitions, or hunt unused imports / dead
   code. If the server is started with --enable-interact, also use it to
-  edit proofs goal-by-goal — open a module's goals, read a goal's type and
-  context, case-split, refine, or give a term (all Agda-validated, returned
-  as diffs). Backed by the `agda-explore` MCP server (from the agda-explore
-  plugin).
+  WRITE Agda under a zero-axiom contract: scaffold a new validated module
+  (new_module), author a whole file or definition (give_file), type-check a
+  file and get structured errors + remaining goals (check), drive holes
+  goal-by-goal (case_split / refine / give / auto, optionally writing +
+  reloading in one step), batch several fills (construct), and find a
+  reusable lemma for a goal (lemmas) — all Agda-validated. Backed by the
+  `agda-explore` MCP server (from the agda-explore plugin).
 ---
 
 # Exploring an Agda library with agda-explore
@@ -167,53 +170,81 @@ is always self-describing — never silently mis-scoped.
 
 If the server was started with `--enable-interact` (or `enable-interact:
 true` in `.agda-explore.yml`) and `agda` is on `$PATH`, a **write** surface
-is available — prefer it over blind string edits + a full reload, because it
-drives Agda's own hole workflow and validates every step:
+is available. Use it as the validated alternative to a blind `Write` +
+`agda File` in a shell: every tool here is Agda-checked, honours the
+**zero-axiom contract** (it refuses `postulate` / a termination-or-coverage
+or unsafe-`OPTIONS` pragma / an escape hatch — a plain `Write` can smuggle
+one past CI; these tools cannot), and returns a diff (and the remaining
+goals).
 
 | You want to…                                          | Use            |
 |-------------------------------------------------------|----------------|
 | Open a module and see its open goals (ids + positions) | `load`         |
+| Type-check a file → structured errors + warnings + open goals | `check` |
 | Read a goal's type + in-scope context                  | `goal_type` / `goal_context` |
 | Infer / normalise an expression in a goal's context    | `infer` / `normalize` |
+| Find an existing lemma whose conclusion matches a goal | `lemmas`       |
+| Scaffold a NEW validated module (header, imports, holes) | `new_module` |
+| Author a whole file / a new definition (validated)     | `give_file`    |
 | Case-split a goal on a variable                        | `case_split`   |
 | Refine a goal by a head symbol (`f ?`)                 | `refine`       |
 | Fill a goal with a complete term (type-checked)        | `give`         |
 | Fill SEVERAL independent goals in one load (one diff)  | `give_many`    |
+| Run a planned batch of give/refine/case_split/auto steps | `construct`  |
 | Run Mimer proof search to solve a goal                 | `auto`         |
 | Build a NEW def in isolation, then splice it in        | `stage` → `promote` (or `discard`) |
 
-Workflow: `load <file>` first — it returns goals as `g0, g1, …` with their
-`(line:col)`. Pass an id to the other tools. `case_split` / `refine` /
-`give` return a **unified diff and do NOT write the file** — apply the diff
-yourself, then `load` again to pick up the new goals. **Don't cache an id
-across an edit:** applying a diff can renumber goals (an id is only
-preserved while a hole's position is unchanged), so always re-`load` after
-an edit and re-select — matching on the reported `(line:col)` is the robust
-way to track a specific goal. A `give` whose term doesn't typecheck
-comes back as the localized Agda error with the file untouched, so you can
-iterate safely. When you have several *independent* holes to fill and the
-module is slow to load, prefer **`give_many`** (a list of `{goal, term}`):
-it fills them all against one session load and returns a single combined
-diff, instead of paying a reload between each — and it's atomic (if any
-term is rejected, nothing is applied and the error names the goal). Note:
-the bridge **refuses** any `give` / `refine` / `give_many` that uses
-`postulate`, a termination/coverage/`OPTIONS` pragma, or another escape
-hatch — it will not close a goal by weakening soundness; supply a real term.
-`auto` runs Mimer to search for a solving term — it returns a diff filling
-the hole, or a "no solution" note (then guide it with `refine` or supply a
-`give`). `.lagda.md` files work; edits stay
-inside the code block.
+**Authoring a whole file (the bridge meets `Write`, validated).** You don't
+have to construct everything goal-by-goal — author the way you naturally
+would, but route it through the bridge so it lands under the contract:
 
-To author a *new* definition (rather than close an existing hole), use
-**`stage`** → **`promote`**: `stage <target>` opens a throwaway scratch
-module under `.agda-explore/scratch/` seeded with the target's imports, so
-each `load` re-checks only the scratch's tiny closure instead of the
-target's whole (possibly slow) module. Build the def there with the usual
-tools, then `promote scratch=<…> target=<module>` splices it in, merges any
-missing imports, and re-validates the **whole real target** once — returning
-a diff on success, or the localized error (with the target untouched) if the
-def relies on scope/instance/ordering facts the scratch didn't capture.
-`discard` drops a dead-end scratch.
+- A **new module** → `new_module path=<file>`: it writes a correct
+  `module … where` header matching the path, literate ```` ```agda ````
+  fences for a `.lagda.md` path, `open import …` lines **resolved off the
+  dependency graph** from the bare names you list in `imports` (e.g.
+  `["Fin","_≤_"]`), and a `name : T` / `name = ?` hole per `defs` stub —
+  then type-checks the scaffold. With `write:true` it creates and `load`s
+  the file (returning its goals); otherwise it returns the validated
+  content for you to write.
+- A **whole file or one new definition** → `give_file file=<f>` with either
+  `content` (the full file text — also creates a new file) or `append` (a
+  definition block to splice onto the end). The whole text is guarded and
+  type-checked; you get a diff (or, with `write:true`, it's applied and the
+  module reloaded). Prefer this over `Write` whenever the file must honour
+  `--safe` / 0-postulate.
+- **After editing a file as text** (with `Edit`/`Write`) → `check file=<f>`
+  instead of `agda <f>` in a shell. It reuses the warm session + `.agdai`
+  cache and returns a ✓/✗ verdict, **every** error and warning, and the
+  remaining open goals — so you pivot straight to filling them. Pass
+  `content` to dry-run proposed text without writing.
+
+**Driving holes.** `load <file>` first — it returns goals as `g0, g1, …`
+with their `(line:col)`; pass an id to the goal tools. By default
+`case_split` / `refine` / `give` return a **unified diff without writing** —
+apply it, then `load` again. **Or pass `write:true`** and the tool applies
+the edit and reloads in one step, returning the diff *and* the refreshed
+goal list (one round-trip, more information than a shell recompile — the
+preferred way once you trust the step). **Don't cache an id across an edit
+you applied yourself:** applying a diff can renumber goals, so re-`load` (or
+use `write:true`, which hands back the fresh ids) and re-select on
+`(line:col)`. A `give` whose term doesn't typecheck comes back as the
+localized Agda error with the file untouched. For several *independent*
+holes in a slow-to-load module, `give_many` fills them all against one load
+(one atomic combined diff). For a *planned heterogeneous* sequence
+(`case_split g0`, then `give g1`, then `refine g2`), `construct` runs the
+steps against one warm load and accumulates one diff — each step targets a
+goal from the initial load (run it again for holes a split introduces).
+`auto` runs Mimer; if it finds nothing, guide it with `refine` or a `give`.
+When you're stuck on what to write, `lemmas goal=g0` searches the project
+for a definition whose conclusion matches the goal's type — then `give` /
+`refine` with it. `.lagda.md` files work; edits stay inside the code block.
+
+`stage` → `promote` remains for building a def in an isolated scratch module
+(`.agda-explore/scratch/`) when you want each `load` to re-check only the
+scratch's tiny closure rather than the target's whole module; `promote`
+splices it in and re-validates the whole real target, and `discard` drops a
+dead end. For most new definitions `give_file` / `new_module` are more
+direct.
 
 ## Good habits
 
@@ -224,7 +255,11 @@ def relies on scope/instance/ordering facts the scratch didn't capture.
   conclusion already matches the goal.
 - Only fall back to reading files or grepping when you need the *prose*
   around a definition, or to verify an `unused` finding.
-- When the interaction bridge is enabled and you're *constructing* a proof
-  (not just reading), drive it through `load` → `goal_type` →
-  `case_split`/`refine`/`give` rather than editing the hole as text and
-  reloading — each step is Agda-validated and the diffs keep you in sync.
+- When the interaction bridge is enabled and you're *writing* (not just
+  reading), prefer it over `Write` + `agda File`: `new_module` / `give_file`
+  to author a new module or definition under the zero-axiom contract,
+  `check` to validate a file you edited as text and read back the remaining
+  goals, `case_split`/`refine`/`give`/`auto` (with `write:true` to apply +
+  reload in one step) or `construct` to drive the holes, and `lemmas` when
+  you're unsure what term a goal needs. Each step is Agda-validated and the
+  diffs keep you in sync.

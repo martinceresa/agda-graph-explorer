@@ -54,6 +54,7 @@ main :: IO ()
 main = do
   fails <- newIORef (0 :: Int)
   sequence_ (map ($ fails) guardTests)
+  sequence_ (map ($ fails) fileGuardTests)
   sequence_ (map ($ fails) literateTests)
   sequence_ (map ($ fails) iotcmTests)
   sequence_ (map ($ fails) goalIdTests)
@@ -88,6 +89,33 @@ guardTests =
   , check "guard catches postulate after a comment"
       (isRejected (checkGiveInput "{- ok -} postulate q : A"))
   , checkEq "stripComments removes block comment" "f  g" (stripComments "f {- x -} g")
+  ]
+
+-- | The whole-file guard ('checkFileInput', used by give_file / new_module
+-- / promote): unlike 'checkGiveInput' it tolerates benign module pragmas
+-- but still rejects the soundness-escaping ones.
+fileGuardTests :: [Check]
+fileGuardTests =
+  [ check "file guard allows a plain module"
+      (not (isRejected (checkFileInput "module M where\nfoo : Nat\nfoo = 0\n")))
+  , check "file guard allows {-# OPTIONS --safe #-}"
+      (not (isRejected (checkFileInput "{-# OPTIONS --safe #-}\nmodule M where\n")))
+  , check "file guard allows {-# OPTIONS --without-K #-}"
+      (not (isRejected (checkFileInput "{-# OPTIONS --without-K #-}\nmodule M where\n")))
+  , check "file guard allows a BUILTIN pragma"
+      (not (isRejected (checkFileInput "{-# BUILTIN NATURAL Nat #-}\n")))
+  , check "file guard rejects postulate in a module"
+      (isRejected (checkFileInput "module M where\npostulate bad : A\n"))
+  , check "file guard rejects {-# TERMINATING #-}"
+      (isRejected (checkFileInput "{-# TERMINATING #-}\nf = f\n"))
+  , check "file guard rejects {-# OPTIONS --type-in-type #-}"
+      (isRejected (checkFileInput "{-# OPTIONS --type-in-type #-}\nmodule M where\n"))
+  , check "file guard rejects {-# NON_TERMINATING #-}"
+      (isRejected (checkFileInput "{-# NON_TERMINATING #-}\nf = f\n"))
+  , check "file guard ignores postulate in a line comment"
+      (not (isRejected (checkFileInput "module M where\n-- postulate is discussed here\nfoo = 0\n")))
+  , check "file guard rejects primTrustMe in a body"
+      (isRejected (checkFileInput "module M where\nf = primTrustMe\n"))
   ]
 
 ----------------------------------------------------------------------

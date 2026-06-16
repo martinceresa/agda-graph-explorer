@@ -70,22 +70,39 @@ When the `agda-explore` MCP tools are available:
   its representation; gauge the cost of a signature change.
 - `unused` — after refactoring, find imports/definitions left dangling.
 
-## Construct with the interaction bridge (when `--enable-interact` is on)
+## Author through the interaction bridge (when `--enable-interact` is on)
 
-When the bridge tools are available, *build* through them instead of editing
-holes as text and reloading — each step is Agda-validated and returns a diff:
+When the bridge tools are available, route your writing through them instead
+of `Write` + `agda File` in a shell — every tool is Agda-validated, enforces
+the **zero-axiom contract** (it refuses `postulate`, an escape hatch, or an
+unsafe pragma — a plain `Write` can smuggle one past CI; these cannot), and
+hands back the remaining goals. Author the way you naturally would; just land
+it through the bridge:
 
-- `load` → `goal_type` / `goal_context` to read a hole; `case_split` /
-  `refine` / `give` to drive it; `auto` to let Mimer search. `give_many` fills
-  several independent holes in one session load.
-- `stage` → `promote` to author a *new* definition in isolation: `stage` opens
-  a scratch module (seeded with a target's imports) so each `load` re-checks
-  only its tiny closure; build the def, then `promote` splices it into the real
-  target and re-validates the whole module (diff on success, or the localized
-  error with nothing changed). `discard` drops a dead end.
-- The bridge enforces the **zero-axiom contract** — it refuses any
-  `give`/`refine` using `postulate` or an escape hatch, matching this agent's
-  no-gratuitous-postulates mandate.
+- **New module** → `new_module path=<file>`: it writes a `module … where`
+  header matching the path, literate ```` ```agda ```` fences for a
+  `.lagda.md` path, `open import …` lines **resolved off the dependency
+  graph** from the bare names you pass in `imports` (e.g. `["Fin","_≤_"]`),
+  and a `name : T` / `name = ?` hole per `defs` stub — then type-checks the
+  scaffold. With `write:true` it creates and loads the file. This is how a
+  fresh file gets holes to drive in the first place.
+- **A whole file or a new definition** → `give_file file=<f>` with `content`
+  (the full text, also creates a new file) or `append` (a block to splice
+  onto an existing module). The whole text is guarded + type-checked → a diff
+  (or applied with `write:true`). Prefer this over `Write` for anything that
+  must stay postulate-free.
+- **After editing as text** → `check file=<f>` (not `agda <f>`): a ✓/✗
+  verdict with every error and warning and the remaining open goals, over the
+  warm session.
+- **Drive the holes** → `goal_type` / `goal_context` to read; `case_split` /
+  `refine` / `give` to fill (pass `write:true` to apply + reload in one step,
+  returning the fresh goals); `auto` for Mimer; `give_many` for several
+  independent holes in one load; `construct` for a planned batch. When you're
+  unsure what term a goal wants, `lemmas goal=g0` searches the project for a
+  definition whose conclusion matches it — reuse beats re-deriving.
+- `stage` → `promote` still builds a def in an isolated scratch module when
+  you want each `load` to re-check only its tiny closure; `discard` drops a
+  dead end. For most definitions `give_file` / `new_module` are more direct.
 
 ## Seek clarification when
 

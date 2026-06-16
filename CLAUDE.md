@@ -41,14 +41,23 @@ The repo ships one shared library and four executables:
   **subprocess** (see [Cross-repo runtime link](#cross-repo-runtime-link)).
   Under `--enable-interact` it *also* exposes a **write-side interaction
   bridge** (`load` / `goal_type` / `goal_context` / `infer` /
-  `normalize` / `case_split` / `refine` / `give` / `give_many` / `auto` /
-  `stage` / `promote` / `discard`) backed by a long-lived
-  `agda --interaction-json` **subprocess** — every
-  `give` / `refine` is Agda-validated and returns a unified diff (the bridge
-  never writes the file). This is a *second, independent* subprocess
-  model beside the graph daemon: interaction tools reflect live on-disk
-  state and deliberately bypass `ensureFresh`. Needs `agda` on `$PATH`
-  (or `--agda-bin`). Under `--inspect` (or `--inspect-port N`) it *also*
+  `normalize` / `check` / `case_split` / `refine` / `give` / `give_many` /
+  `auto` / `construct` / `give_file` / `new_module` / `stage` / `promote` /
+  `discard` / `lemmas`) backed by a long-lived `agda --interaction-json`
+  **subprocess** — every `give` / `refine` is Agda-validated and returns a
+  unified diff (the bridge never writes unless a mutator is passed
+  `write:true`, which applies the edit and reloads). Beyond hole-filling it
+  also supports *file authoring* under the same zero-axiom contract:
+  `check` (structured validate → errors + warnings + open goals, of the
+  on-disk file or proposed `content`), `give_file` (validate a whole file
+  or appended block → diff), `new_module` (scaffold a validated skeleton,
+  resolving imports off the dependency graph), `construct` (a heterogeneous
+  batch of hole-driven steps against one warm load), and `lemmas`
+  (goal-directed lemma search off a live goal's type). This is a *second,
+  independent* subprocess model beside the graph daemon: interaction tools
+  reflect live on-disk state and deliberately bypass `ensureFresh` (the
+  exceptions are `lemmas` and `new_module`'s import resolution, which read
+  the graph index). Needs `agda` on `$PATH` (or `--agda-bin`). Under `--inspect` (or `--inspect-port N`) it *also*
   serves an opt-in **localhost web inspector** — a hand-rolled HTTP +
   Server-Sent-Events server (`AgdaMcp.Inspect`, on the `network` dep) that
   streams a live activity feed (every `tools/call`) and an editing view
@@ -239,6 +248,11 @@ src/
                                 re-read goals after an edit (match line:col).
     Guard.hs                    no-postulate / no-escape-hatch guard on
                                 give/refine input (hard zero-axiom contract).
+                                checkFileInput is the whole-file variant
+                                (give_file / new_module / promote): tolerates
+                                benign module pragmas, still rejects
+                                postulate / termination-coverage / unsafe
+                                OPTIONS.
     Literate.hs                 .lagda.md code-block detection + the
                                 isInsideCode splice guard.
     Edit.hs                     splice / multi-range splice / clause
@@ -255,6 +269,22 @@ src/
                                 (promote validates a temp copy under a renamed
                                 module to dodge AmbiguousTopLevelModuleName;
                                 returns a diff, never writes the target).
+                                applyOrDiff is the shared edit-finisher: with
+                                write:true it writes + reloads + returns the
+                                refreshed goals, else returns the diff (the
+                                bridge default). loadRenamedTemp validates
+                                arbitrary candidate text under a throwaway
+                                module name (shared by promote / check
+                                content= / give_file / new_module). check
+                                reports full diagnostics (interpretCheck:
+                                every error + warning + goal, vs interpretLoad);
+                                give_file authors whole-file/appended content
+                                guarded by Guard.checkFileInput; new_module
+                                scaffolds + resolves imports off the index;
+                                construct runs a heterogeneous step batch
+                                (reload-per-step, edits accumulated against the
+                                pristine original); lemmas runs queryFindLemma
+                                off a live goal's type.
 
 src-agda-graph/AgdaGraph/       Shared library.
   Interaction/Protocol.hs       FromJSON mirror of the --interaction-json
@@ -380,13 +410,21 @@ plugin/                         Claude Code plugin bundling the
   char, three bytes). `AgdaInteract.Literate.isInsideCode` is a guard
   that refuses to splice into literate prose.
 
-- **The write-side bridge enforces a hard zero-axiom contract and never
-  writes the file.** `AgdaInteract.Guard.checkGiveInput` rejects
-  `postulate` / termination-or-coverage-or-`OPTIONS` pragmas / escape
-  identifiers *before* the term reaches Agda; `give`/`refine` return a
-  unified diff for the caller to apply, then mark the session dirty so
-  the next query reloads from (unchanged) disk — keeping the bridge's
-  view consistent with disk. `auto` runs Mimer
+- **The write-side bridge enforces a hard zero-axiom contract and, by
+  default, does not write the file.** `AgdaInteract.Guard.checkGiveInput`
+  rejects `postulate` / termination-or-coverage-or-`OPTIONS` pragmas /
+  escape identifiers *before* the term reaches Agda (and
+  `checkFileInput` does the file-authoring equivalent, tolerating benign
+  module pragmas); `give`/`refine` return a unified diff for the caller to
+  apply, then mark the session dirty so the next query reloads from
+  (unchanged) disk — keeping the bridge's view consistent with disk.
+  **Opt-in write** (`write:true` on any mutator, routed through
+  `applyOrDiff`) flips this: the bridge writes the file *and* reloads,
+  returning the diff plus the refreshed goal list — one round-trip with
+  more information than a shell recompile, which is what made the
+  *previous* return-a-diff-then-reload loop too costly for agents to use
+  (they wrote whole files + `agda File` instead). The diff is still emitted
+  (and teed to the inspector) either way. `auto` runs Mimer
   (`Cmd_autoOne Rewrite InteractionId Range String` — the leading
   `Rewrite` is mandatory; omitting it is what made earlier attempts
   "cannot read") and returns a fill diff, or a clear no-solution note.

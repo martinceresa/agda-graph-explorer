@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+### Write-side bridge: file authoring + structured validation (2026-06-16)
+
+The interaction bridge gained tools so agents can WRITE whole files under
+the zero-axiom contract — not just fill existing holes — closing the gap
+that had agents reaching for `Write` + `agda File` instead of the bridge
+(see `Jolteon-FastBFT/docs/MCP/UsageAnalysis.md` for the adoption data
+that motivated this). All in `AgdaInteract.Tools`, exposed under
+`--enable-interact`:
+
+- **`check`** — type-check a module (on-disk, or a proposed `content`
+  dry-run) over the warm session and return structured diagnostics: a ✓/✗
+  verdict, **every** error and warning (not just the first), and the open
+  goals with stable ids. The bridge's `agda File`, reusing the `.agdai`
+  cache and handing the goals straight back.
+- **`give_file`** — author whole-file `content` (also creates a new file)
+  or an `append` block; the whole text is run through the no-postulate /
+  no-escape-hatch guard (`Guard.checkFileInput`, the whole-file variant
+  that tolerates benign module pragmas) and type-checked, returning a diff
+  (or applied with `write:true`). The validated counterpart to `Write`.
+- **`new_module`** — scaffold a validated module skeleton: a header
+  matching the path, literate fences for a `.lagda.md` path, `open import`
+  lines **resolved off the dependency graph** from bare names, and a hole
+  per `{name,type}` stub.
+- **`construct`** — run a planned heterogeneous batch of
+  `give`/`refine`/`case_split`/`auto` steps against one warm load → one
+  combined diff (reload-per-step; edits accumulated against the pristine
+  original).
+- **`lemmas`** — goal-directed lemma search wired off a live goal's type
+  (a front-end to the read-side `find_lemma`), so a stuck goal surfaces a
+  reusable candidate to `give`/`refine` with.
+- **`write:true`** — opt-in on every mutator (`give` / `refine` /
+  `case_split` / `give_many` / `auto` / `construct` / `give_file` /
+  `promote`, and `new_module`): the bridge applies the edit, reloads, and
+  returns the diff **plus the refreshed goals** in one round-trip, instead
+  of only returning a diff. (Default stays off — the bridge does not write
+  unless asked.) `promote` now also runs the whole-file guard over the
+  staged body.
+
 ### Live web inspector (`--inspect`) (2026-06-15)
 
 - **`agda-explore`: opt-in localhost web inspector.** Started with

@@ -77,12 +77,20 @@ grepping the tree:
 
 1. Confirm the code is finished (if the user is still exploring, decline —
    you're a late-stage agent).
-2. Typecheck the target file first (`agda <File>`); reserve the whole-project
-   entry module for pre-commit verification.
+2. Typecheck the target file first. When the interaction bridge is enabled,
+   use `check file=<File>` (it reuses the warm session + `.agdai` cache and
+   returns every error/warning + any open goals) rather than `agda <File>` in
+   a shell; reserve the whole-project entry module for pre-commit verification.
 3. Read the target; note theorem signatures to preserve verbatim.
 4. List simplification opportunities, grouped by transformation kind.
-5. Apply incrementally, typechecking after each meaningful change; revert
-   anything that breaks or obscures.
+5. Apply incrementally, re-checking after each meaningful change (`check`, or
+   the mutator's own `write:true` reload); revert anything that breaks or
+   obscures. When the bridge is on, prefer its Agda-validated edits over blind
+   text edits: `give`/`refine`/`case_split` with `write:true` apply + reload
+   in one step, `construct` runs a planned batch, and `give_file` re-authors a
+   whole definition under the zero-axiom contract (so a simplification can't
+   silently introduce a postulate). `lemmas`/`similar_bodies` surface the
+   existing lemma a duplicated body should collapse into.
 6. Report concisely: what changed, why, any signature that moved (justified),
    and before/after line counts.
 

@@ -10,9 +10,11 @@ It bundles:
   forcing the agent to `grep`. The graph is **regenerated on the fly**: when
   sources change, the server re-runs `agda-deps` (reusing Agda's `.agdai`
   cache) and hot-swaps the in-memory graph. Optionally (`--enable-interact`)
-  it also exposes a **write-side interaction bridge** — goal-driven editing
-  tools (`load` / `goal_type` / `case_split` / `refine` / `give` / …) backed
-  by a live `agda --interaction-json` session (see below). Optionally
+  it also exposes a **write-side interaction bridge** — Agda-validated
+  editing *and authoring* tools (scaffold a new module, author a whole file,
+  type-check + read goals, drive holes, find a reusable lemma: `new_module` /
+  `give_file` / `check` / `case_split` / `refine` / `give` / `lemmas` / …)
+  backed by a live `agda --interaction-json` session (see below). Optionally
   (`--inspect`) it serves a **localhost web inspector** that streams a live
   activity feed + editing view to a browser, for watching what the agent is
   doing (see below).
@@ -147,34 +149,45 @@ signatures `type_of` reports.
 The tools above are read-only. Started with **`--enable-interact`** (or
 `enable-interact: true` in `.agda-explore.yml`) and with `agda` on `$PATH`
 (or `--agda-bin`), the server adds a **write** surface backed by a live
-`agda --interaction-json` session — the agent edits through Agda's own
-goal / case-split / refine workflow instead of blind string replacement:
+`agda --interaction-json` session — the Agda-validated alternative to a
+blind `Write` + `agda File`, covering both authoring new code and driving
+holes:
 
 | Tool           | Question / action                                                                 |
 |----------------|-----------------------------------------------------------------------------------|
 | `load`         | Open a module; list open goals with ids (`g0, g1, …`) + source positions. Re-`load` after edits — applying a diff can renumber goals. |
+| `check`        | Type-check a module (on-disk, or proposed `content` dry-run) → ✓/✗ + **every** error and warning + the open goals. The bridge's `agda File`, over the warm session. |
 | `goal_type`    | The goal's type + in-scope context at a hole.                                     |
 | `goal_context` | Just the in-scope binders and their types.                                        |
 | `infer`        | Infer the type of an expression in a goal's context.                              |
 | `normalize`    | Normalise (compute) an expression in a goal's context.                            |
+| `lemmas`       | Goal-directed lemma search off a live goal's type → reusable candidates to `give`/`refine` with. |
+| `new_module`   | Scaffold a NEW validated module: path-matching header, literate fences, imports **resolved off the graph** from bare names, a hole per `{name,type}` stub. |
+| `give_file`    | Author a whole file (`content`) or append a definition block (`append`), guarded + type-checked → diff (or applied with `write:true`). The validated counterpart to `Write`. |
 | `case_split`   | Split a goal on a variable → unified diff of the generated clauses.               |
 | `refine`       | Refine a goal by a head symbol (`f ?`) → unified diff.                            |
 | `give`         | Fill a goal with a complete term, **Agda-validated** → unified diff (or the localized type error). |
 | `give_many`    | Fill SEVERAL goals in one session load → one combined diff; atomic (any rejection applies nothing). For many independent holes in a slow-to-load module. |
+| `construct`    | Run a planned batch of `give`/`refine`/`case_split`/`auto` steps against one warm load → one combined diff. |
 | `auto`         | Mimer proof search → a diff filling the hole, or a "no solution" note. |
 | `stage`        | Open an ephemeral scratch module (`.agda-explore/scratch/`, seeded with a target's imports) to build a *new* def in isolation — each `load` re-checks only the scratch's tiny closure. |
 | `promote`      | Splice a `stage` scratch's def(s) into a real target: merge missing imports, re-validate the **whole target** → unified diff, or the localized error with nothing changed. |
 | `discard`      | Drop a `stage` scratch buffer (close its session + delete the file). |
 
-Each mutator **returns a unified diff and never writes the file** — apply
-it yourself, then `load` again to refresh the goals. A bad `give` term
-fails locally (the file is never left broken), and a `give` / `refine`
-using `postulate`, a termination/coverage/`OPTIONS` pragma, or another
-escape hatch is rejected before Agda sees it (a hard zero-axiom contract).
-`.lagda.md` literate sources are handled — edits land inside the
-```` ```agda ```` code fence, never in the surrounding prose. To turn the
-bridge on for the plugin, add `enable-interact: true` to the project's
-`.agda-explore.yml` (the launcher otherwise starts the server read-only).
+By default each mutator **returns a unified diff and does not write the
+file** — apply it yourself, then `load` again. **Pass `write:true`** (on
+`give` / `refine` / `case_split` / `give_many` / `auto` / `construct` /
+`give_file` / `promote`, or `new_module`) and the bridge instead applies the
+edit, reloads, and returns the diff **plus the refreshed goals** in one
+round-trip. A bad term fails locally (the file is never left broken), and
+any input using `postulate`, a termination/coverage/unsafe-`OPTIONS` pragma,
+or another escape hatch is rejected before Agda sees it (a hard zero-axiom
+contract — the guard runs over whole-file content too, so a `give_file`
+can't smuggle a postulate past `--safe` either). `.lagda.md` literate
+sources are handled — edits land inside the ```` ```agda ```` code fence,
+never in the surrounding prose. To turn the bridge on for the plugin, add
+`enable-interact: true` to the project's `.agda-explore.yml` (the launcher
+otherwise starts the server read-only).
 
 ## Live web inspector (opt-in)
 

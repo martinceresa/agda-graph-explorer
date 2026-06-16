@@ -15,6 +15,7 @@
 module AgdaInteract.Guard
   ( GuardVerdict(..)
   , checkGiveInput
+  , checkFileInput
   , forbiddenIdentifiers
   , stripComments
   ) where
@@ -61,6 +62,70 @@ checkGiveInput input
   | otherwise = Allowed
   where
     hits = filter (`elem` forbiddenIdentifiers) (tokens (stripComments input))
+
+-- | Whole-file / whole-definition variant of 'checkGiveInput', for the
+-- file-authoring tools (@give_file@ / @new_module@ / @promote@). Unlike
+-- 'checkGiveInput' — which rejects /every/ pragma, right for a bare hole
+-- term — a real module legitimately carries pragmas (@{-# OPTIONS --safe
+-- #-}@, @{-# BUILTIN … #-}@), so this rejects only the soundness-escaping
+-- ones:
+--
+--   * any 'forbiddenIdentifiers' token (postulate \/ primTrustMe \/ …),
+--     after comment stripping;
+--   * a termination\/coverage-disabling pragma (TERMINATING \/
+--     NON_TERMINATING \/ NO_TERMINATION_CHECK \/ NON_COVERING);
+--   * an @OPTIONS@ pragma carrying a known unsafe flag (@--type-in-type@,
+--     @--no-positivity-check@, …).
+--
+-- Benign options (@--safe@, @--without-K@, @--warning=…@) pass; the
+-- session's own @--safe@ is the backstop for any unsafe flag this list
+-- misses.
+checkFileInput :: Text -> GuardVerdict
+checkFileInput input
+  | (p:_) <- badPragmas =
+      Rejected ("input contains a forbidden pragma ({-# " <> p <> " #-}); the bridge \
+                \refuses termination/coverage/unsafe-OPTIONS pragmas (zero-axiom contract).")
+  | (t:_) <- hits =
+      Rejected ("input uses a forbidden escape hatch: '" <> t
+                  <> "'. The bridge enforces a zero-postulate / fixed-axiom contract.")
+  | otherwise = Allowed
+  where
+    hits       = filter (`elem` forbiddenIdentifiers) (tokens (stripComments input))
+    badPragmas = filter isBadPragma (pragmaContents input)
+
+-- | The trimmed contents of each @{-# … #-}@ pragma block in the text
+-- (the bytes between the delimiters). An unterminated @{-#@ yields the
+-- rest of the input as one block — still checked, not silently skipped.
+pragmaContents :: Text -> [Text]
+pragmaContents t = case T.breakOn "{-#" t of
+  (_, rest)
+    | T.null rest -> []
+    | otherwise   ->
+        let body       = T.drop 3 rest
+            (p, after) = T.breakOn "#-}" body
+        in T.strip p : pragmaContents (T.drop 3 after)
+
+-- | A pragma whose head disables a soundness check, or an @OPTIONS@ pragma
+-- carrying an unsafe flag.
+isBadPragma :: Text -> Bool
+isBadPragma p = case T.words p of
+  []         -> False
+  (hd:rest)
+    | hd `elem` forbiddenPragmaHeads -> True
+    | hd == "OPTIONS"                -> any (`elem` unsafeOptionFlags) rest
+    | otherwise                      -> False
+
+forbiddenPragmaHeads :: [Text]
+forbiddenPragmaHeads =
+  [ "TERMINATING", "NON_TERMINATING", "NO_TERMINATION_CHECK", "NON_COVERING" ]
+
+-- | Unsafe @--flag@s that @--safe@ would also reject; named here so the
+-- guard fails fast (and protects a session that isn't run under @--safe@).
+unsafeOptionFlags :: [Text]
+unsafeOptionFlags =
+  [ "--type-in-type", "--no-positivity-check", "--no-termination-check"
+  , "--allow-unsolved-metas", "--no-coverage-check", "--rewriting"
+  , "--injective-type-constructors", "--experimental-irrelevance" ]
 
 -- | Split into maximal tokens on whitespace and the Agda delimiters that
 -- can never be part of a reserved word \/ qualified name segment. Enough

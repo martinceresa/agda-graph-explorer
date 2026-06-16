@@ -126,19 +126,45 @@ Config: [`.agda-explore.yml`](#agda-exploreyml).
 
 **Write-side interaction bridge (opt-in).** With `--enable-interact`
 (or `enable-interact: true` in the config) and `agda` on `$PATH`, the
-daemon *also* exposes goal-driven **editing** tools backed by a live
-`agda --interaction-json` session — the write counterpart to the read
-queries above:
+daemon *also* exposes Agda-validated **authoring + editing** tools backed
+by a live `agda --interaction-json` session — the write counterpart to the
+read queries above, and the validated alternative to a blind `Write` +
+`agda File`:
 
 ```
-load · goal_type · goal_context · infer · normalize ·
-case_split · refine · give · give_many · auto ·
-stage · promote · discard
+load · check · goal_type · goal_context · infer · normalize · lemmas ·
+new_module · give_file · case_split · refine · give · give_many ·
+construct · auto · stage · promote · discard
 ```
 
-`give_many` fills several goals in one session load (one combined diff,
-atomic) — the tool for closing many independent holes in a slow-to-load
-module without paying the reload between each.
+*Authoring.* `new_module` scaffolds a fresh module — a `module … where`
+header matching the path, literate fences for a `.lagda.md` path, imports
+**resolved off the dependency graph** from the bare names you list, and a
+`name : T` / `name = ?` hole per stub — and type-checks it. `give_file`
+validates whole-file `content` (or an `append` block) under the zero-axiom
+contract and returns a diff — the validated counterpart to `Write`, for code
+that must honour `--safe` / 0-postulate. After editing a file as text,
+`check` type-checks it over the warm session and returns a ✓/✗ verdict with
+**every** error and warning plus the remaining open goals — `agda File`, but
+reusing the session and handing the goals back so you pivot straight to
+filling them.
+
+*Driving holes.* `load` opens a module and lists its goals as `g0, g1, …`
+with source positions; the mutators (`case_split` / `refine` / `give` /
+`auto`) are **Agda-validated** and by default return a **unified diff
+without writing**. Pass **`write:true`** and the bridge applies the edit,
+reloads, and returns the diff *plus the refreshed goals* in one round-trip
+(otherwise an id only stays put while a hole's position is unchanged, so
+re-`load` after applying a diff). `give_many` fills several independent holes
+in one load (one atomic diff); `construct` runs a planned heterogeneous batch
+(`give`/`refine`/`case_split`/`auto`) against one warm load; `lemmas` searches
+the project for a definition whose conclusion matches a live goal's type, to
+reuse instead of re-deriving. A term that doesn't typecheck comes back as the
+localized Agda error with the file untouched, and any input using
+`postulate`, a termination/coverage/unsafe-`OPTIONS` pragma, or another
+escape hatch is refused up front (a hard zero-axiom contract, enforced over
+whole-file content too). `.lagda.md` literate sources are handled (edits land
+inside the code fence).
 
 `stage` / `promote` / `discard` build a *new* definition in isolation:
 `stage` opens an ephemeral scratch module under `.agda-explore/scratch/`
@@ -147,21 +173,8 @@ tiny closure instead of the target's whole module); construct the def
 there with the usual tools, then `promote` splices it into the real
 target — merging missing imports and re-validating the **whole target**
 in Agda, returning a diff on success or the localized error with nothing
-changed — or `discard` to abandon it.
-
-`load` opens a module and lists its open goals with ids (`g0, g1, …`) and
-their source positions. An id stays put for a hole whose position is
-unchanged across a reload, but applying an edit can renumber goals — so
-after applying a diff, re-`load` and read the fresh list. The
-mutators (`case_split` / `refine` / `give`) are **Agda-validated** and
-return a **unified diff** — the bridge never writes the file, and a term
-that doesn't typecheck comes back as the localized Agda error with the
-file untouched. A `give` / `refine` using `postulate`, a
-termination/coverage/`OPTIONS` pragma, or another escape hatch is
-refused up front (a hard zero-axiom contract). `.lagda.md` literate
-sources are handled (edits land inside the code fence). `auto` runs
-Mimer to search for a solving term — a diff filling the hole, or a
-"no solution" note.
+changed — or `discard` to abandon it. For most new definitions `give_file`
+/ `new_module` are more direct.
 
 **Live web inspector (opt-in).** With `--inspect` (or `inspect: true` in
 the config) the daemon serves a self-contained localhost web page — a
