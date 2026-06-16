@@ -29,7 +29,6 @@ module AgdaOptimization.FamilyFilter
 
 import qualified Data.Map.Strict   as Map
 import           Data.Map.Strict   ( Map )
-import           Data.List         ( foldl' )
 import qualified Data.Text         as T
 import           Data.Text         ( Text )
 
@@ -91,15 +90,20 @@ parseCaseUnfold s =
 isForcedByFamily :: Index -> Double -> [Int] -> Bool
 isForcedByFamily ix fraction items =
   let !total = length items
+      -- Classify each item once: its short name and detected family.
+      classified :: [(Text, Maybe Text)]
+      classified =
+        [ (lastSegment (defName (defAt ix item)), familyOf ix item)
+        | item <- items ]
       -- First pass: stems contributed by items with the -N suffix.
-      !stems = foldl' addStem Map.empty items
-      addStem :: Map Text Int -> Int -> Map Text Int
-      addStem !acc !item = case familyOf ix item of
+      !stems = foldl' addStem Map.empty classified
+      addStem :: Map Text Int -> (Text, Maybe Text) -> Map Text Int
+      addStem !acc (_, mFam) = case mFam of
         Nothing  -> acc
         Just fam -> Map.insertWith (+) fam 1 acc
       -- Second pass: items whose bare name equals one of the stems
       -- discovered in pass 1 also count toward that family.
-      !groups = foldl' (addBareStem ix stems) stems items
+      !groups = foldl' (addBareStem stems) stems classified
       !maxFam = if Map.null groups
                   then 0
                   else maximum (Map.elems groups)
@@ -107,14 +111,13 @@ isForcedByFamily ix fraction items =
        && maxFam >= 2
        && fromIntegral maxFam >= fraction * fromIntegral total
   where
-    addBareStem :: Index -> Map Text Int -> Map Text Int -> Int -> Map Text Int
-    addBareStem idx' !sset !acc !item = case familyOf idx' item of
+    addBareStem :: Map Text Int -> Map Text Int -> (Text, Maybe Text) -> Map Text Int
+    addBareStem !sset !acc (short, mFam) = case mFam of
       Just _  -> acc       -- already counted in pass 1
       Nothing ->
-        let !short = lastSegment (defName (defAt idx' item))
-        in if Map.member short sset
-             then Map.insertWith (+) short 1 acc
-             else acc
+        if Map.member short sset
+          then Map.insertWith (+) short 1 acc
+          else acc
 
 ----------------------------------------------------------------------
 -- Helpers.

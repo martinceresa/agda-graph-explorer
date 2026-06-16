@@ -86,7 +86,7 @@ instance FromJSON Kind where
     _             -> fail $ "unknown kind: " ++ T.unpack t
 
 -- | Defining-module visibility, mirroring the producer's @access@ field.
--- Absent in the JSON => 'Public' (preserved from 'AgdaUnused.Json').
+-- Absent in the JSON => 'Public'.
 data Access = Public | Private
   deriving (Show, Eq, Ord, Generic)
 

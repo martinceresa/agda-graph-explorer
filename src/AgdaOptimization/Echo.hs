@@ -42,7 +42,6 @@ module AgdaOptimization.Echo
 
 import           Control.Monad        ( forM_ )
 import           Control.Parallel.Strategies ( parMap, rdeepseq )
-import           Data.Foldable        ( foldl' )
 import qualified Data.IntMap.Strict   as IM
 import qualified Data.IntSet          as IS
 import           Data.List            ( sortBy )
@@ -177,9 +176,6 @@ rootedSubtree ix dir maxDepth root
       DReverse -> IS.insert root (ancestors   ix (IS.singleton root))
   | otherwise = bfsBoundedLayers (neighboursOf ix dir) maxDepth root
 
--- (WL refinement, fingerprints and union-find moved to
--- "AgdaGraph.WL" / "AgdaOptimization.UnionFind".)
-
 --------------------------------------------------------------------------------
 -- Candidate selection (adapted from Fingerprint.hs).
 --
@@ -247,7 +243,7 @@ scorePairs thr getFp cs =
                   in go (j + 1) acc'
         in go (i + 1) []
       chunks = parMap rdeepseq perI [0 .. n - 1]
-  in concatMap id (reverse chunks)
+  in concat (reverse chunks)
 
 -- | Per-candidate forward-cluster id. Two candidates share a cluster id
 -- iff the union-find puts them in the same component.

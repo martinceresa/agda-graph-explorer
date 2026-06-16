@@ -36,7 +36,7 @@ module AgdaGraph.GoalCanon
   ) where
 
 import           Control.DeepSeq  ( NFData(..) )
-import           Data.Char        ( isSpace, isLower, isUpper, isAlphaNum )
+import           Data.Char        ( isSpace, isAsciiLower, isUpper, isAlphaNum, isDigit )
 import           Data.Set         ( Set )
 import qualified Data.Set         as Set
 import           Data.Text        ( Text )
@@ -114,8 +114,7 @@ stripBlockComments t = case T.breakOn "{-" t of
 stripLineComments :: Text -> Text
 stripLineComments = T.unlines . map dropLine . T.lines
   where
-    dropLine l = case T.breakOn "--" l of
-      (pre, _) -> pre
+    dropLine = fst . T.breakOn "--"
 
 normaliseWhitespace :: Text -> Text
 normaliseWhitespace = T.pack . go . T.unpack
@@ -140,7 +139,7 @@ alphaRename = T.pack . go Map.empty (0 :: Int) . T.unpack
           -- 'span identChar' is non-empty here (its head is 'c', which
           -- 'identStart' just matched), so the first-char test reads 'c'.
           let (tok, rest) = span identChar s
-          in if isLower c && c < '\x80'
+          in if isAsciiLower c
                then case Map.lookup tok m of
                  Just placeholder -> placeholder ++ go m n rest
                  Nothing          ->
@@ -175,19 +174,19 @@ identChar ch = isAlphaNum ch || ch == '\'' || ch == '_'
 -- the three bracket pairs, and remember the offset just /after/ the
 -- last depth-0 arrow seen.
 conclusionOf :: Text -> Text
-conclusionOf t = T.strip (go 0 (T.unpack t) "" "")
+conclusionOf t = T.strip (go 0 (T.unpack t) "")
   where
-    -- @go depth input lastConclusion acc@: @acc@ accumulates the segment
-    -- since the most recent top-level arrow (built reversed); when we hit
-    -- a top-level arrow we discard @lastConclusion@/@acc@ and start a
-    -- fresh @acc@. At end-of-input the surviving @acc@ is the conclusion.
-    go :: Int -> String -> String -> String -> Text
-    go _ []           _    acc = T.pack (reverse acc)
-    go d s@(c : rest) lastC acc
-      | d <= 0, Just s' <- arrowAt s = go 0 s' "" ""
-      | c `elem` ("({[" :: String)   = go (d + 1) rest lastC (c : acc)
-      | c `elem` (")}]" :: String)   = go (d - 1) rest lastC (c : acc)
-      | otherwise                    = go d rest lastC (c : acc)
+    -- @go depth input acc@: @acc@ accumulates the segment since the most
+    -- recent top-level arrow (built reversed); when we hit a top-level
+    -- arrow we discard @acc@ and start a fresh @acc@. At end-of-input the
+    -- surviving @acc@ is the conclusion.
+    go :: Int -> String -> String -> Text
+    go _ []           acc = T.pack (reverse acc)
+    go d s@(c : rest) acc
+      | d <= 0, Just s' <- arrowAt s = go 0 s' ""
+      | c `elem` ("({[" :: String)   = go (d + 1) rest (c : acc)
+      | c `elem` (")}]" :: String)   = go (d - 1) rest (c : acc)
+      | otherwise                    = go d rest (c : acc)
     -- Match a leading arrow (Unicode or ASCII) and return the remainder.
     arrowAt ('\x2192' : r) = Just r
     arrowAt ('-' : '>' : r) = Just r
@@ -232,7 +231,7 @@ identTokens = Set.fromList . map T.pack . scan . T.unpack
     keepIdent []          = False
     keepIdent tok@(c : _) =
       isUpper c
-        || not (isAsciiLower c || isDigit' c || c == '_')   -- non-ASCII letter
+        || not (isAsciiLower c || isDigit c || c == '_')   -- non-ASCII letter
         || any isUpper tok                                   -- mixed-case name
     -- A symbol character: anything that is not whitespace, a bracket, a
     -- dot (qualified-name separator), or an identifier character.
@@ -240,8 +239,6 @@ identTokens = Set.fromList . map T.pack . scan . T.unpack
       not (isSpace c)
         && not (identStart c)
         && c `notElem` ("()[]{}." :: String)
-    isAsciiLower c = isLower c && c < '\x80'
-    isDigit' c = c >= '0' && c <= '9'
 
 -- | Jaccard similarity of two token sets: @|A ∩ B| / |A ∪ B|@. Two empty
 -- sets are defined to be @0@ (no shared evidence ⇒ no match), so an

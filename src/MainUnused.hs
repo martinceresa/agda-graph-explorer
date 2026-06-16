@@ -23,8 +23,8 @@ import           Control.Monad     ( foldM, when )
 import qualified Data.Aeson           as A
 import           Data.Aeson           ( (.=) )
 import qualified Data.ByteString.Lazy.Char8 as BLC
-import           Data.List         ( intercalate, isPrefixOf, isSuffixOf, sortBy
-                                   , sortOn, stripPrefix )
+import           Data.List         ( intercalate, isPrefixOf, isSuffixOf, partition
+                                   , sortBy, sortOn, stripPrefix )
 import           Data.Ord          ( Down(..), comparing )
 import qualified Data.Map.Strict   as M
 import qualified Data.Set          as S
@@ -280,18 +280,17 @@ main = do
       matchers    = map globMatch (optExclude opts)
       excluded f  = any (\m -> m (fileFinding f) || m (T.unpack (moduleFinding f))) matchers
       kindMatched = filter (\f -> kindFinding f `elem` optKinds opts) allFindings
-      keep        = filter (not . excluded) kindMatched
+      (dropped, keep) = partition excluded kindMatched
       sorted      = sortOn (\f -> (fileFinding f, lineFinding f)) keep
       -- Findings that matched the active kinds but were dropped solely
       -- by --exclude. Reported so a low/zero total can't be mistaken for
       -- an over-broad exclude.
-      suppressed  = length (filter excluded kindMatched)
+      suppressed  = length dropped
 
   -- Output dispatch. Precedence: --count-only wins over --group-by;
-  -- --group-by replaces the per-line body with aggregated rows; neither
-  -- keeps the historical per-line behaviour. The `# total:` and
-  -- `# excluded:` breadcrumbs survive in every plain-text mode so a low
-  -- count can't be mistaken for an over-broad exclude.
+  -- --group-by replaces the per-line body with aggregated rows. The
+  -- `# total:` and `# excluded:` breadcrumbs survive in every plain-text
+  -- mode so a low count can't be mistaken for an over-broad exclude.
   let total       = length sorted
       excludeLine = when (not (null (optExclude opts))) $
         putStrLn $ "# excluded: " ++ intercalate ", " (optExclude opts)

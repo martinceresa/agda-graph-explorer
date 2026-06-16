@@ -13,17 +13,20 @@ module AgdaOptimization.Common
   , isTagged
   , terminals
   , computeExcludedSet
+  , externalsSummaryHasRows
+  , chunksOf
   ) where
 
 import           Data.Text          ( Text )
 import qualified Data.Text          as T
 import qualified Data.IntMap.Strict as IM
 import qualified Data.IntSet        as IS
+import qualified Data.Map.Strict    as Map
 import qualified Data.Vector        as V
 import           Text.Regex.TDFA    ( Regex, makeRegex, matchTest )
 
 import           AgdaGraph.Index    ( Index(..) )
-import           AgdaGraph.Schema   ( Definition(..) )
+import           AgdaGraph.Schema   ( Definition(..), ExternalsSummary(..) )
 
 -- | Trailing dot-component of a fully-qualified QName ("the unqualified
 -- name"). @a.b.c@ ↦ @c@; a name with no dot is returned unchanged.
@@ -84,3 +87,20 @@ computeExcludedSet !ix !pat
                 else acc)
            IS.empty
            (idxDefs ix)
+
+-- | Does the wire 'ExternalsSummary' carry any postulate rows? 'Nothing',
+-- or an all-empty per-module map, ⇒ 'False'.
+externalsSummaryHasRows :: Maybe ExternalsSummary -> Bool
+externalsSummaryHasRows Nothing                        = False
+externalsSummaryHasRows (Just (ExternalsSummary _ pm)) =
+  any (not . null) (Map.elems pm)
+
+-- | Split a list into chunks of size @k@ in input order. @k <= 0@ is
+-- clamped to 1 to avoid an infinite loop; empty input ⇒ empty output.
+chunksOf :: Int -> [a] -> [[a]]
+chunksOf k xs0
+  | k <= 0    = chunksOf 1 xs0
+  | otherwise = go xs0
+  where
+    go [] = []
+    go xs = let (h, t) = splitAt k xs in h : go t

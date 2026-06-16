@@ -18,7 +18,7 @@ module AgdaGoals.Bucket
   ) where
 
 import           Control.DeepSeq      ( NFData(..) )
-import           Data.List            ( foldl', sortOn )
+import           Data.List            ( sortOn )
 import qualified Data.Map.Strict      as Map
 import           Data.Map.Strict      ( Map )
 import           Data.Ord             ( Down(..) )

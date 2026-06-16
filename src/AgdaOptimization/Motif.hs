@@ -47,7 +47,6 @@ import           Control.Monad       ( when )
 import           Control.Parallel.Strategies ( parMap, rdeepseq )
 import qualified Data.Aeson          as A
 import           Data.Aeson          ( (.=) )
-import           Data.Foldable       ( foldl' )
 import           Data.IORef          ( IORef, newIORef, readIORef, writeIORef )
 import qualified Data.IntMap.Strict  as IM
 import qualified Data.IntSet         as IS
@@ -64,9 +63,9 @@ import           System.IO           ( hPutStrLn, stderr )
 
 import           AgdaGraph.Index     ( Index(..), defAt )
 import           AgdaGraph.Schema    ( Definition(..), Kind, State )
+import           AgdaOptimization.Common ( chunksOf )
 import           AgdaOptimization.FlagSpec ( FlagSpec(..), SwitchVal(..)
                                            , parseFlags, applyFlagConfig )
-import qualified Data.Aeson           as A
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , renderTable, emitJsonReport
                                          , withHumanOutput )
@@ -318,16 +317,6 @@ run ix gOpts opts0 = do
     -- --per-module not implemented in either format; warn unconditionally.
     when (optPerModule opts) $
       hPutStrLn stderr "motif: --per-module not yet implemented; ran in global mode."
-
--- | Standard list-chunking helper. Empty input -> empty output; size
--- <= 0 is clamped to 1 to avoid infinite loops.
-chunksOf :: Int -> [a] -> [[a]]
-chunksOf k xs0
-  | k <= 0    = chunksOf 1 xs0
-  | otherwise = go xs0
-  where
-    go [] = []
-    go xs = let (h, t) = splitAt k xs in h : go t
 
 -- | Spawn a reaper thread that flips the deadline 'IORef' once the
 -- given wall-clock budget elapses. When @budgetSecs <= 0@ the action

@@ -43,7 +43,6 @@ module AgdaOptimization.LoadBearing
 import           Control.Monad          ( when )
 import           Control.Parallel.Strategies ( parMap, rdeepseq )
 import           AgdaOptimization.Condense ( Condensation(..), buildCondensation )
-import           Data.Foldable          ( foldl' )
 import qualified Data.IntMap.Strict     as IM
 import qualified Data.IntSet            as IS
 import           Data.List              ( sortBy, sortOn )
@@ -150,13 +149,6 @@ parseWeight v      = Left ("expected one of unit|loc, got " <> show v)
 -- | Overlay the @load-bearing:@ YAML section onto a seed 'Options'.
 applyConfig :: A.Object -> Options -> Either String Options
 applyConfig obj o0 = applyFlagConfig "load-bearing" flagSpecs obj o0
-
-------------------------------------------------------------------------
--- Condensation precompute
-------------------------------------------------------------------------
-
--- 'Condensation' + 'buildCondensation' moved to "AgdaOptimization.Condense"
--- (shared with horizon, pyre, chokepoint).
 
 ------------------------------------------------------------------------
 -- Driver
@@ -302,9 +294,7 @@ runAnalysis !ix !cond !gOpts !opts !seeds !modeUsed !excluded = do
                  (IS.toAscList pertSet)
 
       pertOf :: Int -> Maybe Int
-      pertOf v = case IM.lookup v pertResults of
-        Just r  -> r
-        Nothing -> Nothing
+      pertOf v = IM.findWithDefault Nothing v pertResults
 
       -- Composite ranking: spanBet * max(1, Δ).
       composite :: Int -> Double

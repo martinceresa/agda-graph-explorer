@@ -28,7 +28,6 @@ module AgdaGraph.Similarity
   , subtermMultisetsVec
   ) where
 
-import           Data.Foldable      ( foldl' )
 import qualified Data.IntMap.Strict as IM
 import qualified Data.IntSet        as IS
 import           Data.Vector        ( Vector )
@@ -40,9 +39,8 @@ import           AgdaGraph.WL       ( ColorVec, Fingerprint, fingerprintAt
                                     , initialColors, refine )
 
 --------------------------------------------------------------------------------
--- Signature / body adjacency split (was AgdaOptimization.Silhouette's
--- splitAdjByProvenance, generalised to read the index directly and to
--- name the no-provenance fallback explicitly).
+-- Signature / body adjacency split: read the index directly and name the
+-- no-provenance fallback explicitly.
 --------------------------------------------------------------------------------
 
 -- | The WL refinement depth @silhouette@ uses by default. Exposed so

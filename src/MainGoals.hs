@@ -21,7 +21,7 @@ import           Control.Monad        ( forM_, when )
 import qualified Data.Aeson           as A
 import           Data.Aeson           ( (.=) )
 import qualified Data.ByteString.Lazy.Char8 as BLC
-import           Data.List            ( foldl', isPrefixOf, stripPrefix )
+import           Data.List            ( isPrefixOf, stripPrefix )
 import qualified Data.Text            as T
 import           System.Environment   ( getArgs )
 import           System.Directory     ( doesFileExist )
@@ -228,7 +228,12 @@ main = do
   -- Collect goals + propagate the first hard error to set exit code.
   -- Note: we still emit buckets for any successful files even if one
   -- module errored, so partial runs surface partial information.
-  let (errs, occurrences) = foldl' collect ([], []) (zip (optRoots opts) results)
+  let tagged              = zip (optRoots opts) results
+      errs                = foldl' (\acc (f, r) -> case r of
+                                      DriverError e -> (f, e) : acc
+                                      _             -> acc) [] tagged
+      occurrences         = concat [ map (mkOcc modName) goals
+                                   | (_, DriverOk modName goals) <- tagged ]
       buckets             = rankBuckets (bucketGoals occurrences)
 
   case optFormat opts of
@@ -242,27 +247,17 @@ main = do
     [] -> exitSuccess
     _  -> exitWith (errorExitCode (head errs))
 
--- | Walk a (module, result) pair and append every goal as a
--- 'GoalOccurrence' to the accumulator. Strict folds: don't let
--- thunks pile up.
-collect
-  :: ([(FilePath, DriverError)], [(T.Text, GoalOccurrence)])
-  -> (FilePath, DriverResult)
-  -> ([(FilePath, DriverError)], [(T.Text, GoalOccurrence)])
-collect (!es, !os) (f, r) = case r of
-  DriverError e -> ((f, e) : es, os)
-  DriverOk modName goals ->
-    let !new = map (mkOcc modName) goals
-    in (es, os ++ new)
-  where
-    mkOcc modName g =
-      ( goalType g
-      , GoalOccurrence
-          { occModule  = modName
-          , occLine    = fmap (rpLine . grStart) (goalRange g)
-          , occRawType = goalType g
-          }
-      )
+-- | Tag a goal with its enclosing module as a 'GoalOccurrence',
+-- keyed by its rendered type for bucketing.
+mkOcc :: T.Text -> Goal -> (T.Text, GoalOccurrence)
+mkOcc modName g =
+  ( goalType g
+  , GoalOccurrence
+      { occModule  = modName
+      , occLine    = fmap (rpLine . grStart) (goalRange g)
+      , occRawType = goalType g
+      }
+  )
 
 errorExitCode :: (FilePath, DriverError) -> ExitCode
 errorExitCode (_, e) = ExitFailure (codeFor e)

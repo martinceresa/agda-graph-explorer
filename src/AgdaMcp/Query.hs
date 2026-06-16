@@ -36,7 +36,7 @@ import           Data.Set           (Set)
 import qualified Data.Set           as Set
 import qualified Data.IntMap.Strict as IM
 import qualified Data.IntSet        as IS
-import           Data.List          (foldl', isPrefixOf, isSuffixOf, sortBy,
+import           Data.List          (isPrefixOf, isSuffixOf, sortBy,
                                      sortOn)
 import qualified Data.Map.Strict    as M
 import           Data.Ord           (Down (..), comparing)
@@ -172,7 +172,7 @@ rankedMatches ld q =
       -- defName is the final tiebreak so the order is a strict total order
       -- (independent of input order), not merely stable — the "did you mean"
       -- list and the E4 unique-candidate auto-resolve both read this.
-  in sortBy (comparing (\d -> (score d, T.length (defName d), defName d)))
+  in sortOn (\d -> (score d, T.length (defName d), defName d))
             (filter hit (realDefs ld))
 
 -- | Top @lim@ ranked matches — the 'notFound' "did you mean" candidate list.
@@ -343,9 +343,10 @@ queryLocate ld name = case resolveDefNote ld name of
         i       = defId d
         synth   = i >= idxRealCount ix
         file    = M.lookup (defModule d) (ldModFiles ld)
-        recursive = IS.member i (directOut ix i)
+        outI    = directOut ix i
+        recursive = IS.member i outI
         nIn     = IS.size (IS.delete i (directIn  ix i))
-        nOut    = IS.size (IS.delete i (directOut ix i))
+        nOut    = IS.size (IS.delete i outI)
         transUp   = IS.size (ancestors   ix (IS.singleton i))
         transDown = IS.size (descendants ix (IS.singleton i))
     in T.unlines $

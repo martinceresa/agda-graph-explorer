@@ -31,7 +31,6 @@ module AgdaGraph.Index
   ) where
 
 import           Control.DeepSeq     ( NFData(..) )
-import           Data.Foldable       ( foldl' )
 import qualified Data.HashMap.Strict as HM
 import qualified Data.IntMap.Strict  as IM
 import qualified Data.IntSet         as IS
@@ -180,19 +179,15 @@ buildIndex ExpandedGraph{..} =
         bi <- HM.lookup b nameToId
         pure (ai, bi)
 
-      forward :: IM.IntMap IS.IntSet
-      !forward = foldl' insF IM.empty egDefinitionEdges
+      (!forward, !reverseAdj) =
+        foldl' insBoth (IM.empty, IM.empty) egDefinitionEdges
         where
-          insF !acc e = case resolvePair e of
-            Just (s, t) -> IM.insertWith IS.union s (IS.singleton t) acc
-            Nothing     -> acc
-
-      reverseAdj :: IM.IntMap IS.IntSet
-      !reverseAdj = foldl' insR IM.empty egDefinitionEdges
-        where
-          insR !acc e = case resolvePair e of
-            Just (s, t) -> IM.insertWith IS.union t (IS.singleton s) acc
-            Nothing     -> acc
+          insBoth (!f, !r) e = case resolvePair e of
+            Just (s, t) ->
+              ( IM.insertWith IS.union s (IS.singleton t) f
+              , IM.insertWith IS.union t (IS.singleton s) r
+              )
+            Nothing     -> (f, r)
 
       -- Provenance map. 'Nothing' when the producer didn't emit per-edge
       -- tags (preserves the old wire format for analyses that don't care).
@@ -251,7 +246,7 @@ lookupId Index{..} t = HM.lookup t idxNameToId
 
 -- | Look up the full record by QName.
 lookupDef :: Index -> Text -> Maybe Definition
-lookupDef ix t = lookupId ix t >>= \i -> Just (defAt ix i)
+lookupDef ix t = defAt ix <$> lookupId ix t
 
 -- | Direct access by id. /Crashes/ on out-of-range — call with an id
 -- you got from this 'Index'.

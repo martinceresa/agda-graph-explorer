@@ -37,7 +37,7 @@ module AgdaGraph.WL
 
 import           Control.Parallel.Strategies ( parMap, rdeepseq )
 import           Data.Bits          ( xor, shiftL, shiftR )
-import           Data.List          ( foldl', sort )
+import           Data.List          ( sort )
 import qualified Data.IntMap.Strict as IM
 import qualified Data.IntSet        as IS
 import           Data.Vector        ( Vector )
@@ -165,12 +165,8 @@ weightedJaccard :: Fingerprint -> Fingerprint -> Double
 weightedJaccard a b
   | IM.null a && IM.null b = 0
   | otherwise              =
-      let (!num, !den) = IM.foldlWithKey' step (0 :: Int, 0 :: Int)
-                          (IM.unionWith (\_ _ -> 0) a b)
-          step (!nAcc, !dAcc) k _ =
-            let !av = IM.findWithDefault 0 k a
-                !bv = IM.findWithDefault 0 k b
-                !mn = min av bv
-                !mx = max av bv
-            in (nAcc + mn, dAcc + mx)
+      let !num = IM.foldlWithKey'
+                   (\ !acc k av -> acc + min av (IM.findWithDefault 0 k b))
+                   (0 :: Int) a
+          !den = IM.foldl' (+) (0 :: Int) a + IM.foldl' (+) (0 :: Int) b - num
       in if den == 0 then 0 else fromIntegral num / fromIntegral den

@@ -58,12 +58,13 @@ defaultGlobalOpts = GlobalOpts
 renderTable :: [String] -> [[String]] -> String
 renderTable header rows =
   let allRows = header : rows
-      widths  = map (maximum . map length) (transpose (padRows allRows))
+      padded  = padRows allRows
+      widths  = map (maximum . map length) (transpose padded)
       padRows xs = map (pad (length header)) xs
       pad n xs   = take n (xs ++ repeat "")
       padCell w s = s ++ replicate (w - length s) ' '
-      renderRow r = unwords (zipWith padCell widths (pad (length header) r))
-  in unlines (map renderRow allRows)
+      renderRow r = unwords (zipWith padCell widths r)
+  in unlines (map renderRow padded)
 
 -- | Format a 'Double' to exactly three decimal places without pulling
 -- in a @printf@ dependency. Negative values keep their sign; the

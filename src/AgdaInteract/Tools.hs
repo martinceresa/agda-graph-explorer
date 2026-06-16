@@ -341,6 +341,13 @@ runGiveMany ss a = case argLookup a "gives" >>= parseMaybe parseJSON of
                       emitEdit ss file orig d
                       pure (Right (batchMsg (length edits) d))
 
+-- | The replacement text a give\/refine reply asks for: either an explicit
+-- string, or the caller's input optionally parenthesised.
+giveReplacement :: GiveResult -> Text -> Text
+giveReplacement gr inp = case gr of
+  GiveStr s   -> s
+  GiveParen p -> if p then "(" <> inp <> ")" else inp
+
 -- | Validate + give each spec against the live session, accumulating
 -- (start, end, replacement) edits. Stops at the first failure.
 giveLoop :: Session -> FilePath -> GoalMap -> CodeBlocks -> [GiveSpec]
@@ -362,9 +369,7 @@ giveLoop sess file gm cb (GiveSpec g t : rest) acc =
                                          <> " — nothing applied:\n" <> m))
                 Nothing -> case [gr | ReplyGiveAction _ gr <- rs] of
                   (gr:_) ->
-                    let repl = case gr of
-                          GiveStr st  -> st
-                          GiveParen p -> if p then "(" <> t <> ")" else t
+                    let repl = giveReplacement gr t
                     in giveLoop sess file gm cb rest ((rpPos s, rpPos en, repl) : acc)
                   [] -> pure (Left ("give_many: no give action for " <> g))
       _ -> pure (Left (g <> ": not an open goal."))
@@ -600,10 +605,7 @@ mutateFromGive ss file e mInput (Right rs) = case firstError rs of
   Just m  -> pure (Left ("agda rejected the term — file unchanged:\n" <> m))
   Nothing -> case [gr | ReplyGiveAction _ gr <- rs] of
     (gr:_) ->
-      let repl = case gr of
-            GiveStr s   -> s
-            GiveParen p -> let inp = fromMaybe "" mInput
-                           in if p then "(" <> inp <> ")" else inp
+      let repl = giveReplacement gr (fromMaybe "" mInput)
       in applyHoleEdit ss file e repl
     [] -> pure (Left "agda returned no give action (unexpected protocol shape).")
 

@@ -40,7 +40,6 @@ module AgdaOptimization.Fiedler
 import           Control.DeepSeq             ( NFData(..) )
 import           Control.Exception           ( catch, try, SomeException )
 import           Control.Monad               ( when )
-import           Data.Foldable               ( foldl' )
 import qualified Data.IntMap.Strict          as IM
 import qualified Data.IntSet                 as IS
 import           Data.IntSet                 ( IntSet )

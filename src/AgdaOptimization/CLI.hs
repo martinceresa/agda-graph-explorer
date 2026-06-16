@@ -65,9 +65,7 @@ import qualified AgdaOptimization.Entwine     as Entwine
 import qualified AgdaOptimization.Fiedler     as Fiedler
 import qualified AgdaOptimization.Horizon     as Horizon
 import qualified AgdaOptimization.Strata      as Strata
--- AST-level subterm fingerprinting.
 import qualified AgdaOptimization.TermCluster  as TermCluster
--- Signature-provenance frequent-itemset mining.
 import qualified AgdaOptimization.ConceptBundle as ConceptBundle
 
 defaultGlobal :: GlobalOpts
@@ -235,8 +233,7 @@ run = do
     _ -> case scanGlobals argv of
       -- A malformed global (bare @--out@/@--config@) before the
       -- subcommand reports without a subcommand prefix; after the path
-      -- it carries the subcommand, mirroring the two former error sites
-      -- ('peelLeadingGlobals' vs 'splitGlobal').
+      -- it carries the subcommand.
       Left e -> do
         hPutStrLn stderr (renderScanError e)
         exitFailure
@@ -248,19 +245,16 @@ run = do
 
 -- | A malformed-global error from the scanner. 'seScope' is the
 -- subcommand to mention in the message — @Nothing@ before the
--- subcommand is known (matching the old 'peelLeadingGlobals' site,
--- prefixed @agda-optimization:@), @Just sub@ once the trailing scan is
--- running (matching the old 'splitGlobal' site, prefixed
--- @agda-optimization \<sub\>:@).
+-- subcommand is known (prefixed @agda-optimization:@), @Just sub@ once
+-- the trailing scan is running (prefixed @agda-optimization \<sub\>:@).
 data ScanError = ScanError
   { seScope :: !(Maybe String)
   , seMsg   :: !String
   }
 
 -- | Render a 'ScanError' to its stderr line. A scoped error reads
--- @agda-optimization \<sub\>: …@ (the old 'splitGlobal' shape); an
--- unscoped one reads @agda-optimization: …@ (the old
--- 'peelLeadingGlobals' shape).
+-- @agda-optimization \<sub\>: …@; an unscoped one reads
+-- @agda-optimization: …@.
 renderScanError :: ScanError -> String
 renderScanError e = case seScope e of
   Just sub -> "agda-optimization " ++ sub ++ ": " ++ seMsg e
@@ -274,18 +268,16 @@ renderScanError e = case seScope e of
 --
 -- Tracking "was it set?" explicitly lets the final 'GlobalOpts' be
 -- @scanned '<|>' defaults@ with no value-equality-against-default
--- heuristic (the bug the old two-fold 'mergeCliOver' worked around).
+-- heuristic.
 --
--- 'scanRawTail' is the un-peeled list of args after the subcommand —
--- exactly the old @dispatch@'s @args@. 'dispatch' makes the
--- unknown-subcommand / @--help@ / missing-path decisions against it (not
--- against the peeled 'scanResidual'), so trailing global peeling can
--- never swallow a @--help@ that the old code would have honoured first.
+-- 'scanRawTail' is the un-peeled list of args after the subcommand.
+-- 'dispatch' makes the unknown-subcommand / @--help@ / missing-path
+-- decisions against it (not against the peeled 'scanResidual'), so
+-- trailing global peeling can never swallow a @--help@.
 --
 -- 'scanPending' holds a /deferred/ trailing-position malformed-global
--- error. The old 'splitGlobal' ran only after 'dispatch' had validated
--- the subcommand and honoured @--help@, so a bad trailing @--out@ must
--- not preempt those; 'dispatch' surfaces 'scanPending' last (see there).
+-- error: a bad trailing @--out@ must not preempt subcommand validation
+-- or @--help@, so 'dispatch' surfaces 'scanPending' last (see there).
 data Scan = Scan
   { scanOutFormat :: !(Maybe OutFormat) -- ^ @Just OutJson@ once @--json@ seen.
   , scanOutPath   :: !(Maybe FilePath)  -- ^ last @--out@ / @--out=@ value.
@@ -301,16 +293,14 @@ data Scan = Scan
 -- @--config=FILE@) from any /peelable/ position, tolerating the
 -- interleaved subcommand token, and returns the assembled 'Scan'.
 --
--- Positional contract (preserved verbatim from the former two-fold
--- 'peelLeadingGlobals' + 'splitGlobal' pair):
+-- Positional contract:
 --
 --   * Before the subcommand, leading globals are peeled; the first
 --     non-global token becomes the subcommand. A bare @--out@/@--config@
 --     here is an immediate error (no subcommand scope).
 --   * The token immediately after the subcommand is taken as-is (the
 --     graph path) and is NOT peeled — so e.g. @motif --json g.json@
---     leaves @--json@ in residual position rather than honouring it,
---     exactly as before.
+--     leaves @--json@ in residual position rather than honouring it.
 --   * After that first post-subcommand token, globals are peeled again
 --     and the rest accumulates into the residual args. A bare
 --     @--out@/@--config@ here is recorded as a /deferred/ error in
@@ -331,7 +321,7 @@ scanGlobals = goLead Scan
   }
   where
     -- Phase 1: before the subcommand — peel leading globals. A bare
-    -- value-flag is an immediate, unscoped error (old 'peelLeadingGlobals').
+    -- value-flag is an immediate, unscoped error.
     goLead !s []                  = Right s
     goLead !s ("--json":rest)     = goLead s { scanOutFormat = Just OutJson } rest
     goLead _  ("--out":[])        = Left (ScanError Nothing "--out: missing FILE argument")
@@ -347,13 +337,13 @@ scanGlobals = goLead Scan
       | otherwise                 = goPath s { scanSub = Just a, scanRawTail = rest } rest
 
     -- Phase 2: the single post-subcommand token (the path) is residual,
-    -- never peeled — matching the old dispatch's @case args of (path:rest)@.
+    -- never peeled.
     goPath !s []           = Right s
     goPath !s (path:rest)  = goTail s { scanResidual = [path] } rest
 
     -- Phase 3: after the path — peel trailing globals (last wins). A bare
     -- value-flag stops the scan and records a deferred, subcommand-scoped
-    -- error (old 'splitGlobal', whose Left short-circuited the fold).
+    -- error.
     goTail !s []                  = done s
     goTail !s ("--json":rest)     = goTail s { scanOutFormat = Just OutJson } rest
     goTail !s ("--out":[])        = done s { scanPending = pend s "--out: missing FILE argument" }
@@ -381,9 +371,8 @@ printVersion numericOnly
     ver = showVersion Paths.version
 
 -- | Dispatch a resolved 'Scan' to the chosen subcommand. The guards
--- below mirror the former 'dispatch' precedence exactly, deciding
--- unknown-subcommand / @--help@ / missing-path against the /raw/
--- post-subcommand tail ('scanRawTail') — so a trailing global the
+-- below decide unknown-subcommand / @--help@ / missing-path against the
+-- /raw/ post-subcommand tail ('scanRawTail') — so a trailing global the
 -- single-pass scanner already peeled cannot reorder these. Only once
 -- those pass do we surface any deferred trailing-global error and run
 -- the analysis with the scanned 'GlobalOpts' / config path / residual.
@@ -403,8 +392,7 @@ dispatch sub s
       exitFailure
   | otherwise = do
       -- Surface a deferred trailing malformed-global error now — after
-      -- the subcommand-validation + @--help@ + missing-path guards, just
-      -- as the former 'splitGlobal' only ran at this point.
+      -- the subcommand-validation + @--help@ + missing-path guards.
       case scanPending s of
         Just e  -> hPutStrLn stderr (renderScanError e) >> exitFailure
         Nothing -> return ()
@@ -447,8 +435,8 @@ dispatch sub s
 -- | Overlay the CLI's global choices (as captured in the 'Scan') onto a
 -- config-derived base 'GlobalOpts'. Each field is set iff the scanner
 -- recorded the corresponding flag; otherwise the base value survives.
--- No value-equality-against-default heuristic (the @Maybe@ tracking is
--- the explicit "was it set?" the old 'mergeCliOver' had to infer).
+-- No value-equality-against-default heuristic — the @Maybe@ tracking is
+-- the explicit "was it set?".
 overlayCli :: Scan -> GlobalOpts -> GlobalOpts
 overlayCli !s !base = GlobalOpts
   { gOutFormat = fromMaybe (gOutFormat base) (scanOutFormat s)

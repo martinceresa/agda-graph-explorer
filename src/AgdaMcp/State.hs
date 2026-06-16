@@ -92,8 +92,7 @@ data Config = Config
     -- With more than one entry the daemon runs @agda-deps@ once per entry
     -- and unions the parsed graphs in-process (see 'runBuild' +
     -- 'AgdaGraph.Union.unionExpandedGraphs'); a single entry takes the
-    -- one-subprocess path and is byte-identical to the historical
-    -- single-@cfgEntry@ behaviour.
+    -- one-subprocess path.
   , cfgIncludes     :: ![FilePath]       -- ^ @-i@ include dirs (and scan roots).
   , cfgProjectRoot  :: !FilePath         -- ^ cwd for the @agda-deps@ subprocess.
   , cfgOutDir       :: !FilePath         -- ^ where the generated @deps.json@ lives.
@@ -422,14 +421,10 @@ stalenessBanner ss = do
 -- ---------------------------------------------------------------------
 
 loadLoaded :: Bool -> [FilePath] -> FilePath -> IO (Either String Loaded)
-loadLoaded autoResolveUnique includes graphFile = do
-  e <- try (BL.readFile graphFile) :: IO (Either SomeException BL.ByteString)
-  case e of
-    Left err -> pure (Left ("cannot read " ++ graphFile ++ ": " ++ show err))
-    Right bs -> case eitherDecode bs of
-      Left perr -> pure (Left ("cannot parse " ++ graphFile ++ ": " ++ perr))
-      Right (eg :: ExpandedGraph) ->
-        Right <$> loadedFromGraph autoResolveUnique includes (Just graphFile) eg
+loadLoaded autoResolveUnique includes graphFile =
+  decodeGraphFile graphFile
+    >>= either (pure . Left)
+               (fmap Right . loadedFromGraph autoResolveUnique includes (Just graphFile))
 
 -- | Decode an expanded @graph.json@ from disk, returning the parsed
 -- 'ExpandedGraph' (or a clean diagnostic). Shared by the single-entry
@@ -446,10 +441,9 @@ decodeGraphFile graphFile = do
 
 -- | Build a 'Loaded' snapshot from an already-parsed 'ExpandedGraph'. The
 -- @mGraphFile@ is purely cosmetic — it names the source in the stale-format
--- warning; 'Nothing' for an in-memory union (no single backing file). All
--- the index-construction / forcing / similarity-cache wiring that used to
--- live inline in 'loadLoaded' is here so the disk path and the union path
--- produce identical snapshots.
+-- warning; 'Nothing' for an in-memory union (no single backing file). The
+-- index-construction / forcing / similarity-cache wiring lives here so the
+-- disk path and the union path produce identical snapshots.
 loadedFromGraph :: Bool -> [FilePath] -> Maybe FilePath -> ExpandedGraph -> IO Loaded
 loadedFromGraph autoResolveUnique includes mGraphFile eg = do
   let !ix = buildIndex eg
@@ -528,8 +522,7 @@ buildOwnerMap rds =
 --   * /preloaded/ — read the fixed graph from disk (never spawns
 --     @agda-deps@).
 --   * /single entry/ — one @agda-deps@ subprocess into 'cfgOutDir', then
---     decode + index 'cfgGraphPath'. Byte-identical to the historical
---     single-@cfgEntry@ behaviour (one trailing positional, the committed
+--     decode + index 'cfgGraphPath' (one trailing positional; the committed
 --     fixtures + docs assume this).
 --   * /multiple entries/ — a single @agda-deps@ invocation only compiles
 --     /one/ entry's import closure, so we run it once per entry into a
@@ -554,8 +547,7 @@ runBuild Config{..}
     showEc (ExitFailure n) = "exit " ++ show n
 
     -- The shared producer flag list (everything except the out-dir + the
-    -- trailing entry positional). Identical to the historical args, so the
-    -- single-entry invocation below is byte-for-byte the old command.
+    -- trailing entry positional).
     baseArgs =
       [ "--format=json", "--json-mode=expanded"
       , "--no-externals", "--keep-going" ]
@@ -583,11 +575,11 @@ runBuild Config{..}
                      ++ showEc ec ++ "):\n" ++ lastLines 25 err)
         else Right graphPath
 
-    -- Single entry: 'runOne' into 'cfgOutDir' IS the historical one-subprocess
-    -- command (identical 'baseArgs ++ ["-o", cfgOutDir, entry]') and writes
-    -- exactly 'cfgGraphPath' (== cfgOutDir </> "deps.json"), so we read back
-    -- the path it returns via 'loadLoaded'. Sharing 'runOne' keeps the single-
-    -- and multi-entry build commands from drifting on a future 'baseArgs' change.
+    -- Single entry: 'runOne' into 'cfgOutDir' runs 'baseArgs ++ ["-o",
+    -- cfgOutDir, entry]' and writes exactly 'cfgGraphPath'
+    -- (== cfgOutDir </> "deps.json"), so we read back the path it returns via
+    -- 'loadLoaded'. Sharing 'runOne' keeps the single- and multi-entry build
+    -- commands from drifting on a future 'baseArgs' change.
     singleEntry :: FilePath -> FilePath -> IO (Either String Loaded)
     singleEntry deps entry =
       runOne deps cfgOutDir entry

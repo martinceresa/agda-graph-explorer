@@ -50,7 +50,6 @@ module AgdaOptimization.Fingerprint
 import           Control.Monad        ( forM_, when )
 import           System.IO            ( hPutStrLn, stderr )
 import           Control.Parallel.Strategies ( parMap, rdeepseq )
-import           Data.Foldable        ( foldl' )
 import qualified Data.HashMap.Strict  as HM
 import qualified Data.IntMap.Strict   as IM
 import qualified Data.IntSet          as IS

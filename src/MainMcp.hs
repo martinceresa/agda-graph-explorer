@@ -183,9 +183,9 @@ buildConfig o = do
                  else maybe [] splitSearchPath envIncl
       -- Entries: the CLI/config list ('oEntries', already appended in
       -- precedence order), order-preserving deduped. AGDA_EXPLORE_ENTRY is a
-      -- FALLBACK only — used when no --entry/config entry was given (the
-      -- historical env-as-fallback semantics, so a CLI --entry is never
-      -- silently unioned with a stray env value). When it IS the source it is
+      -- FALLBACK only — used when no --entry/config entry was given (so a
+      -- CLI --entry is never silently unioned with a stray env value). When
+      -- it IS the source it is
       -- PATH-separator-splittable, mirroring AGDA_EXPLORE_INCLUDE. Several
       -- entries union their import closures into one graph (see
       -- "AgdaGraph.Union").

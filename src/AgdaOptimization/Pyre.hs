@@ -90,7 +90,6 @@ import           Control.Monad               ( when )
 import           Control.Parallel.Strategies ( parMap, rdeepseq )
 import qualified Data.ByteString             as BS
 import           AgdaOptimization.Condense   ( Condensation(..), buildCondensation )
-import           Data.Foldable               ( foldl' )
 import qualified Data.HashMap.Strict         as HM
 import qualified Data.IntMap.Strict          as IM
 import qualified Data.IntSet                 as IS
@@ -208,13 +207,6 @@ parseOptions = parseFlags "pyre" flagSpecs
 -- | Overlay the @pyre:@ YAML section onto a seed 'Options'.
 applyConfig :: A.Object -> Options -> Either String Options
 applyConfig obj o0 = applyFlagConfig "pyre" flagSpecs obj o0
-
-------------------------------------------------------------------------
--- SCC condensation (same shape as LoadBearing's; kept private here to
--- avoid coupling the two modules)
-------------------------------------------------------------------------
-
--- 'Condensation' + 'buildCondensation' moved to "AgdaOptimization.Condense".
 
 ------------------------------------------------------------------------
 -- Per-SCC primitives: kind aggregation, fanIn*fanOut, reach sets,
@@ -648,12 +640,6 @@ pearson ps =
       vy  = n * syy - sy * sy
       den = sqrt (vx * vy)
   in if den <= 0 then Nothing else Just (cov / den)
-
-------------------------------------------------------------------------
--- Regex exclusion (mirrors LoadBearing.computeExcludedSet)
-------------------------------------------------------------------------
-
--- (computeExcludedSet / lastSegment moved to "AgdaOptimization.Common".)
 
 ------------------------------------------------------------------------
 -- Driver

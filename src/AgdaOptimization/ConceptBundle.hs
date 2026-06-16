@@ -57,7 +57,6 @@ module AgdaOptimization.ConceptBundle
 
 import           Control.DeepSeq         ( rnf )
 import           Control.Exception       ( evaluate )
-import           Data.Foldable           ( foldl' )
 import qualified Data.IntMap.Strict      as IM
 import           Data.IntMap.Strict      ( IntMap )
 import qualified Data.IntSet             as IS
@@ -147,8 +146,6 @@ defaultOptions = Options
 -- switches (an attached @=value@ is ignored). They share a single YAML
 -- key (@forced-suppress@), carried by the @--forced-suppress@ entry; the
 -- @--no-forced-suppress@ entry takes no part in the overlay ('Nothing').
--- The declaration order matches the former hand-rolled @applyConfig@
--- overlay sequence.
 flagSpecs :: [FlagSpec Options]
 flagSpecs =
   [ IntFlag "min-support" "--min-support=N                 absolute support count (default 3)"

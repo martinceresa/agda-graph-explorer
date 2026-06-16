@@ -30,7 +30,6 @@ module AgdaOptimization.Polyglot
 import           Control.DeepSeq      ( NFData(..) )
 import           Control.Monad        ( unless, when )
 import           Control.Parallel.Strategies ( parListChunk, rdeepseq, withStrategy )
-import           Data.Foldable        ( foldl' )
 import qualified Data.IntMap.Strict   as IM
 import qualified Data.IntSet          as IS
 import           Data.IntSet          ( IntSet )
@@ -142,15 +141,15 @@ run ix gOpts opts@Options{..} = do
     hPutStrLn stderr   "[polyglot] Community structure is weak; diversity scores are approximate."
     hPutStrLn stderr   "[polyglot] The [god?] tag is suppressed at this Q."
 
-  let topRows   = take optTopN
-                $ sortBy (comparing (Down . sDiversity)) scored
+  let sortedByDiv = sortBy (comparing (Down . sDiversity)) scored
+      topRows   = take optTopN sortedByDiv
       godSet
         | lowQ      = IS.empty
         | otherwise = IS.fromList
                     $ map sNodeId
                     $ take 10
                     $ filter (\s -> isShortProofUnknown ix (sNodeId s))
-                    $ sortBy (comparing (Down . sDiversity)) scored
+                    $ sortedByDiv
       recs = recommendationStrings ix topRows
 
   case gOutFormat gOpts of

@@ -267,9 +267,8 @@ parseFlags sub specs = go
 -- @o0 -> o1 -> …@). Each value-typed flag uses the matching
 -- "AgdaOptimization.Config" lookup so JSON-type errors carry the
 -- identical @section.key: …@ wording. Enum keys go through
--- 'lookupKeyEnum' (whose error wording is identical to term-cluster's
--- former hand-rolled @lookupKey@-then-parse path). A 'SwitchFlag' whose
--- config-key field is 'Nothing' contributes nothing here.
+-- 'lookupKeyEnum'. A 'SwitchFlag' whose config-key field is 'Nothing'
+-- contributes nothing here.
 applyFlagConfig :: forall o. String -> [FlagSpec o] -> A.Object -> o -> Either String o
 applyFlagConfig section specs obj = go specs
   where

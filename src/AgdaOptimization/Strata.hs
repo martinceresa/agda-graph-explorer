@@ -52,7 +52,6 @@ module AgdaOptimization.Strata
   , run
   ) where
 
-import           Data.Foldable        ( foldl' )
 import qualified Data.IntMap.Strict   as IM
 import qualified Data.IntSet          as IS
 import           Data.List            ( sortBy )

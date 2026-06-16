@@ -46,7 +46,6 @@ module AgdaOptimization.Ledger
 import           Control.DeepSeq      ( NFData(..) )
 import           Control.Monad        ( when )
 import           Control.Parallel.Strategies ( parMap, rdeepseq )
-import           Data.Foldable        ( foldl' )
 import qualified Data.IntMap.Strict   as IM
 import qualified Data.IntSet          as IS
 import           Data.List            ( intercalate, sortBy )

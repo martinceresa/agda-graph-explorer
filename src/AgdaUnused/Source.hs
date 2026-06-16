@@ -22,7 +22,6 @@ module AgdaUnused.Source
   ) where
 
 import           Data.Char  ( isSpace )
-import           Data.List  ( isPrefixOf )
 import qualified Data.Set   as S
 import qualified Data.Text  as T
 
@@ -278,7 +277,3 @@ sanitiseName =
                || (c >= 'A' && c <= 'Z')
                || (c >= '0' && c <= '9')
                || c > '\x7f'
-
--- | 'isPrefixOf' lifted to 'Data.Text'.
-_isTextPrefix :: T.Text -> T.Text -> Bool
-_isTextPrefix p s = T.unpack p `isPrefixOf` T.unpack s

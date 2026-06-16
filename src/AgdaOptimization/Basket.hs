@@ -45,7 +45,6 @@ import           Control.DeepSeq         ( rnf )
 import           Control.Exception       ( bracket, evaluate )
 import           Control.Monad           ( when )
 import           Control.Parallel.Strategies ( parMap, rdeepseq )
-import           Data.Foldable           ( foldl' )
 import           Data.IORef              ( IORef, newIORef, readIORef, writeIORef )
 import qualified Data.IntMap.Strict      as IM
 import           Data.IntMap.Strict      ( IntMap )
@@ -63,7 +62,7 @@ import           Data.Aeson              ( (.=) )
 
 import           AgdaGraph.Index         ( Index(..), defAt )
 import           AgdaGraph.Schema        ( Definition(..), Kind(..) )
-import           AgdaOptimization.Common ( lastSegment )
+import           AgdaOptimization.Common ( chunksOf, lastSegment )
 import           AgdaOptimization.FamilyFilter ( isForcedByFamily )
 import           AgdaOptimization.FlagSpec ( FlagSpec(..), SwitchVal(..)
                                            , parseFlags, applyFlagConfig )
@@ -550,16 +549,6 @@ chooseNBatches budget nChunks
   | budget <= 0 = max 1 (min 16 nChunks)
   | otherwise   = max 1 (min 32 nChunks)
 
--- | Standard list-chunking: empty input -> empty output; size <= 0
--- clamps to 1 to avoid infinite loops.
-chunkList :: Int -> [a] -> [[a]]
-chunkList k xs0
-  | k <= 0    = chunkList 1 xs0
-  | otherwise = go xs0
-  where
-    go [] = []
-    go xs = let (h, t) = splitAt k xs in h : go t
-
 -- | Canonical (a, b) with a < b.
 orderPair :: Int -> Int -> (Int, Int)
 orderPair a b
@@ -595,17 +584,17 @@ countPairsBudgeted
   -> IntSet
   -> IO (Map (Int, Int) Int, Bool)
 countPairsBudgeted budget deadlineRef txs l1 = do
-  let !chunks    = chunkList (chunkSizeFor budget txs) txs
+  let !chunks    = chunksOf (chunkSizeFor budget txs) txs
       !nChunks   = length chunks
       !nBatches  = chooseNBatches budget nChunks
       !batchSize = max 1 ((nChunks + nBatches - 1) `div` nBatches)
-      !batches   = chunkList batchSize chunks
+      !batches   = chunksOf batchSize chunks
       !total     = length batches
-  go total 0 [] batches
+  go total 0 [] Map.empty batches
   where
-    go !_total !_done !accs []         =
+    go !_total !_done !accs !_running []         =
       pure (Map.unionsWith (+) accs, False)
-    go !total !done !accs (b : rest)   = do
+    go !total !done !accs !running (b : rest)   = do
       tripped <- readIORef deadlineRef
       if tripped
         then pure (Map.unionsWith (+) accs, True)
@@ -615,11 +604,11 @@ countPairsBudgeted budget deadlineRef txs l1 = do
           let !merged   = Map.unionsWith (+) partial
               !done'    = done + 1
               !accs'    = merged : accs
-              !accSoFar = Map.unionsWith (+) accs'
+              !running' = Map.unionWith (+) running merged
           hPutStrLn stderr $
             "[basket] L2: " ++ show done' ++ "/" ++ show total
-              ++ " batches, |L2| ~ " ++ show (Map.size accSoFar) ++ " so far"
-          go total done' accs' rest
+              ++ " batches, |L2| ~ " ++ show (Map.size running') ++ " so far"
+          go total done' accs' running' rest
 
     bump !acc (Tx _ items _) =
       let filtered = filter (`IS.member` l1) items
@@ -647,17 +636,17 @@ countTriplesBudgeted
   -> Map (Int, Int) Int
   -> IO (Map (Int, Int, Int) Int, Bool)
 countTriplesBudgeted budget deadlineRef txs l1 l2 = do
-  let !chunks    = chunkList (chunkSizeFor budget txs) txs
+  let !chunks    = chunksOf (chunkSizeFor budget txs) txs
       !nChunks   = length chunks
       !nBatches  = chooseNBatches budget nChunks
       !batchSize = max 1 ((nChunks + nBatches - 1) `div` nBatches)
-      !batches   = chunkList batchSize chunks
+      !batches   = chunksOf batchSize chunks
       !total     = length batches
-  go total 0 [] batches
+  go total 0 [] Map.empty batches
   where
-    go !_total !_done !accs []         =
+    go !_total !_done !accs !_running []         =
       pure (Map.unionsWith (+) accs, False)
-    go !total !done !accs (b : rest)   = do
+    go !total !done !accs !running (b : rest)   = do
       tripped <- readIORef deadlineRef
       if tripped
         then pure (Map.unionsWith (+) accs, True)
@@ -667,11 +656,11 @@ countTriplesBudgeted budget deadlineRef txs l1 l2 = do
           let !merged   = Map.unionsWith (+) partial
               !done'    = done + 1
               !accs'    = merged : accs
-              !accSoFar = Map.unionsWith (+) accs'
+              !running' = Map.unionWith (+) running merged
           hPutStrLn stderr $
             "[basket] L3: " ++ show done' ++ "/" ++ show total
-              ++ " batches, |L3| ~ " ++ show (Map.size accSoFar) ++ " so far"
-          go total done' accs' rest
+              ++ " batches, |L3| ~ " ++ show (Map.size running') ++ " so far"
+          go total done' accs' running' rest
 
     bump !acc (Tx _ items _) =
       let filtered = filter (`IS.member` l1) items

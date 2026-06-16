@@ -70,7 +70,6 @@ module AgdaOptimization.Entwine
   ) where
 
 import           Control.Parallel.Strategies ( parMap, rdeepseq )
-import           Data.Foldable        ( foldl' )
 import qualified Data.IntMap.Strict   as IM
 import           Data.IntMap.Strict   ( IntMap )
 import qualified Data.IntSet          as IS
@@ -91,7 +90,7 @@ import           AgdaGraph.Schema     ( Definition(..) )
 
 import           AgdaOptimization.FlagSpec ( FlagSpec(..), SwitchVal(..)
                                            , parseFlags, applyFlagConfig )
-import           AgdaOptimization.Common ( computeExcludedSet, lastSegment )
+import           AgdaOptimization.Common ( chunksOf, computeExcludedSet, lastSegment )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , renderTable, emitJsonReport
                                          , showD3, withHumanOutput )
@@ -291,7 +290,7 @@ run ix gOpts opts = do
       !chunkSize = max 1 ((nCand + nChunks - 1) `div` nChunks)
       !scored =
         concat (parMap rdeepseq (map (scorePair singleCnt nCallers))
-                                (chunkList chunkSize candidates))
+                                (chunksOf chunkSize candidates))
 
       -- 4. Filter on IQR / G; sort by IQR desc, G desc, x asc, y asc
       -- for stable output across runs.
@@ -519,20 +518,7 @@ gStat n11 n10 n01 n00 nx ny n
       in 2 * (term n11 e11 + term n10 e10 + term n01 e01 + term n00 e00)
 
 ----------------------------------------------------------------------
--- (Regex exclusion + lastSegment moved to "AgdaOptimization.Common".)
-
-----------------------------------------------------------------------
 -- Chunking (matches Basket).
-
--- | Standard list chunking.  Negative / zero chunk size clamps to 1
--- to avoid infinite loops; empty input yields empty output.
-chunkList :: Int -> [a] -> [[a]]
-chunkList k xs0
-  | k <= 0    = chunkList 1 xs0
-  | otherwise = go xs0
-  where
-    go [] = []
-    go xs = let (h, t) = splitAt k xs in h : go t
 
 ----------------------------------------------------------------------
 -- Human rendering.

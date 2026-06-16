@@ -56,7 +56,6 @@ module AgdaOptimization.Chokepoint
 import           Control.DeepSeq           ( NFData(..) )
 import           Control.Monad             ( when )
 import           Control.Parallel.Strategies ( parMap, rdeepseq )
-import           Data.Foldable             ( foldl' )
 import           AgdaOptimization.Condense ( Condensation(..), buildCondensation )
 import qualified Data.IntMap.Strict        as IM
 import qualified Data.IntSet               as IS
@@ -81,10 +80,10 @@ import           AgdaGraph.Schema          ( Access(..), Definition(..)
 
 import           AgdaOptimization.FlagSpec ( FlagSpec(..), EnumErr(..)
                                            , parseFlags, applyFlagConfig )
-import           AgdaOptimization.Common ( computeExcludedSet, isFoundationalModule )
+import           AgdaOptimization.Common ( computeExcludedSet, isFoundationalModule, terminals )
 import           AgdaOptimization.Report   ( GlobalOpts(..), OutFormat(..)
                                            , emitJsonReport, renderTable
-                                           , withHumanOutput )
+                                           , showD3, withHumanOutput )
 
 ------------------------------------------------------------------------
 -- Public surface
@@ -195,12 +194,6 @@ applyConfig :: A.Object -> Options -> Either String Options
 applyConfig obj o0 = applyFlagConfig "chokepoint" flagSpecs obj o0
 
 ------------------------------------------------------------------------
--- Condensation (shape shared with LoadBearing, kept independent here).
-------------------------------------------------------------------------
-
--- 'Condensation' + 'buildCondensation' moved to "AgdaOptimization.Condense".
-
-------------------------------------------------------------------------
 -- Source / sink selection
 ------------------------------------------------------------------------
 
@@ -223,15 +216,7 @@ pickSources !ix = \case
         | defAccess d == Public = IS.insert i acc
         | otherwise             = acc
   Terminals ->
-    let !n  = idxNodeCount ix
-        !rv = idxReverse ix
-        loop !acc i
-          | i >= n = acc
-          | otherwise =
-              if IS.null (IM.findWithDefault IS.empty i rv)
-                then loop (IS.insert i acc) (i + 1)
-                else loop acc (i + 1)
-    in loop IS.empty 0
+    terminals ix
 
 -- | Compute the sink set (in /original/ node ids). See 'SinkMode'.
 pickSinks :: Index -> Condensation -> SinkMode -> IS.IntSet
@@ -645,8 +630,7 @@ run !ix !gOpts !opts = do
 
   -- Lift to SCC ids. A source/sink SCC contains at least one
   -- source/sink original node.
-  let srcSccSet  = IS.fromList
-                     [ IM.findWithDefault (-1) v sccOf | v <- IS.toList srcSet ]
+  let srcSccSet  = srcSccs0
       sinkSccSet = IS.fromList
                      [ IM.findWithDefault (-1) v sccOf | v <- IS.toList sinkSet ]
       -- Disjointness: if a source SCC is also a sink SCC, drop it from
@@ -661,8 +645,7 @@ run !ix !gOpts !opts = do
     -- Rather than a generic "try a different combo", probe every
     -- --sources/--sinks pairing and name the ones that would actually
     -- yield a non-empty disjoint sink SCC set on THIS graph.
-    let sccsOf s    = IS.fromList [ IM.findWithDefault (-1) v sccOf | v <- IS.toList s ]
-        disjointN sm km =
+    let disjointN sm km =
           IS.size (IS.difference (sccsOf (pickSinks ix cond km)) (sccsOf (pickSources ix sm)))
         combos      = [ (sm, km) | sm <- [ExportedTheorems, AllPublic, Terminals]
                                  , km <- [PostulatesAxioms, TerminalLeaves] ]
@@ -759,7 +742,7 @@ run !ix !gOpts !opts = do
               , T.unpack (defModule d)
               , stateTag (defState d)
               , roleLabel (canCut c) (canArt c)
-              , showFixed3 (canScore c)
+              , showD3 (canScore c)
               , show (canUpstream c)
               , show (canDownstream c)
               ]
@@ -936,16 +919,6 @@ roleLabel True  True  = "cut+art"
 roleLabel True  False = "cut"
 roleLabel False True  = "articulation"
 roleLabel False False = "-"
-
--- | 3-fractional-digit double, no locale issues. Copied here so we
--- don't share helper modules with LoadBearing for one function.
-showFixed3 :: Double -> String
-showFixed3 !x =
-  let n      = (round (x * 1000) :: Int)
-      (q, r) = divMod (abs n) 1000
-      sign   = if n < 0 then "-" else ""
-      pad3 v = let s = show v in replicate (3 - length s) '0' ++ s
-  in sign ++ show q ++ "." ++ pad3 r
 
 -- | 6-fractional-digit double, for the max-flow value (small after
 -- division by LOC).

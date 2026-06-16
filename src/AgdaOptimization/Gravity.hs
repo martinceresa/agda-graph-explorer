@@ -73,7 +73,7 @@ import           Data.IntMap.Strict           ( IntMap )
 import qualified Data.Map.Strict              as Map
 import qualified Data.IntSet                  as IS
 import           Data.IntSet                  ( IntSet )
-import           Data.List                    ( foldl', sortBy )
+import           Data.List                    ( sortBy )
 import           Data.Ord                     ( Down(..), comparing )
 import           Data.Text                    ( Text )
 import qualified Data.Text                    as T
@@ -92,7 +92,7 @@ import           AgdaGraph.Schema             ( Access(..), Definition(..)
 
 import           AgdaOptimization.FlagSpec    ( FlagSpec(..), EnumErr(..)
                                               , parseFlags, applyFlagConfig )
-import           AgdaOptimization.Common      ( isTagged )
+import           AgdaOptimization.Common      ( isTagged, terminals )
 import           AgdaOptimization.Report      ( GlobalOpts(..), OutFormat(..)
                                               , renderTable, emitJsonReport
                                               , withHumanOutput )
@@ -654,11 +654,7 @@ pickSeeds !ix = \case
   ResTerminals ->
     -- Terminals = nothing uses them (no incoming edges = empty reverse
     -- adjacency at that id).
-    IS.fromList
-      [ i
-      | i <- [0 .. idxNodeCount ix - 1]
-      , IS.null (IM.findWithDefault IS.empty i (idxReverse ix))
-      ]
+    terminals ix
 
 -- | Module with the largest number of Public defs (matching the
 -- LoadBearing heuristic). Tie-break by shortest module-name length.

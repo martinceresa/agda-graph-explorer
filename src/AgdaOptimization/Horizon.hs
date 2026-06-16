@@ -61,7 +61,6 @@ module AgdaOptimization.Horizon
   ) where
 
 import           Control.Monad             ( when )
-import           Data.Foldable             ( foldl' )
 import           AgdaOptimization.Condense ( Condensation(..), buildCondensation )
 import qualified Data.IntMap.Strict        as IM
 import qualified Data.IntSet               as IS
@@ -78,13 +77,13 @@ import           Data.Aeson                ( (.=) )
 
 import           AgdaGraph.Index           ( Index(..), defAt )
 import           AgdaGraph.Schema          ( Access(..), Definition(..)
-                                           , ExternalsSummary(..)
                                            , Kind(..), State(..) )
 
 import           AgdaOptimization.FlagSpec ( FlagSpec(..), EnumErr(..)
                                            , SwitchVal(..)
                                            , parseFlags, applyFlagConfig )
-import           AgdaOptimization.Common ( computeExcludedSet, notFoundational )
+import           AgdaOptimization.Common ( computeExcludedSet, externalsSummaryHasRows
+                                         , notFoundational, terminals )
 import           AgdaOptimization.Report   ( GlobalOpts(..), OutFormat(..)
                                            , renderTable, emitJsonReport
                                            , withHumanOutput )
@@ -207,12 +206,6 @@ applyConfig :: A.Object -> Options -> Either String Options
 applyConfig obj o0 = applyFlagConfig "horizon" flagSpecs obj o0
 
 ------------------------------------------------------------------------
--- Condensation
-------------------------------------------------------------------------
-
--- 'Condensation' + 'buildCondensation' moved to "AgdaOptimization.Condense".
-
-------------------------------------------------------------------------
 -- Leaf / root selection
 ------------------------------------------------------------------------
 
@@ -249,27 +242,8 @@ collectRoots !ix = \case
            then IS.insert i acc
            else acc)
       IS.empty (idxDefs ix)
-  RtTerminals ->
-    let !n = idxNodeCount ix
-        !rv = idxReverse ix
-        go !acc i
-          | i >= n   = acc
-          | otherwise =
-              let inbound = IM.findWithDefault IS.empty i rv
-              in if IS.null inbound
-                   then go (IS.insert i acc) (i + 1)
-                   else go acc (i + 1)
-    in go IS.empty 0
+  RtTerminals -> terminals ix
 
-
--- | Does the wire 'ExternalsSummary' carry any postulate rows? When it
--- does and the in-memory leaf set is empty, the producer almost
--- certainly ran with @--no-externals@. Mirrors
--- 'AgdaOptimization.Debt.externalsSummaryHasRows'.
-externalsSummaryNonEmpty :: Maybe ExternalsSummary -> Bool
-externalsSummaryNonEmpty Nothing                       = False
-externalsSummaryNonEmpty (Just (ExternalsSummary _ pm)) =
-  any (not . null) (Map.elems pm)
 
 -- | Promote a node-level seed set to its SCCs. A multi-node SCC
 -- inherits seed status if /any/ of its members were seeds — which is
@@ -294,36 +268,35 @@ seedsToSccs !cond !seeds =
 -- non-leaf SCC takes @1 + max@ over its forward children that have a
 -- value.
 forwardEccSCC :: Condensation -> IS.IntSet -> IM.IntMap Int
-forwardEccSCC !cond !leafSccs =
-  foldl' step IM.empty (reverse (cdTopo cond))
-  where
-    step !acc !scc
-      | IS.member scc leafSccs = IM.insert scc 0 acc
-      | otherwise =
-          let kids = IM.findWithDefault IS.empty scc (cdForward cond)
-              best = IS.foldl' bestStep Nothing kids
-              bestStep !mb !k = case IM.lookup k acc of
-                Just d  -> Just $! case mb of
-                  Nothing -> d + 1
-                  Just b  -> max b (d + 1)
-                Nothing -> mb
-          in case best of
-               Just d  -> IM.insert scc d acc
-               Nothing -> acc
+forwardEccSCC cond leafSccs =
+  eccDP cond (reverse (cdTopo cond)) cdForward leafSccs
 
 -- | Backward eccentricity per SCC: longest path /from/ a root SCC.
 -- Walks the condensation forward (sources first); each non-root SCC
 -- takes @1 + max@ over its parents that have a value.
 backwardEccSCC :: Condensation -> IS.IntSet -> IM.IntMap Int
-backwardEccSCC !cond !rootSccs =
-  foldl' step IM.empty (cdTopo cond)
+backwardEccSCC cond rootSccs =
+  eccDP cond (cdTopo cond) cdReverse rootSccs
+
+-- | Shared eccentricity DP over the condensation. Folds @order@ (the
+-- topo order in the appropriate direction), seeding @0@ for SCCs in
+-- @seeds@ and otherwise taking @1 + max@ over the neighbours given by
+-- @neighbours cond@ that already have a value.
+eccDP
+  :: Condensation
+  -> [Int]
+  -> (Condensation -> IM.IntMap IS.IntSet)
+  -> IS.IntSet
+  -> IM.IntMap Int
+eccDP !cond order neighbours !seeds =
+  foldl' step IM.empty order
   where
     step !acc !scc
-      | IS.member scc rootSccs = IM.insert scc 0 acc
+      | IS.member scc seeds = IM.insert scc 0 acc
       | otherwise =
-          let pars = IM.findWithDefault IS.empty scc (cdReverse cond)
-              best = IS.foldl' bestStep Nothing pars
-              bestStep !mb !p = case IM.lookup p acc of
+          let kids = IM.findWithDefault IS.empty scc (neighbours cond)
+              best = IS.foldl' bestStep Nothing kids
+              bestStep !mb !k = case IM.lookup k acc of
                 Just d  -> Just $! case mb of
                   Nothing -> d + 1
                   Just b  -> max b (d + 1)
@@ -363,7 +336,7 @@ run !ix !gOpts !opts0 = do
       !defaultEmpty  =     optLeaves opts0 == LvPostulatesAxioms
                         && not (optLeavesExplicit opts0)
                         && IS.null leafSet0
-      !extSumPresent = externalsSummaryNonEmpty (idxExternalsSummary ix)
+      !extSumPresent = externalsSummaryHasRows (idxExternalsSummary ix)
 
   when defaultEmpty $ do
     if extSumPresent
@@ -547,14 +520,7 @@ renderModuleHist :: Index -> IM.IntMap Int -> String
 renderModuleHist !ix !epPlus
   | IM.null epPlus = "  (empty — no node reaches a leaf)\n"
   | otherwise =
-      let -- per-module bucket map
-          step :: Map.Map Text (IM.IntMap Int)
-               -> Int -> Int -> Map.Map Text (IM.IntMap Int)
-          step !acc v d =
-            let m = defModule (defAt ix v)
-                bump = IM.insertWith (+) d (1 :: Int)
-            in Map.insertWith (IM.unionWith (+)) m (bump IM.empty) acc
-          !byModule = IM.foldlWithKey' step Map.empty epPlus
+      let !byModule = buildModuleHist ix epPlus
 
           -- module-level peak (max bucket count) for ranking
           peakOf bm = case IM.elems bm of
@@ -570,10 +536,7 @@ renderModuleHist !ix !epPlus
           renderRow (m, bm) =
             let buckets   = IM.toAscList bm
                 !total    = sum (map snd buckets)
-                (peakD, peakC) =
-                  foldl' (\(bd, bc) (d, c) ->
-                            if c > bc then (d, c) else (bd, bc))
-                         (-1, -1) buckets
+                (peakD, peakC) = peakOfBuckets buckets
                 bucketStr = unwords
                   [ show d ++ ":" ++ show c | (d, c) <- buckets ]
             in [ T.unpack m
@@ -586,10 +549,27 @@ renderModuleHist !ix !epPlus
           body   = map renderRow rows
       in renderTable header body
 
-------------------------------------------------------------------------
--- Regex exclusion
-------------------------------------------------------------------------
+-- | Build the per-module ε⁺ bucket histogram once. Shared by the human
+-- ('renderModuleHist') and JSON ('moduleHistJson') renderers, which
+-- each apply their own downstream ordering to the result.
+buildModuleHist :: Index -> IM.IntMap Int -> Map.Map Text (IM.IntMap Int)
+buildModuleHist ix epPlus =
+  let step :: Map.Map Text (IM.IntMap Int)
+           -> Int -> Int -> Map.Map Text (IM.IntMap Int)
+      step !acc v d =
+        let m = defModule (defAt ix v)
+            bump = IM.insertWith (+) d (1 :: Int)
+        in Map.insertWith (IM.unionWith (+)) m (bump IM.empty) acc
+  in IM.foldlWithKey' step Map.empty epPlus
 
+-- | Peak @(bucket, count)@ over a module's ascending bucket list: the
+-- highest-count bucket, ties resolved to the earliest bucket. @(-1,-1)@
+-- for an empty list. Shared by the human and JSON renderers.
+peakOfBuckets :: [(Int, Int)] -> (Int, Int)
+peakOfBuckets =
+  foldl' (\(bd, bc) (d, c) ->
+            if c > bc then (d, c) else (bd, bc))
+         (-1, -1)
 
 ------------------------------------------------------------------------
 -- Display tags
@@ -704,20 +684,11 @@ rowJson ix epPlus epMinus periphery center rank v =
 -- | Per-module histogram as a JSON object: module -> {bucket :: count}.
 moduleHistJson :: Index -> IM.IntMap Int -> A.Value
 moduleHistJson !ix !epPlus =
-  let step :: Map.Map Text (IM.IntMap Int)
-           -> Int -> Int -> Map.Map Text (IM.IntMap Int)
-      step !acc v d =
-        let m = defModule (defAt ix v)
-            bump = IM.insertWith (+) d (1 :: Int)
-        in Map.insertWith (IM.unionWith (+)) m (bump IM.empty) acc
-      !byModule = IM.foldlWithKey' step Map.empty epPlus
+  let !byModule = buildModuleHist ix epPlus
       rowJ (m, bm) =
         let buckets  = IM.toAscList bm
             !total   = sum (map snd buckets)
-            (peakD, peakC) =
-              foldl' (\(bd, bc) (d, c) ->
-                        if c > bc then (d, c) else (bd, bc))
-                     (-1, -1) buckets
+            (peakD, peakC) = peakOfBuckets buckets
         in A.object
              [ "module"  .= m
              , "total"   .= total

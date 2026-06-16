@@ -25,6 +25,8 @@ module AgdaGraph.Interaction.Iotcm
   , iotcmAutoOne
   ) where
 
+import Data.List (intercalate)
+
 -- | How much to normalise a rendered goal\/type. @Simplified@ matches
 -- agda-mode's default for goal display.
 data Rewrite = AsIs | Instantiated | HeadNormal | Simplified | Normalised
@@ -103,8 +105,4 @@ iotcmAutoOne modPath rw iid opts =
     "Cmd_autoOne " ++ renderRewrite rw ++ " " ++ show iid ++ " noRange " ++ show opts
 
 showStringList :: [String] -> String
-showStringList ss = "[" ++ commaJoin (map show ss) ++ "]"
-  where
-    commaJoin []     = ""
-    commaJoin [x]    = x
-    commaJoin (x:xs) = x ++ "," ++ commaJoin xs
+showStringList ss = "[" ++ intercalate "," (map show ss) ++ "]"

@@ -31,7 +31,6 @@ module AgdaOptimization.Debt
 
 import           Control.Monad        ( when )
 import           Control.Parallel.Strategies ( parMap, rdeepseq )
-import           Data.Foldable        ( foldl' )
 import qualified Data.IntMap.Strict   as IM
 import qualified Data.IntSet          as IS
 import           Data.List            ( sortBy )
@@ -50,7 +49,8 @@ import           AgdaGraph.Index      ( Index(..), ancestors, defAt, descendants
 import           AgdaGraph.Schema     ( Access(..), Definition(..)
                                       , ExternalsSummary(..), State(..) )
 
-import           AgdaOptimization.Common ( lastSegment, notFoundational, terminals )
+import           AgdaOptimization.Common ( externalsSummaryHasRows, lastSegment
+                                         , notFoundational, terminals )
 import           AgdaOptimization.FlagSpec ( FlagSpec(..), SwitchVal(..)
                                            , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
@@ -173,9 +173,10 @@ run ix gOpts opts = do
       (!expSet, !expSrc) = computeExported ix
       !nExp = IS.size expSet
 
-      -- 2. Debt nodes.
-      !holeSet       = collectByState defs Hole
-      !postSetAll    = collectByState defs Postulate
+      -- 2. Debt nodes. One pass over idxDefs buckets the Hole /
+      -- Postulate / Failed states together (the Failed set is used by
+      -- the failed-module panel below).
+      (!holeSet, !postSetAll, !failedDefs) = collectStates3 defs
       !postSetKept   = if optIncludeFoundational opts
                          then postSetAll
                          else IS.filter (notFoundational . defAt ix) postSetAll
@@ -201,8 +202,8 @@ run ix gOpts opts = do
       -- 5. Hole prereq edges within debt set.
       !prereqEdges = holePrereqEdges ix debtSet (mkCovMap holes)
 
-      -- 6. Failed-module panel (derived from defState = Failed).
-      !failedDefs = collectByState defs Failed
+      -- 6. Failed-module panel (derived from defState = Failed;
+      -- failedDefs was bucketed in step 2's single pass).
       !failedMods = uniqueModules ix failedDefs
 
       -- Stats.
@@ -301,10 +302,20 @@ computeExported ix =
 -- Hole / postulate selection
 -- ---------------------------------------------------------------------
 
-collectByState :: V.Vector Definition -> State -> IS.IntSet
-collectByState defs st =
-  V.ifoldl' (\ !acc i d -> if defState d == st then IS.insert i acc else acc)
-            IS.empty defs
+-- | Single-pass bucketer: fold 'idxDefs' once and return the
+-- Hole/Postulate/Failed index sets together. Equivalent to three
+-- separate per-state folds (IntSet membership is determined solely by
+-- which indices carry the matching state, independent of insertion
+-- order), but visits the vector once.
+collectStates3 :: V.Vector Definition -> (IS.IntSet, IS.IntSet, IS.IntSet)
+collectStates3 defs =
+  V.ifoldl' step (IS.empty, IS.empty, IS.empty) defs
+  where
+    step (!h, !p, !f) i d = case defState d of
+      Hole      -> (IS.insert i h, p, f)
+      Postulate -> (h, IS.insert i p, f)
+      Failed    -> (h, p, IS.insert i f)
+      _         -> (h, p, f)
 
 
 -- ---------------------------------------------------------------------
@@ -449,13 +460,6 @@ renderPrereqs ix edges =
              ++ T.unpack (defName (defAt ix b))
              ++ "  (shared = " ++ show s ++ ")"
   in unlines (map line take10)
-
--- | Does the externals summary carry any postulate rows worth
--- rendering? Used to decide between the two inventory paths.
-externalsSummaryHasRows :: Maybe ExternalsSummary -> Bool
-externalsSummaryHasRows Nothing                       = False
-externalsSummaryHasRows (Just (ExternalsSummary _ pm)) =
-  any (not . null) (Map.elems pm)
 
 -- | Foundational-postulate inventory: group every Postulate-state def
 -- (foundational ones included) by module, sort modules by descending

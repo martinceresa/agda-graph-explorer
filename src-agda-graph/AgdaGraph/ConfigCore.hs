@@ -91,8 +91,8 @@ firstExisting (p:ps) = do
   if ok then pure (Just p) else firstExisting ps
 
 -- | 'True' iff @d@ exists and contains at least one @*.agda-lib@ entry.
--- Uses the filepath-aware @takeExtension@ form (the unified spelling) and
--- treats an unreadable / missing directory as @False@.
+-- Uses the filepath-aware @takeExtension@ form and treats an unreadable /
+-- missing directory as @False@.
 dirHasAgdaLib :: FilePath -> IO Bool
 dirHasAgdaLib d = do
   isDir <- doesDirectoryExist d

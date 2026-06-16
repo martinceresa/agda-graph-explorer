@@ -44,7 +44,6 @@ module AgdaOptimization.Silhouette
   ) where
 
 import           Control.Monad        ( forM_, when )
-import           Data.Foldable        ( foldl' )
 import           Data.List            ( sortBy, tails )
 import qualified Data.Map.Strict      as Map
 import           Data.Map.Strict      ( Map )

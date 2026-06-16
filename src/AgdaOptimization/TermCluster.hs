@@ -60,7 +60,6 @@ import           Control.Monad        ( guard, when )
 import           Control.Parallel.Strategies ( parMap, rdeepseq )
 import qualified Data.Aeson           as A
 import           Data.Aeson           ( (.=) )
-import           Data.Foldable        ( foldl' )
 import qualified Data.IntMap.Strict   as IM
 import           Data.IntMap.Strict   ( IntMap )
 import qualified Data.IntSet          as IS
@@ -70,7 +69,6 @@ import qualified Data.Map.Strict      as M
 import           Data.Map.Strict      ( Map )
 import           Data.Maybe           ( mapMaybe )
 import           Data.Ord             ( Down(..), comparing )
-import qualified Data.Set             as S
 import           Data.Text            ( Text )
 import qualified Data.Text            as T
 import           Data.Word            ( Word64 )
@@ -82,6 +80,7 @@ import           Text.Regex.TDFA      ( Regex, makeRegex, matchTest )
 import           AgdaGraph.Index      ( Index(..), defAt )
 import           AgdaGraph.Schema     ( Definition(..) )
 
+import           AgdaOptimization.Common   ( chunksOf )
 import           AgdaOptimization.FlagSpec ( FlagSpec(..), EnumErr(..)
                                            , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Report   ( GlobalOpts(..), OutFormat(..)
@@ -161,8 +160,7 @@ parseSortBy s           =
 -- help line is verbatim from 'AgdaOptimization.CLI.subFlags'.
 --
 -- @--sort@ is an 'EnumWrapped' enum (a rejected token is wrapped as
--- @term-cluster: --sort: …@). The declaration order matches the former
--- hand-rolled @applyConfig@ overlay sequence.
+-- @term-cluster: --sort: …@).
 flagSpecs :: [FlagSpec Options]
 flagSpecs =
   [ IntFlag "min-cluster" "--min-cluster=N                 minimum occurrences for a cluster to be reported (default 2)"
@@ -356,15 +354,6 @@ mergeBucket :: BucketAcc -> BucketAcc -> BucketAcc
 mergeBucket (BucketAcc i1 d1 c1) (BucketAcc i2 d2 c2) =
   BucketAcc (IM.unionWith (+) i1 i2) (d1 + d2) (c1 + c2)
 
--- | Split a list into chunks of size @k@. @k <= 0@ is clamped to 1.
-chunksOf :: Int -> [a] -> [[a]]
-chunksOf k xs0
-  | k <= 0    = chunksOf 1 xs0
-  | otherwise = go xs0
-  where
-    go [] = []
-    go xs = let (h, t) = splitAt k xs in h : go t
-
 -- | Zip hashes with depths; when the depths list is shorter (or
 -- empty), pad with @1@. Pairs are produced lazily and consumed once
 -- by the accumulator fold.
@@ -417,13 +406,14 @@ rankClusters ix Options{..} buckets =
 -- and self-contained — safe to drive from 'parMap'.
 mkCluster :: Index -> Options -> (Word64, BucketAcc) -> Maybe Cluster
 mkCluster ix Options{..} (h, BucketAcc inner sumDepth total) = do
-  let !modCount = moduleCountOf ix inner
+  let !perMod   = perModuleCounts ix inner
+      !modCount = M.size perMod
   guard (modCount >= optSpanModules)
   let !meanDepth = if total > 0 && sumDepth > 0
                      then fromIntegral sumDepth / fromIntegral total
                      else 1.0
   guard (meanDepth >= fromIntegral optMinMeanDepth)
-  let !diversity = moduleDiversity ix inner
+  let !diversity = moduleDiversity perMod
   guard (diversity >= optMinDiversity)
   pure $! Cluster
     { cHash        = h
@@ -439,15 +429,17 @@ mkCluster ix Options{..} (h, BucketAcc inner sumDepth total) = do
                        sortBy (comparing (Down . snd)) (IM.toList inner)
     }
 
--- | Number of distinct /declared/ top-level module names among the
--- given def ids. See 'declaredModuleName' for the @_@-stripping rule.
-moduleCountOf :: Index -> IntMap Int -> Int
-moduleCountOf ix inner =
-  S.size $ foldl'
-    (\ !acc defId ->
-       S.insert (declaredModuleName (defModule (defAt ix defId))) acc)
-    S.empty
-    (IM.keys inner)
+-- | Per-/declared/-top-level-module occurrence counts among the given
+-- def ids. See 'declaredModuleName' for the @_@-stripping rule. Built
+-- once per cluster and reused for both the module-count threshold and
+-- the diversity entropy.
+perModuleCounts :: Index -> IntMap Int -> Map Text Int
+perModuleCounts ix inner =
+  IM.foldlWithKey'
+    (\ !acc defId cnt ->
+       let m = declaredModuleName (defModule (defAt ix defId))
+       in M.insertWith (+) m cnt acc)
+    M.empty inner
 
 -- | Shannon entropy of the per-module occurrence distribution,
 -- normalised to [0, 1].
@@ -458,15 +450,9 @@ moduleCountOf ix inner =
 -- count, so a uniformly-spread cluster across 10+ modules scores
 -- close to 1.0. Returns 0 when total <= 0 or k <= 1 (deterministic
 -- floor, avoids @log 0@).
-moduleDiversity :: Index -> IntMap Int -> Double
-moduleDiversity ix inner =
-  let perMod :: Map Text Int
-      !perMod = IM.foldlWithKey'
-        (\ !acc defId cnt ->
-           let m = declaredModuleName (defModule (defAt ix defId))
-           in M.insertWith (+) m cnt acc)
-        M.empty inner
-      !total = M.foldl' (+) 0 perMod
+moduleDiversity :: Map Text Int -> Double
+moduleDiversity perMod =
+  let !total = M.foldl' (+) 0 perMod
       !k     = M.size perMod
   in if total <= 0 || k <= 1
        then 0

@@ -313,13 +313,7 @@ noteRebuilt :: ServerState -> Bool -> IO ()
 noteRebuilt ss = writeIORef (ssLastRebuilt ss)
 
 withFresh :: ServerState -> (Loaded -> Text) -> IO (Either Text Text)
-withFresh ss f = do
-  e <- ensureFresh ss
-  case e of
-    Left err          -> pure (Left (T.pack err))
-    Right (ld, stale) -> do
-      noteRebuilt ss stale
-      pure (Right (f ld <> if stale then staleFooter ld else ""))
+withFresh ss f = withFreshIO ss (pure . Right . f)
 
 withFreshIO :: ServerState -> (Loaded -> IO (Either Text Text)) -> IO (Either Text Text)
 withFreshIO ss f = do

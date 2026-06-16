@@ -122,10 +122,9 @@ driverErrorTag = \case
 ----------------------------------------------------------------------
 -- Entry point.
 
--- | Per-module command timeout. The historical one-shot driver waited
--- indefinitely; a generous bound here just stops a wedged @agda@ from
--- hanging the whole batch (a timeout poisons the session, which the batch
--- loop then respawns for the next file).
+-- | Per-module command timeout. A generous bound stops a wedged @agda@
+-- from hanging the whole batch (a timeout poisons the session, which the
+-- batch loop then respawns for the next file).
 goalsTimeoutMicros :: Int
 goalsTimeoutMicros = 600 * 1000000   -- 10 min per module
 
