@@ -157,6 +157,7 @@ runDriverBatch tmpl files = do
 mkSessionConfig :: DriverConfig -> SessionConfig
 mkSessionConfig tmpl = SessionConfig
   { scAgdaBin       = dcAgdaBin tmpl
+  , scRtsArgs       = []            -- agda-goals does not cap the child heap
   , scExtraArgs     = dcExtraArgs tmpl
   , scTimeoutMicros = goalsTimeoutMicros
   }

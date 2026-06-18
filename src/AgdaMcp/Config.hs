@@ -75,6 +75,12 @@ data Opts = Opts
     -- ^ explicit @agda@ binary for interaction sessions (@--agda-bin@).
   , oInteractArgs :: [String]
     -- ^ extra flags for @agda --interaction-json@ (repeatable @--agda-arg@).
+  , oInteractHeapMb :: Int
+    -- ^ per-session @agda@ RTS heap cap in MB (@--interaction-heap-mb@); @0@ = none.
+  , oMaxSessions :: Int
+    -- ^ cap on live interaction sessions (@--max-interaction-sessions@).
+  , oSessionIdleSecs :: Int
+    -- ^ close interaction sessions idle this many seconds (@--interaction-idle-timeout@); @0@ = never.
   , oInspect   :: Bool
     -- ^ run the localhost web inspector (@--inspect@).
   , oInspectPort :: Int
@@ -115,6 +121,9 @@ data FileConfig = FileConfig
   , fcEnableInteract :: Maybe Bool
   , fcAgdaBin        :: Maybe FilePath
   , fcInteractArgs   :: Maybe [String]
+  , fcInteractHeapMb :: Maybe Int
+  , fcMaxSessions    :: Maybe Int
+  , fcSessionIdleSecs :: Maybe Int
   , fcInspect        :: Maybe Bool
   , fcInspectPort    :: Maybe Int
   }
@@ -141,6 +150,9 @@ defaultFileConfig = FileConfig
   , fcEnableInteract = Nothing
   , fcAgdaBin        = Nothing
   , fcInteractArgs   = Nothing
+  , fcInteractHeapMb = Nothing
+  , fcMaxSessions    = Nothing
+  , fcSessionIdleSecs = Nothing
   , fcInspect        = Nothing
   , fcInspectPort    = Nothing
   }
@@ -167,6 +179,9 @@ instance FromJSON FileConfig where
     fcEnableInteract <- o .:? "enable-interact"
     fcAgdaBin        <- o .:? "agda-bin"
     fcInteractArgs   <- o .:? "agda-arg"
+    fcInteractHeapMb <- o .:? "interaction-heap-mb"
+    fcMaxSessions    <- o .:? "max-interaction-sessions"
+    fcSessionIdleSecs <- o .:? "interaction-idle-timeout"
     fcInspect        <- o .:? "inspect"
     fcInspectPort    <- o .:? "inspect-port"
     pure FileConfig{..}
@@ -206,6 +221,9 @@ applyConfig FileConfig{..} o = o
   , oEnableInteract = fromMaybe (oEnableInteract o) fcEnableInteract
   , oAgdaBin     = fcAgdaBin `orKeep` oAgdaBin o
   , oInteractArgs = fromMaybe (oInteractArgs o) fcInteractArgs
+  , oInteractHeapMb = fromMaybe (oInteractHeapMb o) fcInteractHeapMb
+  , oMaxSessions    = fromMaybe (oMaxSessions o) fcMaxSessions
+  , oSessionIdleSecs = fromMaybe (oSessionIdleSecs o) fcSessionIdleSecs
     -- An explicit `inspect:` wins; otherwise a bare `inspect-port:` implies
     -- enabling (mirrors the CLI, where --inspect-port turns the inspector on).
   , oInspect     = case fcInspect of

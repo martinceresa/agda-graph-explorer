@@ -24,14 +24,17 @@
 module AgdaInteract.Tools
   ( interactTools
   , closeAllSessions
+  , reapIdleSessions
   ) where
 
+import           Control.Concurrent      (forkIO, threadDelay)
 import           Control.Concurrent.MVar (modifyMVar, modifyMVar_, readMVar)
 import           Control.Exception       (SomeException, try)
-import           Control.Monad           (foldM)
+import           Control.Monad           (foldM, forM, forM_, forever, void, when)
 import           Data.Aeson              (FromJSON (..), Value, object, withObject,
                                           (.:), (.:?), (.=))
 import           Data.Aeson.Types        (parseMaybe)
+import           Data.IORef              (newIORef, readIORef, writeIORef)
 import           Data.List               (isPrefixOf, nub, sortOn, stripPrefix)
 import qualified Data.Map.Strict         as M
 import           Data.Maybe              (catMaybes, fromMaybe, listToMaybe, mapMaybe)
@@ -39,6 +42,7 @@ import           Data.Ord                (Down (..))
 import           Data.Text               (Text)
 import qualified Data.Text               as T
 import qualified Data.Text.IO            as TIO
+import           Data.Time.Clock         (diffUTCTime, getCurrentTime)
 import           System.Directory        (createDirectoryIfMissing,
                                           listDirectory, removePathForcibly)
 import           System.FilePath         (dropExtension, dropExtensions, isAbsolute,
@@ -758,7 +762,7 @@ loadRenamedTemp ss targetFile candidate = do
       case mbin of
         Nothing  -> pure (Left "could not locate the agda binary for validation.")
         Just bin -> do
-          es <- startSession (SessionConfig bin (cfgInteractArgs c) validateTimeoutMicros) tmpFile
+          es <- startSession (SessionConfig bin (heapRtsArgs (cfgInteractHeapMb c)) (cfgInteractArgs c) validateTimeoutMicros) tmpFile
           case es of
             Left e     -> pure (Left ("agda could not start: " <> e))
             Right sess -> do
@@ -921,11 +925,16 @@ loadAndSync ss file = modifyMVar (ssSessions ss) $ \m -> do
     Right sess -> do
       let gm0 = maybe emptyGoalMap seGoalMap (M.lookup file m)
       out <- sendIotcm sess (iotcmLoad file (loadIncludes ss file))
+      now <- getCurrentTime
+      -- Reuse the existing last-used cell when reloading a known file (so its
+      -- idle clock is reset, not orphaned); otherwise mint a fresh one.
+      luRef <- maybe (newIORef now) (\e -> seLastUsed e <$ writeIORef (seLastUsed e) now)
+                     (M.lookup file m)
       let (gm1, es) = case interpretLoad out of
                         Right goals -> syncGoals gm0 goals
                         Left _      -> (gm0, [])
-          m1        = M.insert file (SessionEntry sess gm1 False) m
-      m2 <- capSessions file m1
+          m1        = M.insert file (SessionEntry sess gm1 False luRef) m
+      m2 <- capSessions (cfgMaxSessions (ssConfig ss)) file m1
       pure (m2, Right (sess, gm1, es, out))
 
 -- | (Re)load a module, returning the session, the new goal map, the goal
@@ -940,19 +949,27 @@ doLoad ss file = do
       Left lerr -> Left lerr
       Right _   -> Right (sess, gm, es, file)
 
--- | Bound the number of live sessions (one idle @agda@ process each). When
--- over the cap, close sessions other than the one just loaded — not strict
--- LRU, but a deterministic bound, logged so the eviction is never silent.
-maxSessions :: Int
-maxSessions = 6
+-- | RTS flags that cap a spawned @agda@'s heap (@+RTS -M<n>m -RTS@), or none
+-- when the cap is @<= 0@. Bounds the worst-case footprint of a single
+-- interaction load: a runaway whole-project elaboration fails with a clean
+-- heap-overflow instead of being OOM-killed. Driven by @interaction-heap-mb@.
+heapRtsArgs :: Int -> [String]
+heapRtsArgs mb
+  | mb <= 0   = []
+  | otherwise = ["+RTS", "-M" ++ show mb ++ "m", "-RTS"]
 
-capSessions :: FilePath -> M.Map FilePath SessionEntry -> IO (M.Map FilePath SessionEntry)
-capSessions keep m
-  | M.size m <= maxSessions = pure m
+-- | Bound the number of live sessions (one idle @agda@ process each) to
+-- @cap@ ('cfgMaxSessions'). When over the cap, close sessions other than the
+-- one just loaded — not strict LRU, but a deterministic bound, logged so the
+-- eviction is never silent.
+capSessions :: Int -> FilePath -> M.Map FilePath SessionEntry -> IO (M.Map FilePath SessionEntry)
+capSessions cap keep m
+  | M.size m <= cap' = pure m
   | otherwise =
-      let victims = take (M.size m - maxSessions) [ k | k <- M.keys m, k /= keep ]
+      let victims = take (M.size m - cap') [ k | k <- M.keys m, k /= keep ]
       in foldM evict m victims
   where
+    cap' = max 1 cap   -- always keep at least the just-loaded session
     evict acc v = do
       maybe (pure ()) (closeSession . seSession) (M.lookup v acc)
       hPutStrLn stderr ("agda-explore: interaction-session cap reached; closed session for " ++ v)
@@ -964,6 +981,43 @@ closeAllSessions :: ServerState -> IO ()
 closeAllSessions ss = do
   m <- readMVar (ssSessions ss)
   mapM_ (closeSession . seSession) (M.elems m)
+
+-- | How often the idle-session reaper wakes to scan.
+reaperTickMicros :: Int
+reaperTickMicros = 60 * 1000000  -- 60s
+
+-- | Background loop (forked from "Main" only when @interaction-idle-timeout >
+-- 0@) that closes interaction sessions idle longer than 'cfgSessionIdleSecs',
+-- freeing the multi-GB @agda@ process an agent walked away from. A reaped
+-- session reloads (cold) on next use — the @load@ tool already instructs
+-- clients to re-load and re-read goal ids, so this is behaviourally safe.
+--
+-- Safety: a session is reaped only when 'sessionTryReserve' succeeds (no
+-- @sendIotcm@ in flight). The keep/reap decision runs under the 'ssSessions'
+-- lock so a query cannot fetch a session mid-reap; the actual 'closeSession'
+-- (which can block up to ~2s reaping the OS process) runs /after/ the lock is
+-- released, against entries already removed from the registry.
+reapIdleSessions :: ServerState -> IO ()
+reapIdleSessions ss = forever $ do
+  threadDelay reaperTickMicros
+  let idle = cfgSessionIdleSecs (ssConfig ss)
+  when (idle > 0) $ do
+    now <- getCurrentTime
+    victims <- modifyMVar (ssSessions ss) $ \m -> do
+      decided <- forM (M.toList m) $ \fe@(_, e) -> do
+        lu <- readIORef (seLastUsed e)
+        if realToFrac (diffUTCTime now lu) > (fromIntegral idle :: Double)
+          then do
+            free <- sessionTryReserve (seSession e)  -- skip if mid-command
+            pure (if free then Right fe else Left fe)
+          else pure (Left fe)
+      let keep = M.fromList [ fe | Left  fe <- decided ]
+          vics =            [ fe | Right fe <- decided ]
+      pure (keep, vics)
+    forM_ victims $ \(f, e) -> do
+      closeSession (seSession e)
+      hPutStrLn stderr ("agda-explore: closed interaction session idle > "
+                          ++ show idle ++ "s: " ++ f)
 
 -- | A live session for @file@: reuse the registered one if still alive,
 -- otherwise close the dead one and spawn a fresh process. Does not mutate
@@ -980,7 +1034,7 @@ getLiveSession ss m file = case M.lookup file m of
       mbin <- findBin "agda" (cfgAgdaBin (ssConfig ss)) "AGDA_BIN"
       case mbin of
         Nothing  -> pure (Left "could not locate the agda binary (set AGDA_BIN or pass --agda-bin).")
-        Just bin -> startSession (SessionConfig bin (cfgInteractArgs (ssConfig ss)) sessionTimeoutMicros) file
+        Just bin -> startSession (SessionConfig bin (heapRtsArgs (cfgInteractHeapMb (ssConfig ss))) (cfgInteractArgs (ssConfig ss)) sessionTimeoutMicros) file
 
 -- | Resolve the target session for a goal command, reloading if the entry
 -- was marked dirty by the watcher or its process died. Runs the action
@@ -1019,7 +1073,11 @@ resolveLoaded ss mFileArg = do
           pure $ case r of
             Left err              -> Left err
             Right (s, gm, _, _)   -> Right (file, s, gm)
-        else pure (Right (file, seSession e, seGoalMap e))
+        else do
+          -- Reusing a live session: refresh its idle clock so the reaper
+          -- doesn't close a session that is actively serving goal commands.
+          writeIORef (seLastUsed e) =<< getCurrentTime
+          pure (Right (file, seSession e, seGoalMap e))
   where
     pickFile m = case mFileArg of
       Just f  -> let af = absFile ss f

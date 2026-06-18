@@ -71,10 +71,11 @@ import           System.FilePath      ((</>))
 import           System.FSNotify      (Event, WatchManager, eventPath,
                                        startManager, watchTree)
 import           System.IO            (hPutStrLn, stderr)
+import           System.Mem           (performMajorGC)
 import           System.Process       (CreateProcess (..), proc,
                                        readCreateProcessWithExitCode)
 
-import           AgdaGraph.Index      (Index, buildIndex, idxDefs, idxRealCount)
+import           AgdaGraph.Index      (Index, buildIndexLean, idxDefs, idxRealCount)
 import           AgdaGraph.Schema     (Definition (..), ExpandedGraph (..))
 import           AgdaGraph.Union      (unionExpandedGraphs)
 import           AgdaGraph.Similarity (SigBodyFingerprints,
@@ -112,6 +113,9 @@ data Config = Config
   , cfgEnableInteract :: !Bool           -- ^ expose the write-side interaction-bridge tools (load/goal_type/give/…).
   , cfgAgdaBin      :: !(Maybe FilePath) -- ^ explicit @agda@ path for interaction sessions (else env/$PATH).
   , cfgInteractArgs :: ![String]         -- ^ extra flags passed to @agda --interaction-json@ (e.g. @--safe@).
+  , cfgInteractHeapMb :: !Int            -- ^ per-session @agda@ RTS heap cap in MB (@+RTS -M@); @<= 0@ = no cap.
+  , cfgMaxSessions  :: !Int              -- ^ cap on concurrently-live interaction @agda@ subprocesses.
+  , cfgSessionIdleSecs :: !Int           -- ^ close an interaction session idle this many seconds; @<= 0@ = never (no reaper).
   , cfgInspect      :: !Bool             -- ^ run the localhost web inspector (@--inspect@).
   , cfgInspectPort  :: !Int              -- ^ start port for the inspector (probes upward on conflict).
   }
@@ -138,6 +142,9 @@ defaultConfig = Config
   , cfgEnableInteract = False
   , cfgAgdaBin      = Nothing
   , cfgInteractArgs = []
+  , cfgInteractHeapMb = 0          -- no agda heap cap unless configured
+  , cfgMaxSessions  = 2            -- bound the worst-case live-session RAM (was a hard-coded 6)
+  , cfgSessionIdleSecs = 0         -- idle-session reaper off unless configured
   , cfgInspect      = False
   , cfgInspectPort  = 7000
   }
@@ -156,7 +163,14 @@ currentNodeKeyVersion = 2
 
 -- | One immutable graph snapshot held by the daemon.
 data Loaded = Loaded
-  { ldGraph     :: !ExpandedGraph
+  { ldModuleCount :: !Int
+    -- ^ Number of modules in the source graph. Precomputed at snapshot
+    -- construction so the daemon needn't retain the whole parsed
+    -- 'ExpandedGraph' (its 721k-edge @[(Text,Text)]@ list, raw provenance
+    -- and subterm arrays) for the life of the snapshot just to answer a
+    -- module count: 'buildIndexLean' already folds everything the queries
+    -- need into 'ldIndex', so the 'ExpandedGraph' becomes garbage once this
+    -- count is taken. Read by 'AgdaMcp.Query.queryStats'.
   , ldIndex     :: !Index
   , ldModFiles  :: !(M.Map Text FilePath) -- ^ module name -> source file.
   , ldBuiltAt   :: !UTCTime
@@ -446,7 +460,10 @@ decodeGraphFile graphFile = do
 -- disk path and the union path produce identical snapshots.
 loadedFromGraph :: Bool -> [FilePath] -> Maybe FilePath -> ExpandedGraph -> IO Loaded
 loadedFromGraph autoResolveUnique includes mGraphFile eg = do
-  let !ix = buildIndex eg
+  -- Take the module count up front so the rest of the snapshot can be built
+  -- without keeping a reference to the full graph (see 'ldModuleCount').
+  let !nMods = length (egModules eg)
+      !ix = buildIndexLean eg
   _   <- evaluate (force ix)
   -- Materialise the real-def list and the owner lookup once. Both
   -- are forced (the queries rescan them per request and the snapshot
@@ -467,7 +484,7 @@ loadedFromGraph autoResolveUnique includes mGraphFile eg = do
               ++ "convention; rebuild to refresh.")
     else pure ()
   pure Loaded
-    { ldGraph    = eg
+    { ldModuleCount = nMods
     , ldIndex    = ix
     , ldModFiles = egModuleFiles eg
     , ldBuiltAt  = now
@@ -760,6 +777,11 @@ rebuildLocked ServerState{..} needBuild = withMVar ssRebuildLock $ \_ -> do
         Right ld -> do
           writeIORef ssColdError Nothing       -- a good build clears cold-start state
           writeIORef ssLoaded (Just ld)
+          -- Reclaim the now-unreferenced previous snapshot and the large
+          -- transient aeson 'Value' the decode just produced, so a rebuild
+          -- doesn't ratchet RSS upward (paired with -Fd/-Iw, which then hand
+          -- the freed pages back to the OS). Off the query hot path.
+          performMajorGC
           pure (Right ld)
         Left err -> case cur of
           Just ld -> do
@@ -789,6 +811,7 @@ forceRebuild ServerState{..} = withMVar ssRebuildLock $ \_ -> do
     Right ld -> do
       writeIORef ssColdError Nothing
       writeIORef ssLoaded (Just ld)
+      performMajorGC   -- reclaim the old snapshot + decode transient (see doBuild)
       pure (Right ld)
     Left err -> do
       cur <- readIORef ssLoaded

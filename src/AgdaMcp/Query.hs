@@ -48,7 +48,7 @@ import qualified Data.Vector        as V
 
 import           AgdaGraph.Index
 import           AgdaGraph.Schema   (Access (..), Definition (..),
-                                     ExpandedGraph (..), Kind (..),
+                                     Kind (..),
                                      Provenance (..), State (..))
 import           AgdaGraph.Similarity (SigBodyFingerprints (..), fingerprintSize)
 import           AgdaGraph.WL       (weightedJaccard)
@@ -1012,7 +1012,7 @@ queryStats ld =
       n       = length rds
       synth   = idxSyntheticCount ix
       nEdges  = sum (map IS.size (IM.elems (idxForward ix)))
-      mods    = length (egModules (ldGraph ld))
+      mods    = ldModuleCount ld
       cnt p   = length (filter p rds)
       byState s = cnt ((== s) . defState)
       byKind  k = cnt ((== k) . defKind)

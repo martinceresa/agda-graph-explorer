@@ -93,7 +93,17 @@ executable agda-goals
   default-language:    Haskell2010
 
 executable agda-explore
-  ghc-options:         -O2 -threaded -Wall
+  -- A long-lived daemon holding one large, mostly-static graph: compacting
+  -- old-gen GC (-c) avoids the copying collector's ~2x major-GC peak on that
+  -- live set; idle GC (-Iw60) + aggressive page-return (-Fd1.2) hand freed
+  -- memory back to the OS during the daemon's long idle stretches instead of
+  -- ratcheting RSS to its high-water mark; -N (parallel GC over the big heap)
+  -- matches the other executables. Deliberately NO large -A: under -N the
+  -- nursery is allocated per core, so a big -A (e.g. -A64m) reserves ~A*ncores
+  -- of RSS up front — the opposite of the goal — and the one-time graph build
+  -- is dominated by the minutes-long agda-deps subprocess, not minor-GC churn.
+  -- -rtsopts lets the launcher tune via +RTS / GHCRTS without a recompile.
+  ghc-options:         -O2 -threaded -Wall -rtsopts "-with-rtsopts=-N -c -Iw60 -Fd1.2"
   hs-source-dirs:      src
   main-is:             MainMcp.hs
   other-modules:       Paths_agda_graph_explorer

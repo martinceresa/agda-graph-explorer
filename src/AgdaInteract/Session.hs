@@ -36,15 +36,17 @@ module AgdaInteract.Session
   , sendIotcm
   , sessionFile
   , sessionAlive
+  , sessionTryReserve
   , closeSession
   , burstReplies
   ) where
 
 import           Control.Concurrent       (ThreadId, forkIO, killThread)
 import           Control.Concurrent.Chan  (Chan, newChan, readChan, writeChan)
-import           Control.Concurrent.MVar  (MVar, newMVar, withMVar)
+import           Control.Concurrent.MVar  (MVar, newMVar, tryTakeMVar, withMVar)
 import           Control.Exception        (SomeException, try)
 import           Control.Monad            (unless, when)
+import           Data.Maybe               (isJust)
 import qualified Data.ByteString          as BS
 import qualified Data.ByteString.Char8    as BSC
 import qualified Data.ByteString.Lazy     as BL
@@ -64,6 +66,9 @@ import           AgdaGraph.Interaction.Protocol (Reply, parseReply)
 -- | How to spawn an Agda interaction session.
 data SessionConfig = SessionConfig
   { scAgdaBin       :: !FilePath
+  , scRtsArgs       :: ![String]   -- ^ RTS flags placed /before/ the agda flags
+                                    -- (e.g. @["+RTS","-M4096m","-RTS"]@ to cap the
+                                    -- child's heap). Empty = inherit agda's defaults.
   , scExtraArgs     :: ![String]   -- ^ extra flags after @--interaction-json@.
   , scTimeoutMicros :: !Int        -- ^ per-command wall-clock budget.
   } deriving (Show)
@@ -111,6 +116,16 @@ sessionFile = sFile
 sessionAlive :: Session -> IO Bool
 sessionAlive = readIORef . sAlive
 
+-- | Try to acquire the session's command lock /without releasing it/.
+-- 'True' means no 'sendIotcm' is in flight and the caller now owns the
+-- lock — used by the idle reaper to take a session out of service only
+-- when it is genuinely idle (never mid-command). The lock is intentionally
+-- left held: the only caller goes on to 'closeSession', after which the
+-- session is dead and the lock irrelevant. 'False' means a command holds
+-- the lock right now, so the caller must leave the session alone.
+sessionTryReserve :: Session -> IO Bool
+sessionTryReserve s = isJust <$> tryTakeMVar (sLock s)
+
 recentStderr :: Session -> IO Text
 recentStderr s = T.unlines . reverse <$> readIORef (sErrBuf s)
 
@@ -122,7 +137,7 @@ promptBS = BSC.pack "JSON> "
 -- started / never reached a prompt.
 startSession :: SessionConfig -> FilePath -> IO (Either Text Session)
 startSession cfg file = do
-  let args = "--interaction-json" : scExtraArgs cfg
+  let args = scRtsArgs cfg ++ ("--interaction-json" : scExtraArgs cfg)
       cp   = (proc (scAgdaBin cfg) args)
                { std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe }
   r <- try (createProcess cp)

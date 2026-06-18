@@ -19,8 +19,9 @@
 -- With no flags it discovers a project from the current directory.
 module Main (main) where
 
+import           Control.Concurrent (forkIO)
 import           Control.Exception  (SomeException, finally, try)
-import           Control.Monad      (forM)
+import           Control.Monad      (forM, void, when)
 import           Data.List          (intercalate, isSuffixOf, sortOn)
 import           Data.Maybe         (fromMaybe)
 import           System.Directory   (doesDirectoryExist, doesFileExist,
@@ -38,7 +39,7 @@ import           AgdaMcp.Config     (Opts (..), applyConfig,
 import           AgdaMcp.Inspect    (startInspector)
 import           AgdaMcp.Rpc        (runStdioLoop)
 import           AgdaMcp.State
-import           AgdaInteract.Tools (closeAllSessions)
+import           AgdaInteract.Tools (closeAllSessions, reapIdleSessions)
 import           AgdaMcp.Tools      (dispatch)
 import qualified BuildInfo
 
@@ -57,6 +58,7 @@ defOpts = Opts
   , oMinDepth = 3, oAuto = True, oWatch = True, oQueryLog = True
   , oAutoResolve = True
   , oEnableInteract = False, oAgdaBin = Nothing, oInteractArgs = []
+  , oInteractHeapMb = 0, oMaxSessions = 2, oSessionIdleSecs = 0
   , oInspect = False, oInspectPort = 7000
   , oHelp = False, oVer = False
   }
@@ -102,6 +104,9 @@ parseOpts (x : xs) o = case x of
   "--enable-interact" -> parseOpts xs o { oEnableInteract = True }
   "--agda-bin"        -> need $ \v -> o { oAgdaBin = Just v }
   "--agda-arg"        -> need $ \v -> o { oInteractArgs = oInteractArgs o ++ [v] }
+  "--interaction-heap-mb"      -> need $ \v -> o { oInteractHeapMb = readInt v (oInteractHeapMb o) }
+  "--max-interaction-sessions" -> need $ \v -> o { oMaxSessions = readInt v (oMaxSessions o) }
+  "--interaction-idle-timeout" -> need $ \v -> o { oSessionIdleSecs = readInt v (oSessionIdleSecs o) }
   "--inspect"         -> parseOpts xs o { oInspect = True }
   "--inspect-port"    -> need $ \v -> o { oInspect = True, oInspectPort = readInt v (oInspectPort o) }
   _ | isAgdaFile x    -> parseOpts xs o { oEntries = oEntries o ++ [x] }
@@ -208,6 +213,9 @@ buildConfig o = do
         , cfgEnableInteract = oEnableInteract o
         , cfgAgdaBin      = oAgdaBin o
         , cfgInteractArgs = oInteractArgs o
+        , cfgInteractHeapMb = oInteractHeapMb o
+        , cfgMaxSessions  = oMaxSessions o
+        , cfgSessionIdleSecs = oSessionIdleSecs o
         , cfgInspect      = oInspect o
         , cfgInspectPort  = oInspectPort o
         , cfgIncludes     = bin
@@ -351,6 +359,10 @@ main = do
           ss  <- newServerState cfg
           startWatcher ss
           startInspect ss cfg
+          -- Idle-session reaper: only when interaction is on and a timeout is
+          -- configured (interaction-idle-timeout > 0); otherwise no thread.
+          when (cfgEnableInteract cfg && cfgSessionIdleSecs cfg > 0) $
+            void (forkIO (reapIdleSessions ss))
           hPutStrLn stderr ("agda-explore: ready (" ++ modeDesc cfg ++ ")")
           -- Reap any live interaction sessions when the stdio loop ends
           -- (stdin EOF) or throws, so child agda processes aren't orphaned.

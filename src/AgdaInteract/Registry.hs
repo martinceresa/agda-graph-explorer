@@ -11,11 +11,18 @@ module AgdaInteract.Registry
   ( SessionEntry(..)
   ) where
 
+import Data.IORef          (IORef)
+import Data.Time.Clock     (UTCTime)
+
 import AgdaInteract.GoalId  (GoalMap)
 import AgdaInteract.Session (Session)
 
 data SessionEntry = SessionEntry
-  { seSession :: !Session
-  , seGoalMap :: !GoalMap
-  , seDirty   :: !Bool
+  { seSession  :: !Session
+  , seGoalMap  :: !GoalMap
+  , seDirty    :: !Bool
+  , seLastUsed :: !(IORef UTCTime)
+    -- ^ Last time this session was loaded or used to serve a goal command.
+    -- Read by the idle-session reaper ('AgdaInteract.Tools.reapIdleSessions');
+    -- an 'IORef' so reuse can refresh it cheaply without rebuilding the entry.
   }

@@ -17,6 +17,7 @@ module AgdaGraph.Index
   ( -- * Index
     Index(..)
   , buildIndex
+  , buildIndexLean
 
     -- * Queries
   , lookupId
@@ -237,6 +238,21 @@ buildIndex ExpandedGraph{..} =
        , idxSubtermHashes    = sthIdx
        , idxSubtermDepths    = stdIdx
        }
+
+-- | Build an 'Index' that drops the two fields no @agda-explore@ daemon
+-- query ever reads: 'idxSubtermDepths' (only @agda-optimization term-cluster@
+-- consumes it) and 'idxExternalsSummary' (only @debt@\/@ledger@\/@horizon@).
+-- Nulling them lets the daemon's @evaluate (force ix)@ and lifelong snapshot
+-- skip materialising / retaining the per-def depth lists, while the shared
+-- 'buildIndex' is left untouched so the batch analyses keep both fields.
+--
+-- 'idxSubtermHashes' is /kept/ (it backs @similar_bodies@) and so is
+-- 'idxEdgeProvenance' (it backs @similar_types@ via 'splitSigBodyAdj').
+buildIndexLean :: ExpandedGraph -> Index
+buildIndexLean eg = (buildIndex eg)
+  { idxSubtermDepths    = Nothing
+  , idxExternalsSummary = Nothing
+  }
 
 -- ** Lookups
 
