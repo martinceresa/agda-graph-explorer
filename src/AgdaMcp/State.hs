@@ -31,6 +31,7 @@ module AgdaMcp.State
   , ensureFresh
   , forceRebuild
   , kickRebuild
+  , warmStart
     -- * Query telemetry
   , appendQueryLog
     -- * Background file-watch
@@ -686,6 +687,17 @@ chooseReRun cfg forceFull watching cache dirty newAdhoc
               || (S.null dirty && S.null newAdhoc)  -- non-empty cache but nothing pending (e.g. a node-key/format rebuild) → full, not a stale-cache reuse
               || unmatched
 
+-- | Union per-entry graphs and index the result into a 'Loaded' snapshot:
+-- the shared tail of the multi-entry build ('buildMulti') and the warm
+-- cold-start ('warmStart'), so the two can't drift in how they union + index
+-- (or in the @loadedFromGraph@ argument shape). Returns the union too — the
+-- builder still publishes it to 'cfgGraphPath'; warm-start discards it.
+unionAndIndex :: Config -> [ExpandedGraph] -> IO (ExpandedGraph, Loaded)
+unionAndIndex cfg egs = do
+  let !eg = unionExpandedGraphs egs
+  ld <- loadedFromGraph (cfgAutoResolveUnique cfg) (cfgIncludes cfg) Nothing eg
+  pure (eg, ld)
+
 -- | Multi-entry build with reuse over the given entry list (configured +
 -- any ad-hoc Stage-B entries): re-run @agda-deps@ for the entries
 -- 'chooseReRun' selects, reuse the cached 'ExpandedGraph' for the rest,
@@ -727,12 +739,11 @@ buildMulti cfg entries deps reRun cache = do
     Left err -> pure (Left err)
     Right mrs -> do
       let rs       = catMaybes mrs
-          !eg      = unionExpandedGraphs [ g | (_, g, _) <- rs ]
           newCache = M.fromList [ (e, (g, cl)) | (e, g, cl) <- rs ]
           unionTmp = cfgGraphPath cfg ++ ".tmp"
+      (eg, ld) <- unionAndIndex cfg [ g | (_, g, _) <- rs ]
       BL.writeFile unionTmp (encode eg)
       renameFile unionTmp (cfgGraphPath cfg)
-      ld <- loadedFromGraph (cfgAutoResolveUnique cfg) (cfgIncludes cfg) Nothing eg
       pure (Right (ld, newCache))
 
 lastLines :: Int -> String -> String
@@ -1075,6 +1086,135 @@ forceRebuild ss@ServerState{..} = withMVar ssRebuildLock $ \_ -> do
         Nothing -> writeIORef ssColdError (Just (coldStartDiag err))   -- still cold
         Just _  -> pure ()
       pure (Left err)
+
+-- | Warm cold-start: reconstruct the in-memory snapshot and the per-entry
+-- cache from the graphs the previous run left on disk, instead of paying a
+-- full (synchronous, ~minutes-long over a large corpus) @agda-deps@ rebuild
+-- of every entry on the first query. The first query is then served
+-- instantly from the retained snapshot while the background worker re-runs
+-- only the entries whose closure a source changed while the daemon was down
+-- — turning the cold start into a warm one. The start-up counterpart to the
+-- running daemon's incremental selection ('chooseReRun'): same machinery,
+-- seeded from disk rather than from the watcher.
+--
+-- Staleness is detected by /mtime/: each per-entry @entry-i/deps.json@'s
+-- mtime is the time that entry was last built, so a closure file newer than
+-- it means that entry must re-run, and a source newer than the whole prior
+-- build that is in no closure is a module created while the daemon was down
+-- (a Stage-B ad-hoc entry). The changed/added sets are seeded into
+-- 'ssDirtyFiles' / 'ssAddedFiles' so the ordinary serve-stale path drives
+-- exactly the needed selective rebuild.
+--
+-- Best-effort and conservative — never serves an incomplete graph as fresh:
+--
+--   * a no-op unless live + auto-rebuild + incremental + multi-entry (single
+--     entry has no per-entry cache; preloaded never rebuilds);
+--   * if /every/ configured entry's graph decodes, the snapshot is their
+--     in-memory union (byte-identical to a fresh full build) and only the
+--     mtime-changed entries are queued to re-run — nothing changed ⇒ no
+--     rebuild at all;
+--   * if some are missing/corrupt (an interrupted prior build), seed from the
+--     last atomically-published union ('cfgGraphPath') if it decodes and
+--     force a full background rebuild; if even that is absent, do nothing and
+--     let the normal cold build run.
+--
+-- Must be called AFTER 'startWatcher' (so 'isWatching' — and thus the
+-- incremental path in 'chooseReRun' — is live) and before the stdio loop,
+-- while 'ssLoaded' is still 'Nothing'.
+warmStart :: ServerState -> IO ()
+warmStart ss@ServerState{..}
+  | cfgPreloaded ssConfig
+      || not (cfgAutoRebuild ssConfig)
+      || not (cfgIncremental ssConfig)
+      || length (cfgEntries ssConfig) < 2 = pure ()
+  | otherwise = do
+      already <- readIORef ssLoaded
+      case already of
+        Just _  -> pure ()   -- a query already won the race and built; leave it
+        Nothing -> do
+          let entries = cfgEntries ssConfig
+          slots <- forM (zip [0 :: Int ..] entries) $ \(i, entry) -> do
+            let gp = cfgOutDir ssConfig </> ("entry-" ++ show i) </> "deps.json"
+            mt <- safeMtime gp
+            case mt of
+              Nothing -> pure Nothing
+              Just t  -> either (const Nothing) (\eg -> Just (entry, eg, t))
+                           <$> decodeGraphFile gp
+          let present = catMaybes slots
+          if length present == length entries
+            then seedFromEntries present
+            else seedFromUnion
+  where
+    cfg = ssConfig
+
+    -- All entries present: union them in memory (matches 'buildMulti'),
+    -- diff the closure mtimes to find the entries to re-run + the brand-new
+    -- modules, and queue just those. Nothing changed ⇒ served fresh.
+    seedFromEntries present = do
+      withClosures <- forM present $ \(e, eg, t) -> do
+        cl <- closureFiles eg
+        pure (e, eg, cl, t)
+      let cache = M.fromList [ (e, (g, cl)) | (e, g, cl, _) <- withClosures ]
+      (_, ld) <- unionAndIndex cfg [ g | (_, g, _, _) <- withClosures ]
+      -- Source mtimes, canonicalised to compare against the closure paths.
+      srcs <- listAgdaFiles (cfgIncludes cfg)
+      mts  <- forM srcs $ \f -> do
+                cp <- safeCanon f
+                mt <- safeMtime f
+                pure (fmap (\t -> (cp, t)) mt)
+      let mtimeMap   = M.fromList (catMaybes mts)
+          allClosure = S.unions [ cl | (_, _, cl, _) <- withClosures ]
+          maxBuilt   = maximum  [ t  | (_, _, _, t)  <- withClosures ]
+          -- A closure file newer than its entry's graph ⇒ that entry re-runs.
+          dirty = S.fromList
+            [ f | (_, _, cl, t) <- withClosures, f <- S.toList cl
+                , maybe False (> t) (M.lookup f mtimeMap) ]
+          -- A source newer than the whole prior build and in no closure is a
+          -- module created while the daemon was down ⇒ a new ad-hoc entry.
+          added = S.fromList
+            [ f | (f, mt) <- M.toList mtimeMap
+                , f `S.notMember` allClosure, mt > maxBuilt ]
+          pending     = S.size dirty + S.size added
+          -- A stale on-disk node-key format needs a full rebuild too — the
+          -- seeded snapshot still serves (with the old convention, banner and
+          -- all) while it runs, never blocking.
+          formatStale = not (loadedFormatCurrent ld)
+          needBuild   = pending > 0 || formatStale
+          suffix
+            | not needBuild = " (graph up to date)"
+            | pending == 0  = " (stale node-key format — rebuilding in background)"
+            | otherwise     = "; " ++ show (S.size dirty) ++ " changed file(s)"
+                                ++ (if S.null added then "" else ", " ++ show (S.size added) ++ " new")
+                                ++ " — refreshing in background"
+      writeIORef ssEntryCache cache
+      writeIORef ssDirtyFiles dirty
+      writeIORef ssAddedFiles added
+      writeIORef ssDirty needBuild
+      commitBuild ss ld   -- install snapshot + GC the transient decodes
+      hPutStrLn stderr $
+        "agda-explore: warm start — reused " ++ show (length present)
+          ++ " cached entries" ++ suffix
+      when needBuild $ do
+        ensureWorker ss
+        void (tryPutMVar ssWake ())
+
+    -- Some entry graphs are missing/corrupt (an interrupted prior build):
+    -- serve the last complete union if it decodes and force a full
+    -- background rebuild (empty change-set ⇒ 'chooseReRun' goes full,
+    -- repopulating the cache). If the union is absent too, do nothing and
+    -- let the normal cold build run.
+    seedFromUnion = do
+      r <- loadLoaded (cfgAutoResolveUnique cfg) (cfgIncludes cfg) (cfgGraphPath cfg)
+      case r of
+        Left _   -> pure ()
+        Right ld -> do
+          writeIORef ssDirty True
+          commitBuild ss ld   -- install snapshot + GC the transient decode
+          hPutStrLn stderr
+            "agda-explore: warm start — per-entry cache incomplete; serving \
+            \last published graph and rebuilding in background."
+          ensureWorker ss
+          void (tryPutMVar ssWake ())
 
 -- | The synchronous /kick/: fold a file the bridge just authored into the
 -- graph now, so it is queryable the moment the writing tool call returns —

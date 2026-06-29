@@ -206,10 +206,13 @@ src/
                                 regeneration: ensureFresh/forceRebuild
                                 spawn agda-deps and hot-swap the Index;
                                 sibling-binary discovery; fsnotify
-                                watcher with poll fallback; cold-start
-                                fallback (ssColdError: first-build failure
-                                → actionable diagnostic + background retry,
-                                no dark daemon); the interaction-session
+                                watcher with poll fallback; warm cold-start
+                                (warmStart: reuse the previous run's per-entry
+                                graphs from disk, mtime-diff to re-run only
+                                changed entries — first query served instantly);
+                                cold-start fallback (ssColdError: first-build
+                                failure → actionable diagnostic + background
+                                retry, no dark daemon); the interaction-session
                                 registry (ssSessions) + its watcher
                                 dirty-marking.
     Query.hs                    pure point queries over Index.
@@ -453,6 +456,25 @@ plugin/                         Claude Code plugin bundling the
   no reconnect. Don't "simplify" the cold path back into a synchronous
   re-build on every query (that blocks the stdio loop on a ~minutes-long
   agda-deps run, repeatedly).
+
+- **Warm cold-start reuses the last run's on-disk graphs (`warmStart`).**
+  On a large multi-entry corpus a from-scratch first build re-runs
+  `agda-deps` over *every* entry, sequentially, and blocks the first query
+  for minutes. `warmStart` (called at daemon init, after `startWatcher`)
+  instead decodes the per-entry graphs the previous run left in
+  `cfgOutDir/entry-i/deps.json`, seeds the snapshot + `ssEntryCache` from
+  them, and uses each entry graph's **mtime** as its last-built time: a
+  closure file newer than it re-runs that entry; a source newer than the
+  whole prior build and in no closure becomes a Stage-B ad-hoc entry. The
+  changed/added sets feed `ssDirtyFiles`/`ssAddedFiles`, so the ordinary
+  serve-stale path does a *selective* (`chooseReRun`) refresh in the
+  background while the first query is served instantly. Conservative: all
+  entries must decode to reuse the per-entry cache, else it serves the last
+  atomically-published union (`cfgGraphPath`) and forces a full rebuild; no
+  union on disk ⇒ plain cold build. A no-op outside
+  live + auto-rebuild + incremental + multi-entry. It never *blocks* on
+  `agda-deps` — it only reads files. Don't move it before `startWatcher`
+  (the incremental path in `chooseReRun` gates on `isWatching`).
 
 ## v2 graph.json schema (consumer view)
 

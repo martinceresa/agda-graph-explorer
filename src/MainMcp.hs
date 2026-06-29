@@ -360,6 +360,11 @@ main = do
           cfg <- buildConfig finalOpts
           ss  <- newServerState cfg
           startWatcher ss
+          -- Warm cold-start: reuse the previous run's on-disk per-entry
+          -- graphs so the first query is served instantly and only the
+          -- entries a source changed under re-run (after the watcher, so the
+          -- incremental path is live).
+          warmStart ss
           startInspect ss cfg
           -- Idle-session reaper: only when interaction is on and a timeout is
           -- configured (interaction-idle-timeout > 0); otherwise no thread.
