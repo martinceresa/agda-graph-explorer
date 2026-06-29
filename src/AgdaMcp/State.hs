@@ -683,7 +683,7 @@ chooseReRun cfg forceFull watching cache dirty newAdhoc
               || not (cfgIncremental cfg)
               || not watching
               || M.null cache             -- no prior build to reuse → full
-              || (S.null dirty && S.null newAdhoc)  -- nothing changed/added → full (first build)
+              || (S.null dirty && S.null newAdhoc)  -- non-empty cache but nothing pending (e.g. a node-key/format rebuild) → full, not a stale-cache reuse
               || unmatched
 
 -- | Multi-entry build with reuse over the given entry list (configured +
@@ -862,18 +862,17 @@ runBuildShared ss forceFull
                 modifyIORef' (ssAddedFiles ss) (S.union added)
                 pure (Left err)
               Right (ld, newCache) -> do
-                -- Retain per-entry graphs only when incremental is on (the
-                -- RAM-for-speed trade); off ⇒ empty cache ⇒ every build is
-                -- full and nothing is held between rebuilds.
-                writeIORef (ssEntryCache ss) (if cfgIncremental cfg then newCache else M.empty)
-                -- Keep only ad-hoc entries that actually built (present in
-                -- the cache) — drops new modules that failed to compile and
-                -- any that vanished. Empty when incremental is off.
-                let cfgSet = S.fromList (cfgEntries cfg)
-                writeIORef (ssExtraEntries ss)
-                  (if cfgIncremental cfg
-                     then [ e | e <- allEntries, e `S.notMember` cfgSet, e `M.member` newCache ]
-                     else [])
+                -- Retain the per-entry graphs only in incremental mode (the
+                -- RAM-for-speed trade) — and likewise the surviving ad-hoc
+                -- entries (those that actually built, dropping new modules
+                -- that failed to compile or vanished). With incremental off
+                -- neither is ever populated, so nothing is held between
+                -- rebuilds and every build is full.
+                when (cfgIncremental cfg) $ do
+                  writeIORef (ssEntryCache ss) newCache
+                  let cfgSet = S.fromList (cfgEntries cfg)
+                  writeIORef (ssExtraEntries ss)
+                    [ e | e <- allEntries, e `S.notMember` cfgSet, e `M.member` newCache ]
                 pure (Right ld)
 
 -- ---------------------------------------------------------------------
@@ -993,6 +992,29 @@ ensureFresh ss@ServerState{..}
         Right ld -> writeIORef ssLoaded (Just ld) >> pure (Right (ld, False))
         Left e   -> pure (Left e)
 
+-- | Commit a freshly built snapshot: clear the cold-start and change-gate
+-- failure markers, install it, and major-GC to reclaim the previous
+-- snapshot plus the large transient decode 'Value' (paired with -Fd/-Iw so
+-- the freed pages return to the OS), off the query hot path. Shared by
+-- every successful build path ('rebuildLocked', 'forceRebuild',
+-- 'kickRebuild') so they can't drift.
+commitBuild :: ServerState -> Loaded -> IO ()
+commitBuild ServerState{..} ld = do
+  writeIORef ssColdError Nothing
+  writeIORef ssFailSig Nothing
+  writeIORef ssLoaded (Just ld)
+  performMajorGC
+
+-- | Record the source signature a build failed on, so the background
+-- worker change-gates the retry (see 'ssFailSig' / 'watchWorker') instead
+-- of re-spawning @agda-deps@ over the same broken sources. The failure
+-- counterpart to 'commitBuild'; shared by every fallible build path so the
+-- gate can't be forgotten on one of them.
+noteFailedSig :: ServerState -> IO ()
+noteFailedSig ServerState{..} = do
+  fsig <- scanSources (cfgIncludes ssConfig)
+  writeIORef ssFailSig (Just fsig)
+
 -- | The single serialised rebuild gate, shared by 'ensureFresh' (both
 -- the watched and polled paths) and the watcher's worker. Holds
 -- 'ssRebuildLock' so the worker and a query never spawn @agda-deps@
@@ -1003,19 +1025,6 @@ ensureFresh ss@ServerState{..}
 --
 -- 'ssDirty' is cleared /before/ the subprocess runs, so a source edit
 -- that lands mid-rebuild re-dirties and is picked up on the next cycle.
--- | Commit a freshly built snapshot: clear the cold-start and change-gate
--- failure markers, install it, and major-GC to reclaim the previous
--- snapshot plus the large transient decode 'Value' (paired with -Fd/-Iw so
--- the freed pages return to the OS), off the query hot path. Shared by
--- every successful build path ('rebuildLocked', 'forceRebuild',
--- 'kickNewModule') so they can't drift.
-commitBuild :: ServerState -> Loaded -> IO ()
-commitBuild ServerState{..} ld = do
-  writeIORef ssColdError Nothing
-  writeIORef ssFailSig Nothing
-  writeIORef ssLoaded (Just ld)
-  performMajorGC
-
 rebuildLocked :: ServerState -> (Bool -> Loaded -> IO Bool) -> IO (Either String Loaded)
 rebuildLocked ss@ServerState{..} needBuild = withMVar ssRebuildLock $ \_ -> do
   cur   <- readIORef ssLoaded
@@ -1033,11 +1042,7 @@ rebuildLocked ss@ServerState{..} needBuild = withMVar ssRebuildLock $ \_ -> do
       case built of
         Right ld -> commitBuild ss ld >> pure (Right ld)
         Left err -> do
-          -- Record the source signature this build failed on so the worker
-          -- change-gates the retry (see 'ssFailSig' / 'watchWorker'): it
-          -- will not re-spawn agda-deps until an edit moves the signature.
-          fsig <- scanSources (cfgIncludes ssConfig)
-          writeIORef ssFailSig (Just fsig)
+          noteFailedSig ss   -- change-gate the retry (see 'ssFailSig')
           case cur of
             Just ld -> do
               -- A failed rebuild keeps the stale snapshot AND re-marks it
@@ -1064,10 +1069,7 @@ forceRebuild ss@ServerState{..} = withMVar ssRebuildLock $ \_ -> do
   case built of
     Right ld -> commitBuild ss ld >> pure (Right ld)
     Left err -> do
-      -- Record the failed-source signature like 'doBuild', so a later
-      -- watcher wakeup on the same (still-broken) sources stays gated.
-      fsig <- scanSources (cfgIncludes ssConfig)
-      writeIORef ssFailSig (Just fsig)
+      noteFailedSig ss   -- gate a later wakeup on the same broken sources
       cur <- readIORef ssLoaded
       case cur of
         Nothing -> writeIORef ssColdError (Just (coldStartDiag err))   -- still cold
@@ -1114,7 +1116,9 @@ kickRebuild ss@ServerState{..} file
                        modifyIORef' ssAddedFiles (S.delete p)
                        rest <- readIORef ssDirtyFiles
                        writeIORef ssDirty (not (S.null rest))
-                     Left _  -> writeIORef ssDirty True)   -- leave it for the watcher
+                     Left _  -> do                         -- leave it for the watcher,
+                       noteFailedSig ss                    -- change-gated like any failed build
+                       writeIORef ssDirty True)
               :: IO (Either SomeException ()))
 
 -- | A clean, actionable cold-start message wrapping the raw producer
@@ -1273,11 +1277,15 @@ watchWorker ss = forever $ do
   void (tryTakeMVar (ssWake ss))     -- drain a wakeup raised during the delay
   dirty <- readIORef (ssDirty ss)
   when dirty $ do
+    -- Gate: skip when we already failed on exactly these sources. Only the
+    -- post-failure path needs the comparison, so we scan the source tree
+    -- (an O(files) stat walk) ONLY when a prior build failed — a clean
+    -- snapshot ('ssFailSig' = Nothing) always passes without scanning.
     failSig <- readIORef (ssFailSig ss)
-    curSig  <- scanSources (cfgIncludes (ssConfig ss))
-    -- Gate: skip when we already failed on exactly these sources. (A clean
-    -- snapshot has ssFailSig = Nothing, so a fresh edit always passes.)
-    when (failSig /= Just curSig) $ do
+    gated <- case failSig of
+      Nothing -> pure False
+      Just fs -> (== fs) <$> scanSources (cfgIncludes (ssConfig ss))
+    when (not gated) $ do
       -- Never let a transient rebuild exception kill the loop; the next edit
       -- (or a query's own ensureFresh) gets another chance.
       r <- try (rebuildLocked ss (\d _ -> pure d))
