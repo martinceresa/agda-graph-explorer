@@ -1361,6 +1361,10 @@ runNewModule ss a = case argText a "path" of
             case ew of
               Left e   -> pure (Left ("new_module: could not write " <> T.pack file <> ": " <> showT e))
               Right () -> do
+                -- Fold the new module into the read-side graph synchronously
+                -- (Stage B kick), so it is queryable the moment this call
+                -- returns instead of only after the async watcher rebuild.
+                kickNewModule ss file
                 r <- doLoad ss file
                 case r of
                   Left err             ->

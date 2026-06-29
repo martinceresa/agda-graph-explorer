@@ -30,6 +30,7 @@ module AgdaMcp.State
     -- * Live regeneration
   , ensureFresh
   , forceRebuild
+  , kickNewModule
     -- * Query telemetry
   , appendQueryLog
     -- * Background file-watch
@@ -1002,6 +1003,19 @@ ensureFresh ss@ServerState{..}
 --
 -- 'ssDirty' is cleared /before/ the subprocess runs, so a source edit
 -- that lands mid-rebuild re-dirties and is picked up on the next cycle.
+-- | Commit a freshly built snapshot: clear the cold-start and change-gate
+-- failure markers, install it, and major-GC to reclaim the previous
+-- snapshot plus the large transient decode 'Value' (paired with -Fd/-Iw so
+-- the freed pages return to the OS), off the query hot path. Shared by
+-- every successful build path ('rebuildLocked', 'forceRebuild',
+-- 'kickNewModule') so they can't drift.
+commitBuild :: ServerState -> Loaded -> IO ()
+commitBuild ServerState{..} ld = do
+  writeIORef ssColdError Nothing
+  writeIORef ssFailSig Nothing
+  writeIORef ssLoaded (Just ld)
+  performMajorGC
+
 rebuildLocked :: ServerState -> (Bool -> Loaded -> IO Bool) -> IO (Either String Loaded)
 rebuildLocked ss@ServerState{..} needBuild = withMVar ssRebuildLock $ \_ -> do
   cur   <- readIORef ssLoaded
@@ -1017,16 +1031,7 @@ rebuildLocked ss@ServerState{..} needBuild = withMVar ssRebuildLock $ \_ -> do
       writeIORef ssDirty False
       built <- runBuildShared ss False
       case built of
-        Right ld -> do
-          writeIORef ssColdError Nothing       -- a good build clears cold-start state
-          writeIORef ssFailSig Nothing         -- ...and the change-gate's failed-source marker
-          writeIORef ssLoaded (Just ld)
-          -- Reclaim the now-unreferenced previous snapshot and the large
-          -- transient aeson 'Value' the decode just produced, so a rebuild
-          -- doesn't ratchet RSS upward (paired with -Fd/-Iw, which then hand
-          -- the freed pages back to the OS). Off the query hot path.
-          performMajorGC
-          pure (Right ld)
+        Right ld -> commitBuild ss ld >> pure (Right ld)
         Left err -> do
           -- Record the source signature this build failed on so the worker
           -- change-gates the retry (see 'ssFailSig' / 'watchWorker'): it
@@ -1057,12 +1062,7 @@ forceRebuild ss@ServerState{..} = withMVar ssRebuildLock $ \_ -> do
   writeIORef ssDirty False
   built <- runBuildShared ss True
   case built of
-    Right ld -> do
-      writeIORef ssColdError Nothing
-      writeIORef ssFailSig Nothing
-      writeIORef ssLoaded (Just ld)
-      performMajorGC   -- reclaim the old snapshot + decode transient (see doBuild)
-      pure (Right ld)
+    Right ld -> commitBuild ss ld >> pure (Right ld)
     Left err -> do
       -- Record the failed-source signature like 'doBuild', so a later
       -- watcher wakeup on the same (still-broken) sources stays gated.
@@ -1073,6 +1073,46 @@ forceRebuild ss@ServerState{..} = withMVar ssRebuildLock $ \_ -> do
         Nothing -> writeIORef ssColdError (Just (coldStartDiag err))   -- still cold
         Just _  -> pure ()
       pure (Left err)
+
+-- | The Stage-B synchronous /kick/: fold a just-created module into the
+-- graph now, so it is queryable the moment the creating tool call (the
+-- bridge's @new_module@) returns — instead of waiting for the asynchronous
+-- watcher rebuild. Registers @file@ as a new-module candidate (in
+-- 'ssAddedFiles', so the build treats it as an ad-hoc entry — see
+-- 'runBuildShared') and runs one incremental rebuild under 'ssRebuildLock'.
+--
+-- Run /under the lock/ so the post-build cleanup is race-free against the
+-- background worker: on success it drops @file@ from the pending sets and
+-- recomputes 'ssDirty', so the watcher's own (redundant) event for the same
+-- write becomes a no-op — the worker's dirty gate then skips it — while a
+-- concurrent edit to a /different/ file (which the watcher recorded during
+-- the build) is preserved and still triggers its rebuild. Best-effort: a
+-- build failure leaves the snapshot and re-arms the watcher. A no-op unless
+-- live + auto-rebuild + incremental (otherwise there are no ad-hoc entries
+-- and the watcher's full rebuild handles it).
+--
+-- If @file@ is /not/ new but an existing closure file (an overwrite), the
+-- ad-hoc logic in 'runBuildShared' naturally treats it as a normal selective
+-- change instead — no special-casing here.
+kickNewModule :: ServerState -> FilePath -> IO ()
+kickNewModule ss@ServerState{..} file
+  | cfgPreloaded ssConfig || not (cfgAutoRebuild ssConfig) || not (cfgIncremental ssConfig) =
+      pure ()
+  | otherwise = do
+      p <- safeCanon file
+      modifyIORef' ssAddedFiles (S.insert p)
+      modifyIORef' ssDirtyFiles (S.insert p)
+      void (try (withMVar ssRebuildLock $ \_ -> do
+                   built <- runBuildShared ss False
+                   case built of
+                     Right ld -> do
+                       commitBuild ss ld
+                       modifyIORef' ssDirtyFiles (S.delete p)
+                       modifyIORef' ssAddedFiles (S.delete p)
+                       rest <- readIORef ssDirtyFiles
+                       writeIORef ssDirty (not (S.null rest))
+                     Left _  -> writeIORef ssDirty True)   -- leave it for the watcher
+              :: IO (Either SomeException ()))
 
 -- | A clean, actionable cold-start message wrapping the raw producer
 -- error, shown by every graph tool (and @status@) while the first build
