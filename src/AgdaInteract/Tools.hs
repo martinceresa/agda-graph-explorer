@@ -1302,6 +1302,13 @@ proceedGiveFile ss write file candidate = case checkFileInput candidate of
             eold <- readFileSafe file
             let old = either (const "") id eold
             res <- applyOrDiff ss write file old candidate
+            -- When we actually wrote, fold the authored file into the graph
+            -- synchronously (the kick): a brand-new file's concrete defs are
+            -- queryable as this call returns; an edited existing file's entry
+            -- is re-run selectively. Best-effort (no-op if the write failed).
+            case res of
+              Right _ | write -> kickRebuild ss file
+              _               -> pure ()
             pure (fmap (<> remainingGoalsNote co) res)
 
 -- | A trailing "(N goals / M warnings remain)" note for 'runGiveFile'.
@@ -1362,9 +1369,9 @@ runNewModule ss a = case argText a "path" of
               Left e   -> pure (Left ("new_module: could not write " <> T.pack file <> ": " <> showT e))
               Right () -> do
                 -- Fold the new module into the read-side graph synchronously
-                -- (Stage B kick), so it is queryable the moment this call
+                -- (the kick), so it is queryable the moment this call
                 -- returns instead of only after the async watcher rebuild.
-                kickNewModule ss file
+                kickRebuild ss file
                 r <- doLoad ss file
                 case r of
                   Left err             ->

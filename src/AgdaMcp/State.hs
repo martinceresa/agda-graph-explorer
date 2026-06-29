@@ -30,7 +30,7 @@ module AgdaMcp.State
     -- * Live regeneration
   , ensureFresh
   , forceRebuild
-  , kickNewModule
+  , kickRebuild
     -- * Query telemetry
   , appendQueryLog
     -- * Background file-watch
@@ -1074,11 +1074,12 @@ forceRebuild ss@ServerState{..} = withMVar ssRebuildLock $ \_ -> do
         Just _  -> pure ()
       pure (Left err)
 
--- | The Stage-B synchronous /kick/: fold a just-created module into the
--- graph now, so it is queryable the moment the creating tool call (the
--- bridge's @new_module@) returns — instead of waiting for the asynchronous
--- watcher rebuild. Registers @file@ as a new-module candidate (in
--- 'ssAddedFiles', so the build treats it as an ad-hoc entry — see
+-- | The synchronous /kick/: fold a file the bridge just authored into the
+-- graph now, so it is queryable the moment the writing tool call returns —
+-- instead of waiting for the asynchronous watcher rebuild. Used by
+-- @new_module@ (a scaffolded skeleton) and @give_file@ (whole-file
+-- @content@ / appended block). Registers @file@ as a candidate (in
+-- 'ssAddedFiles', so a /new/ file becomes an ad-hoc entry — see
 -- 'runBuildShared') and runs one incremental rebuild under 'ssRebuildLock'.
 --
 -- Run /under the lock/ so the post-build cleanup is race-free against the
@@ -1091,11 +1092,13 @@ forceRebuild ss@ServerState{..} = withMVar ssRebuildLock $ \_ -> do
 -- live + auto-rebuild + incremental (otherwise there are no ad-hoc entries
 -- and the watcher's full rebuild handles it).
 --
--- If @file@ is /not/ new but an existing closure file (an overwrite), the
--- ad-hoc logic in 'runBuildShared' naturally treats it as a normal selective
--- change instead — no special-casing here.
-kickNewModule :: ServerState -> FilePath -> IO ()
-kickNewModule ss@ServerState{..} file
+-- If @file@ is an /existing/ closure file (a @give_file@ overwrite/append,
+-- not a new module), the ad-hoc logic in 'runBuildShared' naturally treats
+-- it as a normal selective change of its entry instead — no special-casing
+-- here. The 'ssAddedFiles' insert is then harmless (an in-closure file is
+-- excluded from the new-ad-hoc set).
+kickRebuild :: ServerState -> FilePath -> IO ()
+kickRebuild ss@ServerState{..} file
   | cfgPreloaded ssConfig || not (cfgAutoRebuild ssConfig) || not (cfgIncremental ssConfig) =
       pure ()
   | otherwise = do
