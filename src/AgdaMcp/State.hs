@@ -257,6 +257,19 @@ data ServerState = ServerState
     -- daemon self-heals once the offending module is fixed — no reconnect.
     -- Cleared on the first successful build. (Serve-stale only covers the
     -- /after one good build/ case; this covers the cold start.)
+  , ssFailSig     :: !(IORef (Maybe ScanSig))
+    -- ^ The source 'ScanSig' captured at the /last failed/ rebuild, or
+    -- 'Nothing' after any success. The background worker ('watchWorker')
+    -- uses it to /change-gate/ retries: it only re-spawns @agda-deps@ when
+    -- the current source signature differs from this one. Without it a
+    -- persistently-failing corpus retried on a fixed timer — fine when a
+    -- build fails in milliseconds, but a 9-entry pass over a large corpus
+    -- takes minutes, so back-to-back retries on byte-identical (still
+    -- broken) sources burned CPU indefinitely. Gating on the signature
+    -- means a doomed build runs once per source state; a real edit (or the
+    -- fix to the broken module) changes the signature and re-enables it, so
+    -- the daemon still self-heals. The manual @rebuild@ tool ('forceRebuild')
+    -- bypasses the gate for transient-failure recovery.
   , ssInspect     :: !(Maybe InspectHub)
     -- ^ The localhost web-inspector event bus, or 'Nothing' when
     -- @--inspect@ is off. When 'Nothing' every 'AgdaMcp.Inspect.emitInspect'
@@ -278,6 +291,7 @@ newServerState c =
     <*> newIORef False
     <*> newMVar ()
     <*> newMVar M.empty
+    <*> newIORef Nothing
     <*> newIORef Nothing
     <*> (if cfgInspect c then Just <$> newInspectHub else pure Nothing)
 
@@ -851,6 +865,7 @@ rebuildLocked ServerState{..} needBuild = withMVar ssRebuildLock $ \_ -> do
       case built of
         Right ld -> do
           writeIORef ssColdError Nothing       -- a good build clears cold-start state
+          writeIORef ssFailSig Nothing         -- ...and the change-gate's failed-source marker
           writeIORef ssLoaded (Just ld)
           -- Reclaim the now-unreferenced previous snapshot and the large
           -- transient aeson 'Value' the decode just produced, so a rebuild
@@ -858,22 +873,27 @@ rebuildLocked ServerState{..} needBuild = withMVar ssRebuildLock $ \_ -> do
           -- the freed pages back to the OS). Off the query hot path.
           performMajorGC
           pure (Right ld)
-        Left err -> case cur of
-          Just ld -> do
-            -- A failed rebuild keeps the stale snapshot AND re-marks it
-            -- dirty so the background worker retries (after a backoff — see
-            -- 'watchWorker'). Without re-dirtying, a transient failure
-            -- would freeze the snapshot until the next source edit.
-            writeIORef ssDirty True
-            hPutStrLn stderr ("agda-explore: rebuild failed, serving stale graph: " ++ err)
-            pure (Right ld)
-          Nothing -> do
-            -- Cold start: no snapshot to serve. Record an actionable
-            -- diagnostic and re-dirty so the background worker keeps
-            -- retrying; the daemon self-heals once the corpus builds.
-            writeIORef ssColdError (Just (coldStartDiag err))
-            writeIORef ssDirty True
-            pure (Left err)
+        Left err -> do
+          -- Record the source signature this build failed on so the worker
+          -- change-gates the retry (see 'ssFailSig' / 'watchWorker'): it
+          -- will not re-spawn agda-deps until an edit moves the signature.
+          fsig <- scanSources (cfgIncludes ssConfig)
+          writeIORef ssFailSig (Just fsig)
+          case cur of
+            Just ld -> do
+              -- A failed rebuild keeps the stale snapshot AND re-marks it
+              -- dirty (so queries are told "stale" and a later edit retries).
+              writeIORef ssDirty True
+              hPutStrLn stderr ("agda-explore: rebuild failed, serving stale graph: " ++ err)
+              pure (Right ld)
+            Nothing -> do
+              -- Cold start: no snapshot to serve. Record an actionable
+              -- diagnostic and re-dirty; the daemon self-heals once the
+              -- corpus is fixed (the fix moves 'ssFailSig' and re-enables
+              -- the build), with no fixed-timer retry spin in between.
+              writeIORef ssColdError (Just (coldStartDiag err))
+              writeIORef ssDirty True
+              pure (Left err)
 
 -- | Force a regeneration regardless of staleness (the @rebuild@ tool).
 -- Serialised through 'ssRebuildLock' and clears 'ssDirty' so it composes
@@ -885,10 +905,15 @@ forceRebuild ServerState{..} = withMVar ssRebuildLock $ \_ -> do
   case built of
     Right ld -> do
       writeIORef ssColdError Nothing
+      writeIORef ssFailSig Nothing
       writeIORef ssLoaded (Just ld)
       performMajorGC   -- reclaim the old snapshot + decode transient (see doBuild)
       pure (Right ld)
     Left err -> do
+      -- Record the failed-source signature like 'doBuild', so a later
+      -- watcher wakeup on the same (still-broken) sources stays gated.
+      fsig <- scanSources (cfgIncludes ssConfig)
+      writeIORef ssFailSig (Just fsig)
       cur <- readIORef ssLoaded
       case cur of
         Nothing -> writeIORef ssColdError (Just (coldStartDiag err))   -- still cold
@@ -946,13 +971,6 @@ appendQueryLog ServerState{..} v =
 -- editor "save" emits (temp-file write + rename, etc.) before rebuilding.
 watchDebounceMicros :: Int
 watchDebounceMicros = 250000  -- 0.25s
-
--- | Backoff after a /failed/ background rebuild before the worker retries.
--- A failed rebuild leaves the snapshot dirty (so it retries); without this
--- pause a persistently-failing @agda-deps@ would spin in a tight loop,
--- re-spawning the subprocess as fast as it can fail.
-rebuildBackoffMicros :: Int
-rebuildBackoffMicros = 2000000  -- 2s
 
 -- | Is a live watcher attached? When 'True', 'ensureFresh' trusts
 -- 'ssDirty' instead of re-scanning the source tree.
@@ -1031,29 +1049,32 @@ ensureWorker ss@ServerState{..}
 -- change is still pending. Started exactly once via 'ensureWorker' and
 -- runs forever.
 --
--- A failed rebuild re-marks the snapshot dirty (see 'rebuildLocked'); this
--- loop then waits 'rebuildBackoffMicros' and re-wakes itself so the retry
--- happens without a tight failing loop. A successful rebuild clears the
--- dirty flag, so the self-rewake is skipped.
+-- Change-gated retry. A failed rebuild leaves the snapshot dirty and
+-- records the source signature it failed on ('ssFailSig'). This loop only
+-- (re)builds when the /current/ source signature differs from that — so a
+-- wakeup over byte-identical, still-broken sources (e.g. a serve-stale
+-- query while the corpus is broken) costs a cheap rescan instead of
+-- another doomed multi-minute @agda-deps@ pass. A real edit (or the fix to
+-- the failing module) moves the signature and re-enables the build, so the
+-- daemon self-heals; the 0.25s debounce is the only floor on wakeup rate.
+-- This replaces the old fixed 2s self-rewake, which re-ran a ~minutes-long
+-- pass back-to-back on an unchanged broken corpus.
 watchWorker :: ServerState -> IO ()
 watchWorker ss = forever $ do
   takeMVar (ssWake ss)
   threadDelay watchDebounceMicros
   void (tryTakeMVar (ssWake ss))     -- drain a wakeup raised during the delay
-  -- Never let a transient rebuild exception kill the loop; the next edit
-  -- (or a query's own ensureFresh) gets another chance.
-  r <- try (rebuildLocked ss (\dirty _ -> pure dirty))
-         :: IO (Either SomeException (Either String Loaded))
-  case r of
-    Right _ -> pure ()
-    Left e  -> hPutStrLn stderr ("agda-explore: file-watch rebuild raised: " ++ show e)
-  -- Retry path: if the snapshot is still dirty (a failed rebuild re-dirtied
-  -- it, an exception left it set, or a fresh edit landed mid-build), back
-  -- off and re-wake so the retry actually fires instead of stalling until
-  -- the next external wakeup.
-  stillDirty <- readIORef (ssDirty ss)
-  if stillDirty
-    then do
-      threadDelay rebuildBackoffMicros
-      void (tryPutMVar (ssWake ss) ())
-    else pure ()
+  dirty <- readIORef (ssDirty ss)
+  when dirty $ do
+    failSig <- readIORef (ssFailSig ss)
+    curSig  <- scanSources (cfgIncludes (ssConfig ss))
+    -- Gate: skip when we already failed on exactly these sources. (A clean
+    -- snapshot has ssFailSig = Nothing, so a fresh edit always passes.)
+    when (failSig /= Just curSig) $ do
+      -- Never let a transient rebuild exception kill the loop; the next edit
+      -- (or a query's own ensureFresh) gets another chance.
+      r <- try (rebuildLocked ss (\d _ -> pure d))
+             :: IO (Either SomeException (Either String Loaded))
+      case r of
+        Right _ -> pure ()
+        Left e  -> hPutStrLn stderr ("agda-explore: file-watch rebuild raised: " ++ show e)
