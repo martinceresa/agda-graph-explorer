@@ -67,6 +67,7 @@ data Opts = Opts
   , oMinDepth :: Int
   , oAuto     :: Bool
   , oWatch    :: Bool
+  , oIncremental :: Bool
   , oQueryLog :: Bool
   , oAutoResolve :: Bool
   , oEnableInteract :: Bool
@@ -116,6 +117,7 @@ data FileConfig = FileConfig
   , fcMinTermDepth  :: Maybe Int
   , fcNoAutoRebuild :: Maybe Bool
   , fcNoWatch       :: Maybe Bool
+  , fcNoIncremental :: Maybe Bool
   , fcNoQueryLog    :: Maybe Bool
   , fcNoAutoResolve :: Maybe Bool
   , fcEnableInteract :: Maybe Bool
@@ -145,6 +147,7 @@ defaultFileConfig = FileConfig
   , fcMinTermDepth  = Nothing
   , fcNoAutoRebuild = Nothing
   , fcNoWatch       = Nothing
+  , fcNoIncremental = Nothing
   , fcNoQueryLog    = Nothing
   , fcNoAutoResolve = Nothing
   , fcEnableInteract = Nothing
@@ -174,6 +177,7 @@ instance FromJSON FileConfig where
     fcMinTermDepth  <- o .:? "min-term-depth"
     fcNoAutoRebuild <- o .:? "no-auto-rebuild"
     fcNoWatch       <- o .:? "no-watch"
+    fcNoIncremental <- o .:? "no-incremental"
     fcNoQueryLog    <- o .:? "no-query-log"
     fcNoAutoResolve <- o .:? "no-auto-resolve"
     fcEnableInteract <- o .:? "enable-interact"
@@ -216,6 +220,7 @@ applyConfig FileConfig{..} o = o
   , oMinDepth = fromMaybe (oMinDepth o) fcMinTermDepth
   , oAuto     = maybe (oAuto o)  not fcNoAutoRebuild
   , oWatch    = maybe (oWatch o) not fcNoWatch
+  , oIncremental = maybe (oIncremental o) not fcNoIncremental
   , oQueryLog = maybe (oQueryLog o) not fcNoQueryLog
   , oAutoResolve = maybe (oAutoResolve o) not fcNoAutoResolve
   , oEnableInteract = fromMaybe (oEnableInteract o) fcEnableInteract

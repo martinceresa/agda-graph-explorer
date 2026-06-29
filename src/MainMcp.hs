@@ -55,7 +55,7 @@ defOpts = Opts
   { oGraph = Nothing, oEntries = [], oIncl = [], oProj = Nothing
   , oOut = Nothing, oDeps = Nothing, oUnused = Nothing
   , oHashes = True, oSigs = True, oNormSigs = False, oShowImpl = False
-  , oMinDepth = 3, oAuto = True, oWatch = True, oQueryLog = True
+  , oMinDepth = 3, oAuto = True, oWatch = True, oIncremental = True, oQueryLog = True
   , oAutoResolve = True
   , oEnableInteract = False, oAgdaBin = Nothing, oInteractArgs = []
   , oInteractHeapMb = 0, oMaxSessions = 2, oSessionIdleSecs = 0
@@ -99,6 +99,7 @@ parseOpts (x : xs) o = case x of
   "--show-implicit"   -> parseOpts xs o { oShowImpl = True }
   "--no-auto-rebuild" -> parseOpts xs o { oAuto = False }
   "--no-watch"        -> parseOpts xs o { oWatch = False }
+  "--no-incremental"  -> parseOpts xs o { oIncremental = False }
   "--no-query-log"    -> parseOpts xs o { oQueryLog = False }
   "--no-auto-resolve" -> parseOpts xs o { oAutoResolve = False }
   "--enable-interact" -> parseOpts xs o { oEnableInteract = True }
@@ -208,6 +209,7 @@ buildConfig o = do
         , cfgShowImplicit = oShowImpl o
         , cfgMinTermDepth = oMinDepth o
         , cfgWatch        = oWatch o
+        , cfgIncremental  = oIncremental o
         , cfgQueryLog     = oQueryLog o
         , cfgAutoResolveUnique = oAutoResolve o
         , cfgEnableInteract = oEnableInteract o

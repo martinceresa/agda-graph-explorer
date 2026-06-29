@@ -56,13 +56,15 @@ import qualified Data.IntMap.Strict   as IM
 import           Data.List            (isInfixOf, isSuffixOf, maximumBy)
 import qualified Data.Map.Strict      as M
 import           Data.Maybe           (catMaybes, isJust, mapMaybe)
+import qualified Data.Set             as S
 import           Data.Ord             (comparing)
 import           Data.Text            (Text)
 import qualified Data.Text            as T
 import           Data.Time.Clock      (UTCTime, getCurrentTime)
 import qualified Data.Vector          as V
 import           GHC.IO.Handle.Lock   (LockMode (..), hTryLock, hUnlock)
-import           System.Directory     (createDirectoryIfMissing,
+import           System.Directory     (canonicalizePath,
+                                       createDirectoryIfMissing,
                                        doesDirectoryExist, doesFileExist,
                                        findExecutable, getModificationTime,
                                        listDirectory, renameFile)
@@ -110,6 +112,7 @@ data Config = Config
   , cfgMinTermDepth :: !Int              -- ^ @--min-term-depth@ on rebuild.
   , cfgAutoRebuild  :: !Bool             -- ^ auto-rebuild on detected staleness.
   , cfgWatch        :: !Bool             -- ^ use an fsnotify watcher (live mode) instead of per-query polling.
+  , cfgIncremental  :: !Bool             -- ^ multi-entry incremental rebuilds: re-run @agda-deps@ only for entries whose closure a change touches, reusing the others' retained graphs (a RAM-for-speed trade). Off ⇒ every rebuild is full and nothing is retained.
   , cfgQueryLog     :: !Bool             -- ^ append one JSON line per @tools/call@ to @cfgOutDir/query-log.jsonl@.
   , cfgAutoResolveUnique :: !Bool        -- ^ auto-resolve a name to the sole "did you mean" candidate (tier 3 of 'AgdaMcp.Query.resolveDefNote').
   , cfgEnableInteract :: !Bool           -- ^ expose the write-side interaction-bridge tools (load/goal_type/give/…).
@@ -139,6 +142,7 @@ defaultConfig = Config
   , cfgMinTermDepth = 3
   , cfgAutoRebuild  = True
   , cfgWatch        = True
+  , cfgIncremental  = True
   , cfgQueryLog     = True
   , cfgAutoResolveUnique = True
   , cfgEnableInteract = False
@@ -214,6 +218,15 @@ data Loaded = Loaded
 loadedFormatCurrent :: Loaded -> Bool
 loadedFormatCurrent ld = ldNodeKeyV ld >= currentNodeKeyVersion
 
+-- | Per-entry build cache for incremental multi-entry rebuilds: each
+-- configured entry's decoded 'ExpandedGraph' plus the (canonicalised) set
+-- of source files in its import closure, keyed by entry file. Retained
+-- between rebuilds (when 'cfgIncremental') so a selective rebuild reuses
+-- the graphs of entries no change touched; the closure set drives the
+-- which-entries-to-re-run decision ('chooseReRun'). Holding the per-entry
+-- graphs is the deliberate RAM-for-speed trade behind 'cfgIncremental'.
+type EntryCache = M.Map FilePath (ExpandedGraph, S.Set FilePath)
+
 data ServerState = ServerState
   { ssConfig      :: !Config
   , ssLoaded      :: !(IORef (Maybe Loaded))
@@ -270,6 +283,17 @@ data ServerState = ServerState
     -- fix to the broken module) changes the signature and re-enables it, so
     -- the daemon still self-heals. The manual @rebuild@ tool ('forceRebuild')
     -- bypasses the gate for transient-failure recovery.
+  , ssDirtyFiles  :: !(IORef (S.Set FilePath))
+    -- ^ Source files changed since the last build, accumulated by the
+    -- fsnotify watcher ('onEvent', canonicalised). Drives /selective/
+    -- rebuilds: only entries whose closure intersects this set re-run
+    -- @agda-deps@ (see 'chooseReRun'). Empty under the polled fallback
+    -- (no paths) ⇒ a full rebuild. Snapshot-and-cleared at build start so
+    -- an edit landing mid-build is picked up next round (see 'runBuildShared').
+  , ssEntryCache  :: !(IORef EntryCache)
+    -- ^ Retained per-entry graphs + closures for incremental rebuilds
+    -- ('EntryCache'). Empty until the first full build; written empty (so
+    -- nothing is retained) whenever 'cfgIncremental' is off.
   , ssInspect     :: !(Maybe InspectHub)
     -- ^ The localhost web-inspector event bus, or 'Nothing' when
     -- @--inspect@ is off. When 'Nothing' every 'AgdaMcp.Inspect.emitInspect'
@@ -293,6 +317,8 @@ newServerState c =
     <*> newMVar M.empty
     <*> newIORef Nothing
     <*> newIORef Nothing
+    <*> newIORef S.empty
+    <*> newIORef M.empty
     <*> (if cfgInspect c then Just <$> newInspectHub else pure Nothing)
 
 -- ---------------------------------------------------------------------
@@ -548,108 +574,130 @@ buildOwnerMap rds =
     enclosingModule outer inner =
       outer == inner || (outer <> ".") `T.isPrefixOf` inner
 
--- | Run @agda-deps@ to regenerate the graph, then parse and index it.
+-- | The producer flag list shared by every @agda-deps@ run (all but the
+-- out-dir and the trailing entry positional).
+buildBaseArgs :: Config -> [String]
+buildBaseArgs Config{..} =
+  [ "--format=json", "--json-mode=expanded", "--no-externals", "--keep-going" ]
+    ++ [ a | cfgWithHashes
+           , a <- ["--with-term-hashes", "--min-term-depth=" ++ show cfgMinTermDepth] ]
+    ++ ["--with-signatures" | cfgWithSigs]
+    ++ ["--normalise-signatures" | cfgWithSigs && cfgNormaliseSigs]
+    ++ ["--signature-implicits"  | cfgWithSigs && cfgShowImplicit]
+    ++ concatMap (\d -> ["-i", d]) cfgIncludes
+
+showEc :: ExitCode -> String
+showEc ExitSuccess     = "exit 0"
+showEc (ExitFailure n) = "exit " ++ show n
+
+-- | One @agda-deps@ run into @outDir@ for @entry@; returns the graph file
+-- path on success (the caller decodes it). Shared by the single- and
+-- multi-entry paths so their build command can't drift.
+runOneEntry :: Config -> FilePath -> FilePath -> FilePath -> IO (Either String FilePath)
+runOneEntry cfg deps outDir entry = do
+  createDirectoryIfMissing True outDir
+  let args      = buildBaseArgs cfg ++ ["-o", outDir, entry]
+      graphPath = outDir </> "deps.json"
+  (ec, _out, err) <-
+    readCreateProcessWithExitCode
+      (proc deps args) { cwd = Just (cfgProjectRoot cfg) } ""
+  exists <- doesFileExist graphPath
+  pure $ if not exists
+    then Left ("agda-deps produced no graph for " ++ entry ++ " ("
+                 ++ showEc ec ++ "):\n" ++ lastLines 25 err)
+    else Right graphPath
+
+-- | Single-entry build: one @agda-deps@ into 'cfgOutDir' (writing exactly
+-- 'cfgGraphPath'), then decode + index. No per-entry cache — there is
+-- nothing to be selective about with one entry.
+buildSingle :: Config -> FilePath -> FilePath -> IO (Either String Loaded)
+buildSingle cfg deps entry =
+  runOneEntry cfg deps (cfgOutDir cfg) entry
+    >>= either (pure . Left) (loadLoaded (cfgAutoResolveUnique cfg) (cfgIncludes cfg))
+
+-- | 'canonicalizePath' collapsing any IO failure to the input path, so a
+-- transient/edge case degrades to a non-match rather than a crash.
+safeCanon :: FilePath -> IO FilePath
+safeCanon p =
+  either (const p) id <$> (try (canonicalizePath p) :: IO (Either SomeException FilePath))
+
+-- | The source files in a graph's import closure, canonicalised so they
+-- compare exactly against the watcher's (also canonicalised) change paths.
+closureFiles :: ExpandedGraph -> IO (S.Set FilePath)
+closureFiles eg = S.fromList <$> mapM safeCanon (M.elems (egModuleFiles eg))
+
+-- | Decide which entries a rebuild must re-run @agda-deps@ for, given the
+-- changed-file set. An edit usually touches only one entry's closure, so
+-- re-running every entry (re-emitting tens of MB of unchanged JSON each)
+-- is the dominant repeated waste this avoids.
 --
--- Three paths:
+-- Conservative by construction — anything that can't be /proven/ safe to
+-- narrow falls back to re-running all entries:
 --
---   * /preloaded/ — read the fixed graph from disk (never spawns
---     @agda-deps@).
---   * /single entry/ — one @agda-deps@ subprocess into 'cfgOutDir', then
---     decode + index 'cfgGraphPath' (one trailing positional; the committed
---     fixtures + docs assume this).
---   * /multiple entries/ — a single @agda-deps@ invocation only compiles
---     /one/ entry's import closure, so we run it once per entry into a
---     separate out-dir, decode each 'ExpandedGraph', and union them
---     in-process ('AgdaGraph.Union.unionExpandedGraphs') before building a
---     single 'Index' over the result.
-runBuild :: Config -> IO (Either String Loaded)
-runBuild Config{..}
-  | cfgPreloaded = loadLoaded cfgAutoResolveUnique cfgIncludes cfgGraphPath
-  | null cfgEntries =
-      pure (Left "no entry module configured; start the server with --entry FILE (repeatable), \
-                 \config `entries:`, or --graph FILE")
-  | otherwise = do
-      mdeps <- findBin "agda-deps" cfgDepsBin "AGDA_DEPS_BIN"
-      case mdeps of
-        Nothing   -> pure (Left "could not locate the agda-deps binary (set AGDA_DEPS_BIN or pass --agda-deps-bin)")
-        Just deps -> case cfgEntries of
-          [entry] -> singleEntry deps entry
-          _       -> multiEntry deps cfgEntries
+--   * incremental disabled, no live watcher, or no full prior build to
+--     reuse (partial cache) ⇒ full;
+--   * woke without a known changed-file set (the polled fallback carries
+--     no paths) ⇒ full;
+--   * a changed file in /no/ known closure — a brand-new module, or a path
+--     that didn't canonicalise to a closure entry ⇒ full. This is the
+--     safety net: a path mismatch costs a slower rebuild, never a stale
+--     graph.
+--
+-- Otherwise re-run exactly the entries whose closure contains a changed
+-- file. Reused entries' graphs are byte-identical to a fresh run (same
+-- sources + @.agdai@ ⇒ deterministic @agda-deps@), so the union — and thus
+-- every query — is identical to a full rebuild.
+chooseReRun :: Config -> Bool -> Bool -> EntryCache -> S.Set FilePath
+            -> (Int -> FilePath -> Bool)
+chooseReRun cfg forceFull watching cache dirty
+  | runAll    = \_ _ -> True
+  | otherwise = \_ e -> case M.lookup e cache of
+                          Just (_, cl) -> not (S.null (S.intersection cl dirty))
+                          Nothing      -> True
   where
-    showEc ExitSuccess     = "exit 0"
-    showEc (ExitFailure n) = "exit " ++ show n
+    haveAll   = all (`M.member` cache) (cfgEntries cfg)
+    closures  = S.unions [ cl | (_, cl) <- M.elems cache ]
+    unmatched = not (S.null (S.filter (`S.notMember` closures) dirty))
+    runAll    =  forceFull
+              || not (cfgIncremental cfg)
+              || not watching
+              || not haveAll
+              || S.null dirty
+              || unmatched
 
-    -- The shared producer flag list (everything except the out-dir + the
-    -- trailing entry positional).
-    baseArgs =
-      [ "--format=json", "--json-mode=expanded"
-      , "--no-externals", "--keep-going" ]
-        ++ [ a | cfgWithHashes
-               , a <- ["--with-term-hashes"
-                      , "--min-term-depth=" ++ show cfgMinTermDepth] ]
-        ++ ["--with-signatures" | cfgWithSigs]
-        ++ ["--normalise-signatures" | cfgWithSigs && cfgNormaliseSigs]
-        ++ ["--signature-implicits"  | cfgWithSigs && cfgShowImplicit]
-        ++ concatMap (\d -> ["-i", d]) cfgIncludes
-
-    -- One agda-deps run into @outDir@ for @entry@; returns the graph file
-    -- path on success (so the caller decodes it where it wants).
-    runOne :: FilePath -> FilePath -> FilePath -> IO (Either String FilePath)
-    runOne deps outDir entry = do
-      createDirectoryIfMissing True outDir
-      let args      = baseArgs ++ ["-o", outDir, entry]
-          graphPath = outDir </> "deps.json"
-      (ec, _out, err) <-
-        readCreateProcessWithExitCode
-          (proc deps args) { cwd = Just cfgProjectRoot } ""
-      exists <- doesFileExist graphPath
-      pure $ if not exists
-        then Left ("agda-deps produced no graph for " ++ entry ++ " ("
-                     ++ showEc ec ++ "):\n" ++ lastLines 25 err)
-        else Right graphPath
-
-    -- Single entry: 'runOne' into 'cfgOutDir' runs 'baseArgs ++ ["-o",
-    -- cfgOutDir, entry]' and writes exactly 'cfgGraphPath'
-    -- (== cfgOutDir </> "deps.json"), so we read back the path it returns via
-    -- 'loadLoaded'. Sharing 'runOne' keeps the single- and multi-entry build
-    -- commands from drifting on a future 'baseArgs' change.
-    singleEntry :: FilePath -> FilePath -> IO (Either String Loaded)
-    singleEntry deps entry =
-      runOne deps cfgOutDir entry
-        >>= either (pure . Left) (loadLoaded cfgAutoResolveUnique cfgIncludes)
-
-    -- Multiple entries: one agda-deps run per entry into a per-entry
-    -- sub-dir of 'cfgOutDir', decode each graph, then union in-process and
-    -- index the result. Entry order is preserved (deterministic union /
-    -- representative entryModule). A single entry that fails aborts the
-    -- whole build with that entry's diagnostic (matches the single-entry
-    -- "produced no graph" semantics).
-    multiEntry :: FilePath -> [FilePath] -> IO (Either String Loaded)
-    multiEntry deps entries = do
-      egsE <- forM (zip [0 :: Int ..] entries) $ \(i, entry) -> do
-        let outDir = cfgOutDir </> ("entry-" ++ show i)
-        r <- runOne deps outDir entry
+-- | Multi-entry build with reuse: re-run @agda-deps@ for the entries
+-- 'chooseReRun' selects, reuse the cached 'ExpandedGraph' for the rest,
+-- then union (in entry order — deterministic) and index. Returns the new
+-- snapshot /and/ the refreshed per-entry cache. The union is published
+-- atomically (temp + rename) so a second daemon passive-reading
+-- 'cfgGraphPath' under the build lock never decodes a half-written file.
+-- A single entry that fails aborts the whole build with its diagnostic.
+buildMulti :: Config -> FilePath -> (Int -> FilePath -> Bool) -> EntryCache
+           -> IO (Either String (Loaded, EntryCache))
+buildMulti cfg deps reRun cache = do
+  egsE <- forM (zip [0 :: Int ..] (cfgEntries cfg)) $ \(i, entry) ->
+    case M.lookup entry cache of
+      Just (eg, cl) | not (reRun i entry) -> pure (Right (entry, eg, cl))   -- reuse
+      _ -> do
+        let outDir = cfgOutDir cfg </> ("entry-" ++ show i)
+        r <- runOneEntry cfg deps outDir entry
         case r of
-          Left err  -> pure (Left err)
-          Right gp  -> decodeGraphFile gp
-      case sequence egsE of
-        Left err  -> pure (Left err)
-        Right egs -> do
-          let !eg = unionExpandedGraphs egs
-          -- Materialise the unioned graph at 'cfgGraphPath' so out-of-process
-          -- consumers that read it directly see the SAME graph the in-memory
-          -- Index is built from. In particular the @unused@ tool shells out
-          -- to @agda-unused --json=cfgGraphPath@; without this it would read
-          -- a missing file (first run) or a stale single-entry leftover and
-          -- silently disagree with every in-process query.
-          --
-          -- Publish atomically (temp + rename): a second daemon
-          -- passive-reading 'cfgGraphPath' under the build lock (see
-          -- 'runBuildShared') then never decodes a half-written union.
-          let !unionTmp = cfgGraphPath ++ ".tmp"
-          BL.writeFile unionTmp (encode eg)
-          renameFile unionTmp cfgGraphPath
-          Right <$> loadedFromGraph cfgAutoResolveUnique cfgIncludes Nothing eg
+          Left err -> pure (Left err)
+          Right gp -> do
+            de <- decodeGraphFile gp
+            case de of
+              Left err -> pure (Left err)
+              Right eg -> do cl <- closureFiles eg; pure (Right (entry, eg, cl))
+  case sequence egsE of
+    Left err -> pure (Left err)
+    Right rs -> do
+      let !eg      = unionExpandedGraphs [ g | (_, g, _) <- rs ]
+          newCache = M.fromList [ (e, (g, cl)) | (e, g, cl) <- rs ]
+          unionTmp = cfgGraphPath cfg ++ ".tmp"
+      BL.writeFile unionTmp (encode eg)
+      renameFile unionTmp (cfgGraphPath cfg)
+      ld <- loadedFromGraph (cfgAutoResolveUnique cfg) (cfgIncludes cfg) Nothing eg
+      pure (Right (ld, newCache))
 
 lastLines :: Int -> String -> String
 lastLines n = unlines . reverse . take n . reverse . lines
@@ -693,33 +741,77 @@ withTryBuildLock path act =
     tryLockBestEffort h = either (const True) id
       <$> (try (hTryLock h ExclusiveLock) :: IO (Either SomeException Bool))
 
--- | 'runBuild' under the cross-process build mutex ('withTryBuildLock').
--- The daemon that wins the lock runs the real @agda-deps@ build; a daemon
+-- | The build entry point, run under the cross-process build mutex
+-- ('withTryBuildLock'). The daemon that wins the lock builds; a daemon
 -- that finds it held becomes a /passive reader/ — it loads the graph the
--- winning daemon maintains at 'cfgGraphPath' instead of spawning a
--- competing build. Preloaded mode and the no-entry case never spawn
--- @agda-deps@, so they skip the lock entirely.
+-- winner publishes at 'cfgGraphPath' instead of spawning a competing
+-- build. Preloaded mode and the no-entry case never spawn @agda-deps@, so
+-- they skip the lock.
+--
+-- Multi-entry builds are /selective/ ('chooseReRun'): only entries whose
+-- closure a changed file touches re-run @agda-deps@; the rest are reused
+-- from the retained per-entry cache ('ssEntryCache'). @forceFull@ (the
+-- manual @rebuild@ tool) re-runs everything. The changed-file set
+-- ('ssDirtyFiles') is snapshot-and-cleared up front so an edit landing
+-- mid-build is picked up next round; on a failed build it is restored.
 --
 -- Passive-read freshness: the reader picks up whatever union the builder
--- last published atomically (the temp+rename in 'runBuild'\'s multi-entry
--- path); it may briefly trail the builder until its own next rebuild
--- trigger. That is the intended trade — never two concurrent builders —
--- and far cheaper than the collision it replaces (a try-lock + a file
--- read, no @agda-deps@, and no 300 MB decode when no union exists yet).
-runBuildShared :: Config -> IO (Either String Loaded)
-runBuildShared cfg
-  | cfgPreloaded cfg || null (cfgEntries cfg) = runBuild cfg
+-- last published atomically (the temp+rename in 'buildMulti'); it may
+-- briefly trail the builder until its own next rebuild trigger. That is
+-- the intended trade — never two concurrent builders.
+runBuildShared :: ServerState -> Bool -> IO (Either String Loaded)
+runBuildShared ss forceFull
+  | cfgPreloaded cfg =
+      loadLoaded (cfgAutoResolveUnique cfg) (cfgIncludes cfg) (cfgGraphPath cfg)
+  | null (cfgEntries cfg) =
+      pure (Left "no entry module configured; start the server with --entry FILE (repeatable), \
+                 \config `entries:`, or --graph FILE")
   | otherwise = do
       createDirectoryIfMissing True (cfgOutDir cfg)
       withTryBuildLock (buildLockPath cfg) $ \owner ->
-        if owner
-          then runBuild cfg
-          else do
-            hPutStrLn stderr
-              "agda-explore: another daemon holds the build lock for this \
-              \project; reading its published graph instead of running a \
-              \competing agda-deps."
-            loadLoaded (cfgAutoResolveUnique cfg) (cfgIncludes cfg) (cfgGraphPath cfg)
+        if not owner then passiveRead else build
+  where
+    cfg = ssConfig ss
+
+    passiveRead = do
+      hPutStrLn stderr
+        "agda-explore: another daemon holds the build lock for this \
+        \project; reading its published graph instead of running a \
+        \competing agda-deps."
+      loadLoaded (cfgAutoResolveUnique cfg) (cfgIncludes cfg) (cfgGraphPath cfg)
+
+    build = do
+      mdeps <- findBin "agda-deps" (cfgDepsBin cfg) "AGDA_DEPS_BIN"
+      case mdeps of
+        Nothing   -> pure (Left "could not locate the agda-deps binary (set AGDA_DEPS_BIN or pass --agda-deps-bin)")
+        Just deps -> case cfgEntries cfg of
+          [entry] -> buildSingle cfg deps entry
+          _       -> do
+            cache    <- readIORef (ssEntryCache ss)
+            watching <- isWatching ss
+            -- Snapshot + clear the changed-file set atomically: an edit
+            -- landing mid-build accumulates into the now-empty set for the
+            -- next round (mirrors how 'ssDirty' is cleared before the build).
+            dirty <- atomicModifyIORef' (ssDirtyFiles ss) (\s -> (S.empty, s))
+            let reRun  = chooseReRun cfg forceFull watching cache dirty
+                nTotal = length (cfgEntries cfg)
+                nRun   = length [ () | (i, e) <- zip [0 :: Int ..] (cfgEntries cfg), reRun i e ]
+            hPutStrLn stderr $
+              "agda-explore: " ++ (if nRun == nTotal then "full" else "incremental")
+                ++ " rebuild — re-running " ++ show nRun ++ "/" ++ show nTotal
+                ++ " entr" ++ (if nTotal == 1 then "y" else "ies")
+                ++ (if nRun == nTotal then "" else " (changed: " ++ show (S.size dirty) ++ " file(s))")
+            r <- buildMulti cfg deps reRun cache
+            case r of
+              Left err -> do
+                modifyIORef' (ssDirtyFiles ss) (S.union dirty)   -- restore for retry
+                pure (Left err)
+              Right (ld, newCache) -> do
+                -- Retain per-entry graphs only when incremental is on (the
+                -- RAM-for-speed trade); off ⇒ empty cache ⇒ every build is
+                -- full and nothing is held between rebuilds.
+                writeIORef (ssEntryCache ss) (if cfgIncremental cfg then newCache else M.empty)
+                pure (Right ld)
 
 -- ---------------------------------------------------------------------
 -- Live regeneration entry points
@@ -849,7 +941,7 @@ ensureFresh ss@ServerState{..}
 -- 'ssDirty' is cleared /before/ the subprocess runs, so a source edit
 -- that lands mid-rebuild re-dirties and is picked up on the next cycle.
 rebuildLocked :: ServerState -> (Bool -> Loaded -> IO Bool) -> IO (Either String Loaded)
-rebuildLocked ServerState{..} needBuild = withMVar ssRebuildLock $ \_ -> do
+rebuildLocked ss@ServerState{..} needBuild = withMVar ssRebuildLock $ \_ -> do
   cur   <- readIORef ssLoaded
   dirty <- readIORef ssDirty
   case cur of
@@ -861,7 +953,7 @@ rebuildLocked ServerState{..} needBuild = withMVar ssRebuildLock $ \_ -> do
   where
     doBuild cur = do
       writeIORef ssDirty False
-      built <- runBuildShared ssConfig
+      built <- runBuildShared ss False
       case built of
         Right ld -> do
           writeIORef ssColdError Nothing       -- a good build clears cold-start state
@@ -899,9 +991,9 @@ rebuildLocked ServerState{..} needBuild = withMVar ssRebuildLock $ \_ -> do
 -- Serialised through 'ssRebuildLock' and clears 'ssDirty' so it composes
 -- with the background watcher.
 forceRebuild :: ServerState -> IO (Either String Loaded)
-forceRebuild ServerState{..} = withMVar ssRebuildLock $ \_ -> do
+forceRebuild ss@ServerState{..} = withMVar ssRebuildLock $ \_ -> do
   writeIORef ssDirty False
-  built <- runBuildShared ssConfig
+  built <- runBuildShared ss True
   case built of
     Right ld -> do
       writeIORef ssColdError Nothing
@@ -1018,8 +1110,12 @@ startWatcher ss@ServerState{..}
       let p = eventPath e
       in agdaExt p && not (any (`isInfixOf` p) skipFragments)
     skipFragments = ["/.git/", "/dist-newstyle/", "/.agda-explore/", "/_build/"]
-    onEvent _ = do
+    onEvent ev = do
       writeIORef ssDirty True
+      -- Record which file changed (canonicalised) so the next rebuild can
+      -- re-run only the entries whose closure it touches (see 'chooseReRun').
+      p <- safeCanon (eventPath ev)
+      modifyIORef' ssDirtyFiles (S.insert p)
       -- Serve-stale parity for live interaction sessions: a source change
       -- on disk marks every open session dirty so it reloads (refreshing
       -- its stable-goal map) on next use, rather than eagerly reloading a
