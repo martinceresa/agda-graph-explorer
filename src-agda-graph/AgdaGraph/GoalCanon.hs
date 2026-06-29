@@ -9,8 +9,8 @@
 -- @agda-goals@ executable) so both @agda-goals@ (bucketing) and
 -- @agda-explore@ (free-text lemma search) import one definition of the
 -- vendored-Murmur64 'hashString' — see the "@hashString@ is vendored
--- Murmur64" gotcha in @CLAUDE.md@. @AgdaGoals.Canon@ is now a thin
--- re-export of this module.
+-- Murmur64" gotcha in @CLAUDE.md@. @AgdaGoals.Canon@ re-exports this
+-- module.
 --
 -- The @--interaction-json@ protocol only ships the /rendered/ goal
 -- type as a 'Text' (e.g. @"Nat → Nat"@), not the internal 'Term', so
@@ -49,8 +49,7 @@ import           Data.Digest.Murmur64 ( asWord64, hash64 )
 -- | Stable 64-bit string hash. Vendored from @murmur-hash@ to keep this
 -- repo Agda-free: this is byte-for-byte the definition of Agda's
 -- @Agda.Utils.Hash.hashString@ (@asWord64 . hash64@), so canonical-goal
--- buckets stay identical to the pre-split agda-goals output and remain
--- cross-referenceable with @agda-deps@'s @hashQName@.
+-- buckets remain cross-referenceable with @agda-deps@'s @hashQName@.
 hashString :: String -> Word64
 hashString = asWord64 . hash64
 

@@ -71,32 +71,18 @@ that motivated this). All in `AgdaInteract.Tools`, exposed under
 ### Staging-buffer include-path fix (2026-06-15)
 
 - **`agda-explore`: `stage` / `promote` now load on projects with an
-  `.agda-lib`.** The scratch module (`.agda-explore/scratch/Scratch*.agda`)
-  and promote's renamed validation temp
-  (`.agda-explore/scratch/.validate/AgdaExploreValidate.*`) have *bare*
-  top-level module names, but both load sites passed Agda only the project's
-  `cfgIncludes` — never those generated dirs. On any project whose include
-  roots don't cover them (the realistic `.agda-lib` case, where the root is
-  e.g. `agda-src` and the scratch sits *under* it), Agda rejected both with
-  `ModuleNameDoesntMatchFileName`, so the whole staging workflow was dead:
-  `load` of the scratch failed, and `promote` failed in validation with
-  "nothing changed". Fix: a new `AgdaInteract.Tools.loadIncludes` prepends the
-  loaded file's own directory to the include list for *exactly* the scratch
-  dir and the `.validate` dir; `doLoad` and `validateCandidate` both use it.
-  Normal project loads are byte-identical (the directory is added only for
-  those two bridge-generated locations). The splice + import-merge logic was
-  already correct — this was purely the include/module-name setup for the
-  generated files. Observed + fixed on the Jolteon-FastBFT corpus
-  (`fastbft.agda-lib`); a `stage`→`promote` end-to-end run now type-checks the
-  promoted target (merged a missing import + appended the new def). Follow-up
-  to the 2026-06-13 staging entry below. Regression locked in the live
-  `convergence.py` harness: its `stage`→`promote` case now drops an
-  `.agda-lib` at the project root so the scratch sits *under* a project root
-  (the trigger — without it Agda accepts the scratch's own dir implicitly and
-  the bug doesn't surface); the case fails with the prepend disabled and
-  passes with it. It stays a *live* test (needs `agda`), not in the offline
-  CI suite — the bug is an Agda module-resolution behavior the transcript
-  replay can't exercise.
+  `.agda-lib`.** The scratch module and promote's renamed validation temp have
+  *bare* top-level module names, but both load sites passed Agda only the
+  project's `cfgIncludes`. When the include root doesn't cover the generated
+  dirs (the `.agda-lib` case, root e.g. `agda-src` with the scratch *under*
+  it), Agda rejected both with `ModuleNameDoesntMatchFileName` and the staging
+  workflow was dead. Fix: `AgdaInteract.Tools.loadIncludes` prepends the loaded
+  file's own directory for exactly the scratch and `.validate` dirs (`doLoad` /
+  `validateCandidate`); normal project loads are byte-identical. Regression
+  locked in the live `convergence.py` harness (`stage`→`promote` with an
+  `.agda-lib` at the root as the trigger); stays a live test, since the bug is
+  Agda module-resolution behaviour the offline transcript replay can't
+  exercise.
 
 ### Bridge batching + staging, cold-start fallback, parallel goals (2026-06-13)
 

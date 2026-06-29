@@ -132,10 +132,10 @@ goalsTimeoutMicros = 600 * 1000000   -- 10 min per module
 -- persistent agda process — reusing one process (and its on-disk @.agdai@
 -- cache) across files instead of spawning one per file.
 --
--- Goal extraction per file is byte-identical to the historical one-shot
--- path: the same @Cmd_load@ yields the same @AllGoalsWarnings@ whether the
--- process is fresh or reused (a load resets the active module), and
--- 'scanReplies' is unchanged.
+-- Goal extraction per file is independent of process reuse: the same
+-- @Cmd_load@ yields the same @AllGoalsWarnings@ whether the process is fresh
+-- or reused (a load resets the active module), so 'scanReplies' is identical
+-- either way.
 --
 -- Resilience: if the session dies mid-batch (e.g. a module times out and
 -- poisons it) the next file respawns a fresh process; the poisoning file
@@ -147,7 +147,8 @@ runDriverBatch tmpl files = do
   -- One agda session per worker. The pool size follows the RTS capability
   -- count (the binary is built @-with-rtsopts=-N@; run @+RTS -N4@ to cap
   -- it — e.g. to bound memory on a heavy corpus). @-N1@ ⇒ a single serial
-  -- session, byte-identical to the pre-parallel driver.
+  -- session; output is byte-identical across @-N1@/@-NK@ (results are
+  -- reassembled in input order).
   caps <- getNumCapabilities
   let nWorkers = max 1 (min caps (length files))
   if nWorkers <= 1 then runSerial tmpl files

@@ -938,8 +938,8 @@ loadAndSync ss file = modifyMVar (ssSessions ss) $ \m -> do
       pure (m2, Right (sess, gm1, es, out))
 
 -- | (Re)load a module, returning the session, the new goal map, the goal
--- entries, and the file path — or the load error. The classic interface
--- on top of 'loadAndSync', preserving the old Left-on-load-error semantics.
+-- entries, and the file path — or the load error. Wraps 'loadAndSync',
+-- returning 'Left' on a load error.
 doLoad :: ServerState -> FilePath -> IO (Either Text (Session, GoalMap, [GoalEntry], FilePath))
 doLoad ss file = do
   r <- loadAndSync ss file

@@ -155,10 +155,10 @@ subUsage sub = unlines $
 -- semantic description of each flag.
 --
 -- Three subcommands ('motif', 'term-cluster', 'concept-bundle') declare
--- their specs in an order that differs from the historical help listing,
--- and 'term-cluster' carries one continuation line that is not itself a
--- flag; 'selectHelp' reorders / interleaves the spec-derived lines for
--- those three so the rendered help stays byte-identical. Their @--help@
+-- their specs in an order that differs from how their @--help@ lists the
+-- flags, and 'term-cluster' carries one continuation line that is not itself
+-- a flag; 'selectHelp' reorders / interleaves the spec-derived lines for
+-- those three so the rendered help keeps its intended layout. Their @--help@
 -- text still comes from the specs, not a re-typed copy.
 subFlags :: String -> [String]
 subFlags sub = case sub of
@@ -197,8 +197,8 @@ subFlags sub = case sub of
 -- (re)ordering the spec-derived help lines by flag name (@Right@),
 -- interleaving any verbatim non-flag lines such as a continuation
 -- (@Left@). Used only by the three subcommands whose spec order or
--- extra lines differ from the historical 'subFlags' listing, so their
--- rendered help reproduces it byte-for-byte while each flag's text
+-- extra lines differ from the layout their @--help@ presents, so their
+-- rendered help keeps that fixed layout while each flag's text
 -- still comes from its 'FlagSpec'. A @Right@ naming an absent flag
 -- degrades to the bare name (it never fires for our call sites).
 selectHelp :: [FlagSpec o] -> [Either String String] -> [String]

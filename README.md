@@ -11,7 +11,7 @@ shared library plus four executables that read `agda-deps`' v2
 |----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------|
 | **`agda-graph`** (library) | Typed view of the expanded `graph.json` + an in-memory `Index`. The substrate the executables share.                                      |
 | **`agda-unused`**          | Flags unused imports / definitions / blanket opens / public re-exports.                                                                   |
-| **`agda-optimization`**    | ~20 subcommand-driven graph-level analyses (centrality, clustering, motif mining, axiom footprint, …).                                    |
+| **`agda-optimization`**    | 18 subcommand-driven graph-level analyses (centrality, clustering, motif mining, axiom footprint, …).                                     |
 | **`agda-goals`**           | Drives `agda --interaction-json` over a pool of persistent processes and buckets goal states by canonical hash. Needs `agda` on `$PATH`. |
 | **`agda-explore`**         | Interactive MCP server: a daemon that answers point queries over the graph for coding agents, regenerating it on the fly via `agda-deps`. |
 
@@ -19,20 +19,17 @@ The single coupling to `agda-deps` is the **v2 `graph.json` wire
 schema** — `agda-deps` produces it, this repo consumes it. See
 [The wire contract](#the-wire-contract).
 
-For runnable recipes (one per subcommand, with empirical defaults
-explained) see [Examples.md](Examples.md).
-For forward-looking work see [TODO.md](TODO.md);
-for deferred / refused ideas see [Backlog.md](Backlog.md) and [Deferred.md](Deferred.md);
-for shipped work see [Changelog.md](Changelog.md).
+Runnable recipes (one per subcommand): [Examples.md](Examples.md).
+Forward-looking work: [TODO.md](TODO.md); deferred / refused ideas:
+[Backlog.md](Backlog.md), [Deferred.md](Deferred.md); shipped work:
+[Changelog.md](Changelog.md).
 
 ## Prerequisites
 
 - GHC 9.14.x + cabal 3.16 (older GHC ≥ 9.6 should work; CI pins 9.14.1).
-- For `agda-optimization`'s `fiedler` subcommand only:
-  `pip install scipy numpy`.
-- For `agda-goals` and for `agda-explore`'s live graph regeneration:
-  the `agda` and `agda-deps` binaries on `$PATH` (see
-  [Cross-repo runtime link](#cross-repo-runtime-link)).
+- `agda-optimization`'s `fiedler` subcommand only: `pip install scipy numpy`.
+- `agda-goals` and `agda-explore`'s live regeneration: `agda` and
+  `agda-deps` on `$PATH` (see [Cross-repo runtime link](#cross-repo-runtime-link)).
 
 ## Build
 
@@ -40,8 +37,8 @@ for shipped work see [Changelog.md](Changelog.md).
 cabal build
 ```
 
-This resolves entirely from Hackage — there is no Agda
-`source-repository-package` pin (that lives in the `agda-deps` repo).
+Resolves entirely from Hackage — no Agda `source-repository-package` pin
+(that lives in the `agda-deps` repo).
 
 ## Producing the input graph
 
@@ -73,7 +70,7 @@ agda-optimization --help                 # list subcommands
 agda-optimization <subcommand> --help    # subcommand flags
 ```
 
-Subcommands: `motif`, `load-bearing`, `polyglot`, `fingerprint`,
+18 subcommands: `motif`, `load-bearing`, `polyglot`, `fingerprint`,
 `debt`, `basket`, `ledger`, `echo`, `gravity`, `pyre`, `chokepoint`,
 `silhouette`, `entwine`, `fiedler`, `horizon`, `strata`,
 `term-cluster`, `concept-bundle`. `--json` emits machine-readable
@@ -85,37 +82,33 @@ output. Config: [`.agda-optimization.yml`](#agda-optimizationyml)
 `--helper=PATH` > `$AGDA_OPTIMIZATION_HELPER` > the bundled data-file.
 
 **Parallelism.** `agda-unused` and `agda-optimization` are multicore
-(`-with-rtsopts=-N`); output is byte-identical between `+RTS -N1` and
-`+RTS -NK`.
+(`-with-rtsopts=-N`); output is byte-identical between `+RTS -N1` and `-NK`.
 
 ## `agda-goals` — bucket goal states
 
 Drives `agda --interaction-json` over the root files via a **pool of
-persistent** Agda processes (the same session driver `agda-explore`'s
-interaction bridge uses; one process per RTS capability — run `+RTS -NK`
-to cap the pool, e.g. to bound memory on a heavy corpus), canonicalises
-each open goal type, and buckets by hash to surface recurring missing
-lemmas. Output is reassembled in input order, so it is byte-identical
-between `+RTS -N1` and `-NK`. Needs `agda` on `$PATH`. Config:
-[`.agda-goals.yml`](#agda-goalsyml).
-(Experimental; not yet a polished end-user surface.)
+persistent** Agda processes (one per RTS capability; `+RTS -NK` caps the
+pool), canonicalises each open goal type, and buckets by hash to surface
+recurring missing lemmas. Output is reassembled in input order, so it is
+byte-identical between `+RTS -N1` and `-NK`. Needs `agda` on `$PATH`.
+Config: [`.agda-goals.yml`](#agda-goalsyml). (Experimental.)
 
 ## `agda-explore` — interactive MCP server for agents
 
 A long-running stdio MCP daemon that loads the expanded `graph.json`
 once and answers point queries — the questions an agent would otherwise
-approximate with `grep`:
+approximate with `grep`. Read-side catalogue (14 tools):
 
 ```
-locate · callers · callees · impact · path · roots ·
-type_of · similar_types · similar_bodies · search · unused
+locate · callers · callees · impact · path · roots · type_of ·
+similar_types · similar_bodies · find_lemma · search · unused ·
+rebuild · status
 ```
 
-It regenerates the graph on the fly: when sources change it re-runs
-`agda-deps` as a subprocess (reusing Agda's `.agdai` cache) and
-hot-swaps the in-memory `Index`. A Claude Code plugin under
-[`plugin/`](plugin/README.md) bundles the server with a skill and two
-Agda agents.
+When sources change it re-runs `agda-deps` as a subprocess (reusing
+Agda's `.agdai` cache) and hot-swaps the in-memory `Index`. A Claude
+Code plugin under [`plugin/`](plugin/README.md) bundles the server with
+a skill and two Agda agents.
 
 ```sh
 agda-explore --version
@@ -124,12 +117,10 @@ agda-explore --project /path/to/agda/project    # stdio MCP server
 
 Config: [`.agda-explore.yml`](#agda-exploreyml).
 
-**Write-side interaction bridge (opt-in).** With `--enable-interact`
-(or `enable-interact: true` in the config) and `agda` on `$PATH`, the
-daemon *also* exposes Agda-validated **authoring + editing** tools backed
-by a live `agda --interaction-json` session — the write counterpart to the
-read queries above, and the validated alternative to a blind `Write` +
-`agda File`:
+**Write-side interaction bridge (opt-in).** With `--enable-interact` and
+`agda` on `$PATH`, the daemon also exposes Agda-validated authoring +
+editing tools backed by a live `agda --interaction-json` session — the
+validated alternative to a blind `Write` + `agda File`. 18 tools:
 
 ```
 load · check · goal_type · goal_context · infer · normalize · lemmas ·
@@ -137,56 +128,25 @@ new_module · give_file · case_split · refine · give · give_many ·
 construct · auto · stage · promote · discard
 ```
 
-*Authoring.* `new_module` scaffolds a fresh module — a `module … where`
-header matching the path, literate fences for a `.lagda.md` path, imports
-**resolved off the dependency graph** from the bare names you list, and a
-`name : T` / `name = ?` hole per stub — and type-checks it. `give_file`
-validates whole-file `content` (or an `append` block) under the zero-axiom
-contract and returns a diff — the validated counterpart to `Write`, for code
-that must honour `--safe` / 0-postulate. After editing a file as text,
-`check` type-checks it over the warm session and returns a ✓/✗ verdict with
-**every** error and warning plus the remaining open goals — `agda File`, but
-reusing the session and handing the goals back so you pivot straight to
-filling them.
+Every mutator (`case_split` / `refine` / `give` / `auto`) is
+Agda-validated and by default returns a unified diff **without writing**;
+pass `write:true` to apply, reload, and return the diff plus refreshed
+goals in one round-trip. A hard zero-axiom contract refuses any
+`postulate`, termination/coverage/unsafe-`OPTIONS` pragma, or escape
+hatch up front. `.lagda.md` literate sources are handled. Full detail:
+[`plugin/`](plugin/README.md).
 
-*Driving holes.* `load` opens a module and lists its goals as `g0, g1, …`
-with source positions; the mutators (`case_split` / `refine` / `give` /
-`auto`) are **Agda-validated** and by default return a **unified diff
-without writing**. Pass **`write:true`** and the bridge applies the edit,
-reloads, and returns the diff *plus the refreshed goals* in one round-trip
-(otherwise an id only stays put while a hole's position is unchanged, so
-re-`load` after applying a diff). `give_many` fills several independent holes
-in one load (one atomic diff); `construct` runs a planned heterogeneous batch
-(`give`/`refine`/`case_split`/`auto`) against one warm load; `lemmas` searches
-the project for a definition whose conclusion matches a live goal's type, to
-reuse instead of re-deriving. A term that doesn't typecheck comes back as the
-localized Agda error with the file untouched, and any input using
-`postulate`, a termination/coverage/unsafe-`OPTIONS` pragma, or another
-escape hatch is refused up front (a hard zero-axiom contract, enforced over
-whole-file content too). `.lagda.md` literate sources are handled (edits land
-inside the code fence).
+```sh
+agda-explore --project /path/to/agda/project --enable-interact
+```
 
-`stage` / `promote` / `discard` build a *new* definition in isolation:
-`stage` opens an ephemeral scratch module under `.agda-explore/scratch/`
-(seeded with a target's imports, so `load` re-checks only the scratch's
-tiny closure instead of the target's whole module); construct the def
-there with the usual tools, then `promote` splices it into the real
-target — merging missing imports and re-validating the **whole target**
-in Agda, returning a diff on success or the localized error with nothing
-changed — or `discard` to abandon it. For most new definitions `give_file`
-/ `new_module` are more direct.
-
-**Live web inspector (opt-in).** With `--inspect` (or `inspect: true` in
-the config) the daemon serves a self-contained localhost web page — a
-live **activity feed** of every tool call (collapsed to one line, click
-to expand its args + result) plus an **editing view** (the loaded module
-with each proposed diff highlighted over the on-disk file) — over
-Server-Sent Events at `http://127.0.0.1:7000`. It is a read-only *side
-channel* for watching what an agent is doing: off by default,
-localhost-only, no auth, and it never touches the JSON-RPC stdout.
-`--inspect-port N` sets the start port (implies `--inspect`); on a clash
-the daemon probes upward so several projects coexist, and the page header
-names the project + bound port so you can tell tabs apart.
+**Live web inspector (opt-in).** With `--inspect` the daemon serves a
+self-contained localhost page over Server-Sent Events at
+`http://127.0.0.1:7000`: a live activity feed of every tool call plus an
+editing view of the loaded module with each proposed diff highlighted.
+Read-only side channel, off by default, localhost-only, never touches
+JSON-RPC stdout. `--inspect-port N` sets the start port (implies
+`--inspect`); on a clash the daemon probes upward.
 
 ```sh
 agda-explore --project /path/to/agda/project --inspect      # → http://127.0.0.1:7000
@@ -195,26 +155,24 @@ agda-explore --project /path/to/agda/project --inspect      # → http://127.0.0
 ## Configuration (YAML)
 
 Each tool reads an optional YAML config. **Every key is a kebab-case
-mirror of a CLI flag** (`--json-out` ↔ `json-out`; the `no-*` keys
-mirror the negative flags). Merge order is **defaults → config → CLI**
-— the command line always wins. A bad value type (and, for
-`agda-optimization`, an unknown key) fails fast with an error naming the
-file / section / key, and exits 1. A stderr breadcrumb
-(`<binary>: applied config from /abs/path/…`) fires when a config is
-applied, suppressed by `--quiet` (where present), `agda-unused`'s
+mirror of a CLI flag** (`--json-out` ↔ `json-out`; `no-*` keys mirror
+the negative flags). Merge order is **defaults → config → CLI** — the
+command line always wins. A bad value type (and, for `agda-optimization`,
+an unknown key) fails fast with an error naming the file / section / key,
+exit 1. A stderr breadcrumb (`<binary>: applied config from …`) fires
+when a config applies, suppressed by `--quiet`, `agda-unused`'s
 `--json-out`, and `agda-optimization`'s `--json`.
 
 Discovery is identical for all four binaries — first match wins:
 
 1. `--config=PATH`
-2. `$AGDA_<TOOL>_CONFIG` — one of `AGDA_UNUSED_CONFIG`,
+2. `$AGDA_<TOOL>_CONFIG` — `AGDA_UNUSED_CONFIG`,
    `AGDA_OPTIMIZATION_CONFIG`, `AGDA_GOALS_CONFIG`, `AGDA_EXPLORE_CONFIG`
 3. `./.agda-<tool>.yml` (or `.yaml`) in the current directory
-4. walking up from the cwd to the first ancestor containing a
-   `*.agda-lib`, and the dotfile there
+4. walking up to the first ancestor containing a `*.agda-lib`, and the
+   dotfile there
 
-An empty file (`{}`) is valid; every key is optional and an omission
-leaves the default in place.
+An empty file (`{}`) is valid; every key is optional.
 
 ### `.agda-unused.yml`
 
@@ -227,8 +185,8 @@ leaves the default in place.
 | `roots`    | positional `ROOTS` | Source roots to scan (YAML list).                          |
 | `exclude`  | `--exclude`        | Globs whose matching findings are dropped.                 |
 
-`json:` + `roots:` supply what were the required CLI inputs, so
-`agda-unused` can run with no arguments.
+`json:` + `roots:` supply the required CLI inputs, so `agda-unused` can
+run with no arguments.
 
 ```yaml
 json: out/deps.json
@@ -242,13 +200,10 @@ exclude: ["**/Init.agda"]
 ### `.agda-optimization.yml`
 
 A top-level `global:` section plus one section per subcommand, named in
-**kebab-case** (`load-bearing`, not `loadBearing`). All optional; missing
-keys fall through to defaults. Within a subcommand section the keys are
-that subcommand's `--help` flags without the `--` (e.g. `--min-support`
-↔ `min-support`); run `agda-optimization <subcommand> --help` for the
-authoritative list.
-
-`global:` keys: `json` (bool) and `out` (output path).
+**kebab-case** (`load-bearing`, not `loadBearing`). Within a section the
+keys are that subcommand's `--help` flags without the `--` (e.g.
+`--min-support` ↔ `min-support`). `global:` keys: `json` (bool) and `out`
+(output path).
 
 ```yaml
 global:
@@ -287,29 +242,25 @@ roots: [src/]
 
 ### `.agda-explore.yml`
 
-Mirrors the daemon's CLI flags. Path keys: `entry` (a single Agda entry
-module), `entries` (a *list* of entry modules — see below), `include`
-(include paths, list), `graph` (a prebuilt `graph.json` for preloaded
-mode), `project`, `out-dir`, `agda-deps-bin`, `agda-unused-bin`.
-Behaviour toggles (bools): `no-term-hashes`, `no-signatures`,
-`normalise-signatures`, `show-implicit`, `no-auto-rebuild`, `no-watch`,
-`enable-interact` (expose the write-side interaction bridge), `inspect`
-(serve the localhost web inspector); plus `min-term-depth` (int),
-`inspect-port` (the inspector's start port, default 7000; setting it
-implies `inspect`), `agda-bin` (the `agda` binary for interaction
-sessions, else `$AGDA_BIN` / `$PATH`), and `agda-arg` (a list of extra
-flags for `agda --interaction-json`, e.g. `--safe`).
+Mirrors the daemon's CLI flags. Path keys: `entry` (single Agda entry
+module), `entries` (a *list* of entry modules), `include` (include paths,
+list), `graph` (a prebuilt `graph.json` for preloaded mode), `project`,
+`out-dir`, `agda-deps-bin`, `agda-unused-bin`. Behaviour toggles (bools):
+`no-term-hashes`, `no-signatures`, `normalise-signatures`,
+`show-implicit`, `no-auto-rebuild`, `no-watch`, `enable-interact`
+(write-side bridge), `inspect` (web inspector); plus `min-term-depth`
+(int), `inspect-port` (start port, default 7000; implies `inspect`),
+`agda-bin` (else `$AGDA_BIN` / `$PATH`), and `agda-arg` (extra flags for
+`agda --interaction-json`, e.g. `--safe`).
 
 **Multiple entry modules.** `--entry` is repeatable on the CLI and the
 config accepts an `entries:` list alongside the back-compat scalar
-`entry:` (the two are unioned, deduplicated). When more than one entry
-is configured the daemon builds **one graph over the union of all the
-listed entries' import closures** (it runs `agda-deps` once per entry
-and unions the results in-process), so `locate` / `callers` / `type_of`
-/ `search` etc. resolve names anywhere across the combined closures. A
-single entry is unchanged (one `agda-deps` run). CLI `--entry` *appends*
-to any config `entry:` / `entries:`, mirroring how `-i` appends to
-config includes.
+`entry:` (the two are unioned, deduplicated). With more than one entry
+the daemon builds **one graph over the union of all entries' import
+closures** (runs `agda-deps` once per entry, unions in-process), so
+`locate` / `callers` / `type_of` / `search` resolve names across the
+combined closures. CLI `--entry` *appends* to config `entry:` / `entries:`,
+mirroring how `-i` appends to config includes.
 
 ```yaml
 project: .
@@ -329,8 +280,8 @@ inspect-port: 7010                  # …on this port (else probes up from 7000)
 
 - **`agda-explore` → `agda-deps`.** Resolution precedence:
   `--agda-deps-bin` > `$AGDA_DEPS_BIN` > `$PATH`. Put `agda-deps` on
-  your `$PATH` (or pin it). Preloaded mode (point the daemon at an
-  existing `graph.json`) needs no `agda-deps` at all.
+  `$PATH` (or pin it). Preloaded mode (an existing `graph.json`) needs no
+  `agda-deps`.
 - **`agda-goals` → `agda`.** Needs `agda` on `$PATH`.
 
 ## The wire contract
@@ -343,19 +294,18 @@ inspect-port: 7010                  # …on this port (else probes up from 7000)
 - `nodeKeyVersion` tracks the node-naming convention (orthogonal to the
   schema version). `agda-explore` rebuilds/warns on a mismatch against
   `AgdaMcp.State.currentNodeKeyVersion` — **keep that constant in
-  lock-step with `agda-deps`' `AgdaDeps.Deps.nodeKeyVersion`** across
-  the two repos.
+  lock-step with `agda-deps`' `AgdaDeps.Deps.nodeKeyVersion`** across the
+  two repos.
 - Expanded JSON carries optional `definitionEdgesProvenance`
-  (`signature | body | where | with | unknown`) and, under the
-  producer's `--with-signatures`, an optional per-definition `"type"`.
+  (`signature | body | where | with | unknown`) and, under the producer's
+  `--with-signatures`, an optional per-definition `"type"`.
 
 A machine-readable JSON Schema (draft 2020-12) for the expanded form
 lives in the producer repo at `schema/graph-v2-expanded.schema.json`;
-validate any `deps.json` (including the fixtures here) against it with
+validate any `deps.json` against it with
 `pipx run check-jsonschema --schemafile <path>/graph-v2-expanded.schema.json test/deps.json`.
-For the full schema prose (including the `packed` form and the `--lazy`
-split-file layout used only by `agda-deps`' HTML views), see the
-`agda-deps` repo.
+For the full schema prose (the `packed` form and `--lazy` split-file
+layout used only by `agda-deps`' HTML views), see the `agda-deps` repo.
 
 ## Relevant links
 

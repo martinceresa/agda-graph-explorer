@@ -1,9 +1,7 @@
--- | Thin re-export of the shared @--interaction-json@ reply parser.
---
--- The implementation was promoted into the @agda-graph@ library
--- ('AgdaGraph.Interaction.Protocol') so it can be shared with
--- @agda-explore@'s write-side interaction bridge. This module keeps the
--- historical @AgdaGoals.Protocol@ name (mirroring 'AgdaGoals.Canon').
+-- | Thin re-export of the shared @--interaction-json@ reply parser
+-- ('AgdaGraph.Interaction.Protocol'), which lives in the @agda-graph@
+-- library so @agda-goals@ and @agda-explore@'s write-side interaction
+-- bridge share one parser.
 module AgdaGoals.Protocol
   ( -- * Parsed wire shapes
     Reply(..)

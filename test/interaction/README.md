@@ -42,12 +42,10 @@ is a manual, agda-required step — run `bash regen.sh` (needs `agda` on `$PATH`
 
 ## `auto` / Mimer
 
-Resolved. The earlier "cannot read `Cmd_autoOne`" was a wrong arg shape, not
-a missing constructor: Agda 2.9's signature is
-`Cmd_autoOne Rewrite InteractionId Range String` (the leading `Rewrite` is
-mandatory; we were omitting it). With it, Mimer runs and replies with a
-`GiveAction` carrying the found term — the `auto` MCP tool fills the hole
-(diff) or reports no solution.
+Agda 2.9's signature is `Cmd_autoOne Rewrite InteractionId Range String` — the
+leading `Rewrite` is mandatory (omit it and Mimer "cannot read" the command).
+With it, Mimer runs and replies with a `GiveAction` carrying the found term —
+the `auto` MCP tool fills the hole (diff) or reports no solution.
 
 ## End-to-end convergence test (`convergence.py`)
 

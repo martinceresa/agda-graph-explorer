@@ -9,8 +9,7 @@
 -- wire shape, shared by both @agda-goals@ (which only needs
 -- @AllGoalsWarnings@) and @agda-explore@'s write-side interaction
 -- bridge (which needs the goal-specific, give, and make-case replies
--- too). It was promoted out of @AgdaGoals.Protocol@ — that module is
--- now a thin re-export.
+-- too). @AgdaGoals.Protocol@ re-exports this module.
 --
 -- The protocol streams one JSON object per line, optionally prefixed
 -- by the @JSON> @ readiness prompt. The object's @kind@ field

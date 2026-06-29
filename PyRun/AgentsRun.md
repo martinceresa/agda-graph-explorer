@@ -4,7 +4,7 @@ A field manual for an **agent** (or anyone) who needs to exercise every tool in
 this repository. Two ways in:
 
 - **The fast path** — run the PyRun harness, which drives all five surfaces
-  through ~354 declarative cases and writes pass/fail reports. Use this to
+  through 354 declarative cases and writes pass/fail reports. Use this to
   prove "everything still works" or to reproduce the battle test.
 - **The direct path** — invoke each executable yourself with the exact command
   shapes below. Use this when you're investigating one tool, crafting a new
@@ -245,10 +245,11 @@ loads the graph once and answers point queries. Two launch modes:
 "$EXPLORE" --version    # build identity (version + git rev + date + GHC)
 ```
 
-The 13 tools (from `src/AgdaMcp/Tools.hs`):
+The 14 tools (from `src/AgdaMcp/Tools.hs`):
 `locate · callers · callees · impact · path · roots · type_of ·
-similar_types · similar_bodies · search · unused · rebuild · status`.
-(`type_of` / `similar_*` need signatures/term-hashes → use `graph-full`.)
+similar_types · similar_bodies · find_lemma · search · unused · rebuild ·
+status`. (`type_of` / `similar_*` / `find_lemma` need signatures/term-hashes
+→ use `graph-full`.)
 
 Drive it by piping a handshake + one or more `tools/call`s on stdin; the daemon
 replies one JSON object per line and exits on EOF:
@@ -297,9 +298,8 @@ These are distilled from `CLAUDE.md` — read it for the full list.
   cache.
 - **`fiedler` is the only opt subcommand that shells out.** Distinguish
   missing-scipy (exit 3) from missing-helper-script (exit 2).
-- **A missing graph file** used to escape as an uncaught IOException — the
-  battle test pinned and then fixed several such rough edges; see
-  `../BattleTest/Impr.md` for the catalogue of findings and fixes.
+- **A missing graph file** produces a clean diagnostic, not an uncaught
+  IOException.
 
 ---
 

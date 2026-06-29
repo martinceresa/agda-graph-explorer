@@ -1408,8 +1408,9 @@ ensureWorker ss@ServerState{..}
 -- another doomed multi-minute @agda-deps@ pass. A real edit (or the fix to
 -- the failing module) moves the signature and re-enables the build, so the
 -- daemon self-heals; the 0.25s debounce is the only floor on wakeup rate.
--- This replaces the old fixed 2s self-rewake, which re-ran a ~minutes-long
--- pass back-to-back on an unchanged broken corpus.
+-- Gating on the source signature (rather than a fixed self-rewake interval)
+-- is deliberate: a fixed interval re-runs a ~minutes-long pass back-to-back
+-- on an unchanged broken corpus.
 watchWorker :: ServerState -> IO ()
 watchWorker ss = forever $ do
   takeMVar (ssWake ss)

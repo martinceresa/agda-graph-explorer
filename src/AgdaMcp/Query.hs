@@ -258,9 +258,8 @@ ownerOf ld d
   | not (isLocalName d) = Nothing
     -- The owner relation is keyed by the local def's id and precomputed
     -- once per snapshot ('AgdaMcp.State.buildOwnerMap'), so this is an
-    -- O(log n) lookup instead of the old full scan of all real defs on
-    -- every rendered result line. 'defId' equals the node id (see
-    -- 'buildIndex'), the same key the map is built under.
+    -- O(log n) lookup per rendered result line. 'defId' equals the node id
+    -- (see 'buildIndex'), the same key the map is built under.
   | otherwise           = IM.lookup (defId d) (ldOwnerMap ld)
 
 -- | @"  (in `owner`)"@ suffix for a local helper, else empty. Appended to

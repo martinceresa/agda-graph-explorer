@@ -5,32 +5,21 @@
 -- | Declarative per-flag specifications for the @agda-optimization@
 -- subcommands.
 --
--- Every analysis module currently hand-rolls three things in lock-step:
+-- Each subcommand declares one list of 'FlagSpec' values; three
+-- interpreters derive the argv fold, the YAML overlay, and the help block
+-- from that single list, so a flag is described in exactly one place:
 --
---   1. an argv fold ('parseOptions') with local @intK@ / @dblK@ / @textK@
---      / @enumK@ closures,
---   2. a YAML overlay ('applyConfig') with local @updI@ / @updD@ / @updB@
---      / @updT@ / @updS@ / @updEnum@ / @updTextList@ closures, and
---   3. a verbatim help-line block in 'AgdaOptimization.CLI.subFlags'.
---
--- This module factors that triple into one list of 'FlagSpec' values per
--- subcommand plus three interpreters that REPRODUCE the existing
--- semantics byte-for-byte:
---
---   * 'parseFlags'      — the argv fold (matches @--flag=val@ / @--flag val@
---     handling, switch handling, enum validation, and error wording; it
---     reuses "AgdaOptimization.CLIParse" so messages are identical).
+--   * 'parseFlags'      — the argv fold (@--flag=val@ / @--flag val@,
+--     switch handling, enum validation, error wording; reuses
+--     "AgdaOptimization.CLIParse").
 --   * 'applyFlagConfig' — the YAML overlay (reuses
---     "AgdaOptimization.Config" lookups so YAML parsing + errors match,
---     and honours the same nested per-subcommand section).
---   * 'renderFlagHelp'  — the verbatim help lines, to later replace the
---     hand-written @subFlags@ case arms.
+--     "AgdaOptimization.Config" lookups, honouring the nested
+--     per-subcommand section).
+--   * 'renderFlagHelp'  — the help lines for 'AgdaOptimization.CLI.subFlags'.
 --
 -- The 'FlagSpec' type is parameterised over a subcommand's @Options@
 -- record @o@: each value-taking constructor carries a SETTER that folds
--- the parsed value into @o@, exactly as today's per-module closures do.
---
--- This stage only ADDS the module; no analysis is migrated yet.
+-- the parsed value into @o@.
 module AgdaOptimization.FlagSpec
   ( -- * Spec type
     FlagSpec(..)

@@ -234,7 +234,7 @@ data Stats = Stats
 -- between coarse-grained deadline checks. The wall-clock budget
 -- (@--budget=<secs>@) is enforced by a reaper thread that flips a
 -- shared 'IORef'; when 0 (default) no reaper is spawned and the
--- pipeline behaviour is byte-identical to the pre-budget output.
+-- pipeline runs to completion unbounded.
 run :: Index -> GlobalOpts -> Options -> IO ()
 run ix gOpts opts = do
   let !txsAll = buildTransactions ix
