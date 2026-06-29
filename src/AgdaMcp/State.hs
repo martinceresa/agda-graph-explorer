@@ -47,8 +47,8 @@ import           Control.Concurrent.MVar  (MVar, modifyMVar_, newEmptyMVar,
                                            newMVar, takeMVar, tryPutMVar,
                                            tryTakeMVar, withMVar)
 import           Control.DeepSeq      (force)
-import           Control.Exception    (SomeException, evaluate, try)
-import           Control.Monad        (filterM, forM, forever, void)
+import           Control.Exception    (SomeException, evaluate, finally, try)
+import           Control.Monad        (filterM, forM, forever, void, when)
 import           Data.Aeson           (Value, eitherDecode, encode)
 import qualified Data.ByteString.Lazy as BL
 import           Data.IORef
@@ -61,16 +61,18 @@ import           Data.Text            (Text)
 import qualified Data.Text            as T
 import           Data.Time.Clock      (UTCTime, getCurrentTime)
 import qualified Data.Vector          as V
+import           GHC.IO.Handle.Lock   (LockMode (..), hTryLock, hUnlock)
 import           System.Directory     (createDirectoryIfMissing,
                                        doesDirectoryExist, doesFileExist,
                                        findExecutable, getModificationTime,
-                                       listDirectory)
+                                       listDirectory, renameFile)
 import           System.Environment   (getExecutablePath, lookupEnv)
 import           System.Exit          (ExitCode (..))
 import           System.FilePath      ((</>))
 import           System.FSNotify      (Event, WatchManager, eventPath,
                                        startManager, watchTree)
-import           System.IO            (hPutStrLn, stderr)
+import           System.IO            (IOMode (ReadWriteMode), hPutStrLn,
+                                       stderr, withFile)
 import           System.Mem           (performMajorGC)
 import           System.Process       (CreateProcess (..), proc,
                                        readCreateProcessWithExitCode)
@@ -626,11 +628,84 @@ runBuild Config{..}
           -- to @agda-unused --json=cfgGraphPath@; without this it would read
           -- a missing file (first run) or a stale single-entry leftover and
           -- silently disagree with every in-process query.
-          BL.writeFile cfgGraphPath (encode eg)
+          --
+          -- Publish atomically (temp + rename): a second daemon
+          -- passive-reading 'cfgGraphPath' under the build lock (see
+          -- 'runBuildShared') then never decodes a half-written union.
+          let !unionTmp = cfgGraphPath ++ ".tmp"
+          BL.writeFile unionTmp (encode eg)
+          renameFile unionTmp cfgGraphPath
           Right <$> loadedFromGraph cfgAutoResolveUnique cfgIncludes Nothing eg
 
 lastLines :: Int -> String -> String
 lastLines n = unlines . reverse . take n . reverse . lines
+
+-- ---------------------------------------------------------------------
+-- Cross-process build mutex
+-- ---------------------------------------------------------------------
+
+-- | The cross-process build-lock path for a project. One per
+-- 'cfgOutDir' (which is per project), so it naturally scopes the mutex to
+-- a single project's @.agda-explore@ working dirs.
+buildLockPath :: Config -> FilePath
+buildLockPath cfg = cfgOutDir cfg </> "build.lock"
+
+-- | Run @act@ holding an exclusive, advisory file lock (@flock(2)@ via
+-- 'hTryLock'), passing it whether the lock was acquired.
+--
+-- A daemon must hold this before it spawns @agda-deps@ into the shared
+-- @.agda-explore@ dirs. Two daemons started on the same project (e.g. two
+-- open editor/CLI sessions) would otherwise run @agda-deps@ into the same
+-- per-entry out-dirs at once, overwrite each other's partially-written
+-- graphs, and feed the failed-rebuild retry loop. The lock is held only
+-- for one build pass; the kernel releases it when the holder's handle is
+-- closed /or the process dies/, so a crashed builder hands off to the
+-- other daemon with no stale-lock bookkeeping.
+--
+-- Non-blocking: 'False' is passed when another daemon holds the lock, so
+-- the caller passive-reads the builder's graph instead of competing (see
+-- 'runBuildShared'). If the platform/filesystem cannot lock ('hTryLock'
+-- throws — e.g. some network mounts) we degrade to 'True' (behave as the
+-- sole builder): never worse than the pre-lock single-process world.
+withTryBuildLock :: FilePath -> (Bool -> IO a) -> IO a
+withTryBuildLock path act =
+  withFile path ReadWriteMode $ \h -> do
+    got <- tryLockBestEffort h
+    -- Unlock is best-effort too: when locking was unsupported (degraded
+    -- 'True') 'hUnlock' would throw, so swallow it; the handle close that
+    -- 'withFile' performs releases a real lock regardless.
+    act got `finally` when got (void (try (hUnlock h) :: IO (Either SomeException ())))
+  where
+    tryLockBestEffort h = either (const True) id
+      <$> (try (hTryLock h ExclusiveLock) :: IO (Either SomeException Bool))
+
+-- | 'runBuild' under the cross-process build mutex ('withTryBuildLock').
+-- The daemon that wins the lock runs the real @agda-deps@ build; a daemon
+-- that finds it held becomes a /passive reader/ — it loads the graph the
+-- winning daemon maintains at 'cfgGraphPath' instead of spawning a
+-- competing build. Preloaded mode and the no-entry case never spawn
+-- @agda-deps@, so they skip the lock entirely.
+--
+-- Passive-read freshness: the reader picks up whatever union the builder
+-- last published atomically (the temp+rename in 'runBuild'\'s multi-entry
+-- path); it may briefly trail the builder until its own next rebuild
+-- trigger. That is the intended trade — never two concurrent builders —
+-- and far cheaper than the collision it replaces (a try-lock + a file
+-- read, no @agda-deps@, and no 300 MB decode when no union exists yet).
+runBuildShared :: Config -> IO (Either String Loaded)
+runBuildShared cfg
+  | cfgPreloaded cfg || null (cfgEntries cfg) = runBuild cfg
+  | otherwise = do
+      createDirectoryIfMissing True (cfgOutDir cfg)
+      withTryBuildLock (buildLockPath cfg) $ \owner ->
+        if owner
+          then runBuild cfg
+          else do
+            hPutStrLn stderr
+              "agda-explore: another daemon holds the build lock for this \
+              \project; reading its published graph instead of running a \
+              \competing agda-deps."
+            loadLoaded (cfgAutoResolveUnique cfg) (cfgIncludes cfg) (cfgGraphPath cfg)
 
 -- ---------------------------------------------------------------------
 -- Live regeneration entry points
@@ -772,7 +847,7 @@ rebuildLocked ServerState{..} needBuild = withMVar ssRebuildLock $ \_ -> do
   where
     doBuild cur = do
       writeIORef ssDirty False
-      built <- runBuild ssConfig
+      built <- runBuildShared ssConfig
       case built of
         Right ld -> do
           writeIORef ssColdError Nothing       -- a good build clears cold-start state
@@ -806,7 +881,7 @@ rebuildLocked ServerState{..} needBuild = withMVar ssRebuildLock $ \_ -> do
 forceRebuild :: ServerState -> IO (Either String Loaded)
 forceRebuild ServerState{..} = withMVar ssRebuildLock $ \_ -> do
   writeIORef ssDirty False
-  built <- runBuild ssConfig
+  built <- runBuildShared ssConfig
   case built of
     Right ld -> do
       writeIORef ssColdError Nothing
