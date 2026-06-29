@@ -71,7 +71,7 @@ import           System.Directory     (canonicalizePath,
 import           System.Environment   (getExecutablePath, lookupEnv)
 import           System.Exit          (ExitCode (..))
 import           System.FilePath      ((</>))
-import           System.FSNotify      (Event, WatchManager, eventPath,
+import           System.FSNotify      (Event (..), WatchManager, eventPath,
                                        startManager, watchTree)
 import           System.IO            (IOMode (ReadWriteMode), hPutStrLn,
                                        stderr, withFile)
@@ -294,6 +294,18 @@ data ServerState = ServerState
     -- ^ Retained per-entry graphs + closures for incremental rebuilds
     -- ('EntryCache'). Empty until the first full build; written empty (so
     -- nothing is retained) whenever 'cfgIncremental' is off.
+  , ssExtraEntries :: !(IORef [FilePath])
+    -- ^ Runtime /ad-hoc/ entries (Stage B): brand-new modules nothing in
+    -- the configured closures imports yet, surfaced so a freshly-authored
+    -- file (e.g. via the bridge's @new_module@) is queryable without being
+    -- added to @entries:@. Appended to 'cfgEntries' for builds; pruned when
+    -- the file is deleted or fails to build. Incremental-mode only.
+  , ssAddedFiles  :: !(IORef (S.Set FilePath))
+    -- ^ Files the watcher saw /created/ ('Added' events, canonicalised)
+    -- since the last build — the new-module candidates. Keyed on the create
+    -- event (not modify) so a genuinely-new file is told apart from a
+    -- path-mismatch on an existing closure file (which must stay a safe full
+    -- rebuild, never an ad-hoc add that could shadow a stale entry).
   , ssInspect     :: !(Maybe InspectHub)
     -- ^ The localhost web-inspector event bus, or 'Nothing' when
     -- @--inspect@ is off. When 'Nothing' every 'AgdaMcp.Inspect.emitInspect'
@@ -319,6 +331,8 @@ newServerState c =
     <*> newIORef Nothing
     <*> newIORef S.empty
     <*> newIORef M.empty
+    <*> newIORef []
+    <*> newIORef S.empty
     <*> (if cfgInspect c then Just <$> newInspectHub else pure Nothing)
 
 -- ---------------------------------------------------------------------
@@ -644,54 +658,75 @@ closureFiles eg = S.fromList <$> mapM safeCanon (M.elems (egModuleFiles eg))
 --     graph.
 --
 -- Otherwise re-run exactly the entries whose closure contains a changed
--- file. Reused entries' graphs are byte-identical to a fresh run (same
+-- file (plus any not yet in the cache — a new ad-hoc entry, 'Nothing'
+-- below). Reused entries' graphs are byte-identical to a fresh run (same
 -- sources + @.agdai@ ⇒ deterministic @agda-deps@), so the union — and thus
 -- every query — is identical to a full rebuild.
-chooseReRun :: Config -> Bool -> Bool -> EntryCache -> S.Set FilePath
+--
+-- @newAdhoc@ (Stage B) are brand-new modules being added as ad-hoc entries
+-- this build: they are legitimately in no closure /yet/, so they are
+-- excluded from the unmatched-⇒-full check (they become entries, not a
+-- reason to rebuild the world) and re-run via the 'Nothing' branch.
+chooseReRun :: Config -> Bool -> Bool -> EntryCache -> S.Set FilePath -> S.Set FilePath
             -> (Int -> FilePath -> Bool)
-chooseReRun cfg forceFull watching cache dirty
+chooseReRun cfg forceFull watching cache dirty newAdhoc
   | runAll    = \_ _ -> True
   | otherwise = \_ e -> case M.lookup e cache of
                           Just (_, cl) -> not (S.null (S.intersection cl dirty))
                           Nothing      -> True
   where
-    haveAll   = all (`M.member` cache) (cfgEntries cfg)
-    closures  = S.unions [ cl | (_, cl) <- M.elems cache ]
-    unmatched = not (S.null (S.filter (`S.notMember` closures) dirty))
-    runAll    =  forceFull
+    closures   = S.unions [ cl | (_, cl) <- M.elems cache ]
+    dirtyMatch = dirty `S.difference` newAdhoc
+    unmatched  = not (S.null (S.filter (`S.notMember` closures) dirtyMatch))
+    runAll     =  forceFull
               || not (cfgIncremental cfg)
               || not watching
-              || not haveAll
-              || S.null dirty
+              || M.null cache             -- no prior build to reuse → full
+              || (S.null dirty && S.null newAdhoc)  -- nothing changed/added → full (first build)
               || unmatched
 
--- | Multi-entry build with reuse: re-run @agda-deps@ for the entries
+-- | Multi-entry build with reuse over the given entry list (configured +
+-- any ad-hoc Stage-B entries): re-run @agda-deps@ for the entries
 -- 'chooseReRun' selects, reuse the cached 'ExpandedGraph' for the rest,
 -- then union (in entry order — deterministic) and index. Returns the new
 -- snapshot /and/ the refreshed per-entry cache. The union is published
 -- atomically (temp + rename) so a second daemon passive-reading
 -- 'cfgGraphPath' under the build lock never decodes a half-written file.
--- A single entry that fails aborts the whole build with its diagnostic.
-buildMulti :: Config -> FilePath -> (Int -> FilePath -> Bool) -> EntryCache
+--
+-- A failing /configured/ entry aborts the whole build with its diagnostic
+-- (matches single-entry semantics). A failing /ad-hoc/ entry (a new module
+-- that doesn't build yet) is dropped with a stderr note instead — a
+-- half-authored scratch module must not take the whole graph down; it
+-- reappears once it builds. The caller prunes dropped ad-hoc entries by
+-- keeping only those present in the returned cache.
+buildMulti :: Config -> [FilePath] -> FilePath -> (Int -> FilePath -> Bool) -> EntryCache
            -> IO (Either String (Loaded, EntryCache))
-buildMulti cfg deps reRun cache = do
-  egsE <- forM (zip [0 :: Int ..] (cfgEntries cfg)) $ \(i, entry) ->
+buildMulti cfg entries deps reRun cache = do
+  let cfgSet = S.fromList (cfgEntries cfg)
+      onFail entry err
+        | entry `S.member` cfgSet = pure (Left err)                -- configured: fatal
+        | otherwise = do                                           -- ad-hoc: drop + warn
+            hPutStrLn stderr ("agda-explore: dropping ad-hoc module " ++ entry
+                                ++ " (does not build): " ++ takeWhile (/= '\n') err)
+            pure (Right Nothing)
+  egsE <- forM (zip [0 :: Int ..] entries) $ \(i, entry) ->
     case M.lookup entry cache of
-      Just (eg, cl) | not (reRun i entry) -> pure (Right (entry, eg, cl))   -- reuse
+      Just (eg, cl) | not (reRun i entry) -> pure (Right (Just (entry, eg, cl)))   -- reuse
       _ -> do
         let outDir = cfgOutDir cfg </> ("entry-" ++ show i)
         r <- runOneEntry cfg deps outDir entry
         case r of
-          Left err -> pure (Left err)
+          Left err -> onFail entry err
           Right gp -> do
             de <- decodeGraphFile gp
             case de of
-              Left err -> pure (Left err)
-              Right eg -> do cl <- closureFiles eg; pure (Right (entry, eg, cl))
+              Left err -> onFail entry err
+              Right eg -> do cl <- closureFiles eg; pure (Right (Just (entry, eg, cl)))
   case sequence egsE of
     Left err -> pure (Left err)
-    Right rs -> do
-      let !eg      = unionExpandedGraphs [ g | (_, g, _) <- rs ]
+    Right mrs -> do
+      let rs       = catMaybes mrs
+          !eg      = unionExpandedGraphs [ g | (_, g, _) <- rs ]
           newCache = M.fromList [ (e, (g, cl)) | (e, g, cl) <- rs ]
           unionTmp = cfgGraphPath cfg ++ ".tmp"
       BL.writeFile unionTmp (encode eg)
@@ -789,28 +824,55 @@ runBuildShared ss forceFull
           _       -> do
             cache    <- readIORef (ssEntryCache ss)
             watching <- isWatching ss
-            -- Snapshot + clear the changed-file set atomically: an edit
-            -- landing mid-build accumulates into the now-empty set for the
-            -- next round (mirrors how 'ssDirty' is cleared before the build).
+            extras0  <- readIORef (ssExtraEntries ss)
+            -- Snapshot + clear the changed/added sets atomically: edits and
+            -- creates landing mid-build accumulate into the now-empty sets
+            -- for the next round (mirrors how 'ssDirty' is cleared up front).
             dirty <- atomicModifyIORef' (ssDirtyFiles ss) (\s -> (S.empty, s))
-            let reRun  = chooseReRun cfg forceFull watching cache dirty
-                nTotal = length (cfgEntries cfg)
-                nRun   = length [ () | (i, e) <- zip [0 :: Int ..] (cfgEntries cfg), reRun i e ]
+            added <- atomicModifyIORef' (ssAddedFiles ss) (\s -> (S.empty, s))
+            -- Stage B (incremental only): surface brand-new modules as ad-hoc
+            -- entries. A created file in no known closure and not already an
+            -- entry becomes one; deleted ad-hoc entries are pruned (the file
+            -- is gone). With incremental off there are no ad-hoc entries.
+            (allEntries, newAdhoc) <-
+              if cfgIncremental cfg
+                then do
+                  extrasAlive <- filterM doesFileExist extras0
+                  let closures = S.unions [ cl | (_, cl) <- M.elems cache ]
+                      known    = S.fromList (cfgEntries cfg ++ extrasAlive)
+                      adhoc    = [ f | f <- S.toList added
+                                     , f `S.notMember` closures, f `S.notMember` known ]
+                  pure (cfgEntries cfg ++ extrasAlive ++ adhoc, S.fromList adhoc)
+                else pure (cfgEntries cfg, S.empty)
+            let reRun  = chooseReRun cfg forceFull watching cache dirty newAdhoc
+                nTotal = length allEntries
+                nRun   = length [ () | (i, e) <- zip [0 :: Int ..] allEntries, reRun i e ]
             hPutStrLn stderr $
               "agda-explore: " ++ (if nRun == nTotal then "full" else "incremental")
                 ++ " rebuild — re-running " ++ show nRun ++ "/" ++ show nTotal
                 ++ " entr" ++ (if nTotal == 1 then "y" else "ies")
-                ++ (if nRun == nTotal then "" else " (changed: " ++ show (S.size dirty) ++ " file(s))")
-            r <- buildMulti cfg deps reRun cache
+                ++ (if nRun == nTotal then "" else " (changed: " ++ show (S.size dirty) ++ " file(s)"
+                      ++ (if S.null newAdhoc then "" else ", +" ++ show (S.size newAdhoc) ++ " new") ++ ")")
+            r <- buildMulti cfg allEntries deps reRun cache
             case r of
               Left err -> do
-                modifyIORef' (ssDirtyFiles ss) (S.union dirty)   -- restore for retry
+                -- Restore the snapshots so the retry still covers them.
+                modifyIORef' (ssDirtyFiles ss) (S.union dirty)
+                modifyIORef' (ssAddedFiles ss) (S.union added)
                 pure (Left err)
               Right (ld, newCache) -> do
                 -- Retain per-entry graphs only when incremental is on (the
                 -- RAM-for-speed trade); off ⇒ empty cache ⇒ every build is
                 -- full and nothing is held between rebuilds.
                 writeIORef (ssEntryCache ss) (if cfgIncremental cfg then newCache else M.empty)
+                -- Keep only ad-hoc entries that actually built (present in
+                -- the cache) — drops new modules that failed to compile and
+                -- any that vanished. Empty when incremental is off.
+                let cfgSet = S.fromList (cfgEntries cfg)
+                writeIORef (ssExtraEntries ss)
+                  (if cfgIncremental cfg
+                     then [ e | e <- allEntries, e `S.notMember` cfgSet, e `M.member` newCache ]
+                     else [])
                 pure (Right ld)
 
 -- ---------------------------------------------------------------------
@@ -1116,6 +1178,12 @@ startWatcher ss@ServerState{..}
       -- re-run only the entries whose closure it touches (see 'chooseReRun').
       p <- safeCanon (eventPath ev)
       modifyIORef' ssDirtyFiles (S.insert p)
+      -- A created file is a new-module candidate (Stage B): tracked
+      -- separately so a create is told apart from a modify of an existing
+      -- file (see 'ssAddedFiles' / the ad-hoc-entry logic in 'runBuildShared').
+      case ev of
+        Added{} -> modifyIORef' ssAddedFiles (S.insert p)
+        _       -> pure ()
       -- Serve-stale parity for live interaction sessions: a source change
       -- on disk marks every open session dirty so it reloads (refreshing
       -- its stable-goal map) on next use, rather than eagerly reloading a
