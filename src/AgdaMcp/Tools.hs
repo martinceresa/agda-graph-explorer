@@ -447,11 +447,14 @@ statusText ss = do
   bin      <- binaryIdent
   banner   <- stalenessBanner ss
   watching <- isWatching ss
-  -- A plain IORef read — status never acquires the rebuild lock, so it is
+  -- Plain IORef reads — status never acquires the rebuild lock, so it stays
   -- answerable even while a background rebuild holds it (the point of
-  -- serve-stale). True ⇒ a rebuild is pending/in-flight and queries are
-  -- being served from the prior snapshot until it lands.
+  -- serve-stale). `dirty` ⇒ a rebuild is pending; `building` ⇒ one is
+  -- actually running right now (ssDirty is cleared at build start, so it
+  -- alone goes False mid-build — see 'AgdaMcp.State.ssBuilding'). Either way
+  -- queries are served from the prior snapshot until the build lands.
   dirty    <- readIORef (ssDirty ss)
+  building <- readIORef (ssBuilding ss)
   let c = ssConfig ss
       base = T.unlines
         [ "agda-explore status"
@@ -473,7 +476,7 @@ statusText ss = do
                                   else if cfgWatch c then "polling (watcher unavailable)"
                                   else "polling (watcher disabled)")
         , "  rebuild:      " <> (if cfgPreloaded c then "n/a (preloaded)"
-                                  else if dirty
+                                  else if dirty || building
                                     then "in flight (serving stale; status never blocks on it)"
                                     else "idle (snapshot is fresh)")
         , "  term hashes:  " <> (if cfgWithHashes c then "on" else "off")

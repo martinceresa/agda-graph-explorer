@@ -234,6 +234,15 @@ data ServerState = ServerState
   , ssLoaded      :: !(IORef (Maybe Loaded))
   , ssStartedAt   :: !UTCTime               -- ^ when this daemon process started.
   , ssDirty       :: !(IORef Bool)          -- ^ set by the watcher (or a serve-stale query); a rebuild is pending.
+  , ssBuilding    :: !(IORef Bool)
+    -- ^ True while a rebuild holds 'ssRebuildLock' and is actually running
+    -- @agda-deps@ (raised around the build in 'rebuildLocked' / 'forceRebuild'
+    -- / 'kickRebuild', reset in a 'finally'). Distinct from 'ssDirty', which
+    -- is /cleared/ up front at build start so a mid-build edit re-dirties — so
+    -- during the (minutes-long) subprocess 'ssDirty' reads 'False' and cannot
+    -- itself signal "a rebuild is in flight". 'ensureFresh' and @status@ OR
+    -- this in, so a snapshot being actively superseded is served stale (with
+    -- the footer) rather than presented as fresh.
   , ssRebuildLock :: !(MVar ())             -- ^ serialises rebuilds (watch worker vs. query).
   , ssWake        :: !(MVar ())             -- ^ coalescing watcher/query→worker wakeup.
   , ssWatcher     :: !(IORef (Maybe WatchManager))
@@ -321,7 +330,8 @@ newServerState c =
   ServerState c
     <$> newIORef Nothing
     <*> getCurrentTime
-    <*> newIORef False
+    <*> newIORef False          -- ssDirty
+    <*> newIORef False          -- ssBuilding
     <*> newMVar ()
     <*> newEmptyMVar
     <*> newIORef Nothing
@@ -937,8 +947,13 @@ ensureFresh ss@ServerState{..}
         Nothing -> firstBuild
         Just ld -> do
           warranted <- rebuildWarranted ld
+          -- A rebuild already in flight (the worker cleared 'ssDirty' up front,
+          -- so 'warranted' can read False mid-build) means this snapshot is
+          -- about to be superseded: flag it stale so the footer fires rather
+          -- than presenting soon-to-be-old data as fresh.
+          building  <- readIORef ssBuilding
           if not warranted
-            then pure (Right (ld, False))      -- fresh enough
+            then pure (Right (ld, building))   -- fresh enough (unless a build is in flight)
             else do
               -- Serve stale + schedule an async rebuild. Coalescing:
               -- setting ssDirty and a single tryPutMVar is idempotent under
@@ -951,9 +966,10 @@ ensureFresh ss@ServerState{..}
                   ensureWorker ss
                   void (tryPutMVar ssWake ())
                   pure (Right (ld, True))
-                -- Auto-rebuild off: do not schedule a (looping) background
-                -- rebuild; serve the snapshot as-is, not flagged stale.
-                else pure (Right (ld, False))
+                -- Auto-rebuild off: no background rebuild is coming, so don't
+                -- cry stale — unless a manual rebuild (the `rebuild` tool) is
+                -- actually in flight right now.
+                else pure (Right (ld, building))
   where
     -- Is a rebuild warranted for the current snapshot? Watched: trust the
     -- dirty flag (no scan); polled: re-scan and compare the ScanSig. Both
@@ -1016,6 +1032,16 @@ commitBuild ServerState{..} ld = do
   writeIORef ssLoaded (Just ld)
   performMajorGC
 
+-- | Run a build action with 'ssBuilding' raised for its whole duration
+-- (subprocess + 'commitBuild'), so a concurrent query — and @status@ — sees
+-- "a rebuild is in flight" and serves the current snapshot stale, even though
+-- 'ssDirty' was cleared up front to catch mid-build edits. Reset in a
+-- 'finally' so a build exception can't leave the flag stuck on. Call only
+-- while holding 'ssRebuildLock'.
+withBuilding :: ServerState -> IO a -> IO a
+withBuilding ServerState{..} act =
+  (writeIORef ssBuilding True >> act) `finally` writeIORef ssBuilding False
+
 -- | Record the source signature a build failed on, so the background
 -- worker change-gates the retry (see 'ssFailSig' / 'watchWorker') instead
 -- of re-spawning @agda-deps@ over the same broken sources. The failure
@@ -1047,7 +1073,7 @@ rebuildLocked ss@ServerState{..} needBuild = withMVar ssRebuildLock $ \_ -> do
       if go then doBuild cur else pure (Right ld)
     Nothing -> doBuild cur
   where
-    doBuild cur = do
+    doBuild cur = withBuilding ss $ do
       writeIORef ssDirty False
       built <- runBuildShared ss False
       case built of
@@ -1074,7 +1100,7 @@ rebuildLocked ss@ServerState{..} needBuild = withMVar ssRebuildLock $ \_ -> do
 -- Serialised through 'ssRebuildLock' and clears 'ssDirty' so it composes
 -- with the background watcher.
 forceRebuild :: ServerState -> IO (Either String Loaded)
-forceRebuild ss@ServerState{..} = withMVar ssRebuildLock $ \_ -> do
+forceRebuild ss@ServerState{..} = withMVar ssRebuildLock $ \_ -> withBuilding ss $ do
   writeIORef ssDirty False
   built <- runBuildShared ss True
   case built of
@@ -1247,7 +1273,7 @@ kickRebuild ss@ServerState{..} file
       p <- safeCanon file
       modifyIORef' ssAddedFiles (S.insert p)
       modifyIORef' ssDirtyFiles (S.insert p)
-      void (try (withMVar ssRebuildLock $ \_ -> do
+      void (try (withMVar ssRebuildLock $ \_ -> withBuilding ss $ do
                    built <- runBuildShared ss False
                    case built of
                      Right ld -> do
