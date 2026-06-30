@@ -84,9 +84,13 @@ it) — check it first when `AgdaGraph.Schema` drifts on a decode failure.
   on a mismatch. **Cross-repo:** keep it in lock-step with the producer's
   `AgdaDeps.Deps.nodeKeyVersion` — independent literals in separate repos.
 - **Provenance.** Optional `definitionEdgesProvenance :: [Provenance]`
-  (`signature | body | where | with | unknown`), parallel to
-  `definitionEdges`. Absent in legacy JSON → every edge treated as `unknown`;
-  `silhouette` falls back to fingerprint-equivalence with a stderr note.
+  (`signature | body | module-local | with | unknown`), parallel to
+  `definitionEdges`. The `module-local` tag (producer `nodeKeyVersion` 3,
+  was `where` pre-v3 — the consumer still decodes the old tag) marks an
+  anonymous-module-local target (a `where`-block helper or
+  parameterised-section member). Absent in legacy JSON → every edge
+  treated as `unknown`; `silhouette` falls back to fingerprint-equivalence
+  with a stderr note.
 - **Signatures.** Under `--with-signatures`, each definition carries an
   optional `"type"` string → `Definition.defSig`, consumed by `type_of`.
 

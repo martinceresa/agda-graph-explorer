@@ -249,10 +249,10 @@ candidates ix cols opts@Options{..} =
 --------------------------------------------------------------------------------
 -- Owner extraction
 --
--- The "owner" of a node is its containing top-level definition.  In Agda
--- 2.9 a where-block helper inside @M.foo@ is given a qname like
--- @M._.helper@ — note that the containing function name (@foo@) is
--- /not/ in the helper's qname, so a naive qname-strip can't recover it.
+-- The "owner" of a node is its containing top-level definition.  Pre-v3
+-- a where-block helper inside @M.foo@ was given a qname like @M._.helper@
+-- — note that the containing function name (@foo@) is /not/ in the
+-- helper's qname, so a naive qname-strip can't recover it.
 --
 -- Insight: a where-helper @h@ is reverse-reachable only from its
 -- containing top-level definition (and from its siblings, which are
@@ -262,6 +262,12 @@ candidates ix cols opts@Options{..} =
 --
 -- Excluding same-owner pairs from cluster formation removes
 -- where-helper noise without touching cross-owner duplicates.
+--
+-- As of producer @nodeKeyVersion@ 3 anonymous-module segments are lifted
+-- away (@M._.helper@ ↦ @M.helper\@<line>@, re-homed to @M@), so a v3
+-- helper has no @_@ segment and 'derivedOwner' self-owns it — the
+-- noise-removal below is inert for v3 input (such helpers are ordinary
+-- parent-module members), and still fires for any pre-v3 graph.
 --------------------------------------------------------------------------------
 
 -- | True when a qname has at least one dotted segment that is exactly

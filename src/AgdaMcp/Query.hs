@@ -126,7 +126,7 @@ notFound ld name =
 
 -- | Does @name@ resolve to a definition in this snapshot? Uses the full
 -- 'resolveDefNote' resolver (not bare 'lookupDef'), so a legitimately
--- resolvable short/dotted-suffix name (e.g. a bare @sq@ ↦ @Where._.sq\@15@)
+-- resolvable short/dotted-suffix name (e.g. a bare @sq@ ↦ @Where.sq\@15@)
 -- or a unique near-match (E4 auto-resolve) counts as present. This is the
 -- @type_of@ fast-path predicate ('AgdaMcp.Tools.withFreshFailFast'): when
 -- it is 'False' against the already-loaded snapshot, the daemon answers
@@ -179,19 +179,26 @@ rankedMatches ld q =
 suggestions :: Loaded -> Text -> Int -> [Definition]
 suggestions ld q lim = take lim (rankedMatches ld q)
 
--- | A where-block / anonymous-module local: its qualified name carries the
--- @._.@ marker Agda inserts for such scopes. 'querySearch' can drop these
--- on request, since they crowd out top-level results.
+-- | A where-block / anonymous-module local helper. As of producer
+-- @nodeKeyVersion@ 3 such helpers are lifted into their named parent
+-- module — the @._.@ anonymous-module marker is stripped — but the
+-- @\@\<binding-line\>@ disambiguator the producer appends to them (and
+-- only to them; 'AgdaDeps.Deps.nodeKey') survives, so that trailing tag
+-- is the node-local signal. Keying on the tag (via 'stripLineTag') also
+-- recognises pre-v3 names like @Mod._.helper\@15@, which carry it too.
+-- 'querySearch' can drop these on request, since they crowd out
+-- top-level results.
 isLocalName :: Definition -> Bool
-isLocalName d = "._." `T.isInfixOf` defName d
+isLocalName d = stripLineTag (defName d) /= defName d
 
 lastComp :: Text -> Text
 lastComp t = let (_, suf) = T.breakOnEnd "." t in if T.null suf then t else suf
 
 -- | Drop the @"\@<line>"@ disambiguator the producer appends to
 -- @where@-/anonymous-module helper names ('AgdaDeps.Deps.nodeKey'), for
--- name-matching purposes only. @Mod._.QED\@388@ ↦ @Mod._.QED@; names with
--- no such suffix are returned unchanged.
+-- name-matching purposes only. @Mod.QED\@388@ ↦ @Mod.QED@ (v3; pre-v3
+-- @Mod._.QED\@388@ ↦ @Mod._.QED@); names with no such suffix are returned
+-- unchanged.
 stripLineTag :: Text -> Text
 stripLineTag t = case T.breakOnEnd "@" t of
   (pre, suf) | not (T.null pre), not (T.null suf), T.all isDigit suf
@@ -213,7 +220,7 @@ isDottedSuffix needle hay =
 --   2. a /unique/ segment-aligned dotted-suffix match (the documented "or
 --      unique name" contract), with the helper @\@<line>@ disambiguator
 --      stripped before comparison so a bare @sq@ still resolves
---      @Where._.sq\@15@;
+--      @Where.sq\@15@;
 --   3. (gated by 'ldAutoResolveUnique', default on) a /unique near-match/:
 --      resolve iff 'rankedMatches' — the very list the 'notFound' "Did you
 --      mean" block draws from — has exactly one element, i.e. the only
@@ -249,9 +256,10 @@ resolveDefNote ld name = case lookupDef (ldIndex ld) name of
 
 -- | The enclosing top-level definition of a @where@-/anonymous-module
 -- helper: the nearest non-local def at or above the helper's start line,
--- in the helper's own module or an enclosing one (the producer renders
--- the anonymous owner module as @Parent._@, so the real owner lives in a
--- module prefix — e.g. helper @Where._.sq@ is owned from module @Where@).
+-- in the helper's own module or an enclosing one. As of v3 the producer
+-- re-homes such a helper into its nearest /named/ module (@Where.sq\@15@
+-- lives in @Where@, no longer a phantom @Where._@), so the owner is found
+-- in the helper's own module or a prefix of it.
 -- 'Nothing' for a non-local def, or when lines are unavailable.
 ownerOf :: Loaded -> Definition -> Maybe Definition
 ownerOf ld d
@@ -263,8 +271,8 @@ ownerOf ld d
   | otherwise           = IM.lookup (defId d) (ldOwnerMap ld)
 
 -- | @"  (in `owner`)"@ suffix for a local helper, else empty. Appended to
--- 'locate' / 'callers' / 'callees' lines so the anonymised @_@ owner is
--- visible without opening the file.
+-- 'locate' / 'callers' / 'callees' lines so the enclosing top-level
+-- definition is visible without opening the file.
 ownerNote :: Loaded -> Definition -> Text
 ownerNote ld d = case ownerOf ld d of
   Just o  -> "  (in `" <> defName o <> "`)"
@@ -292,21 +300,36 @@ parseState t = case T.toLower t of
   "failed"    -> Just Failed
   _           -> Nothing
 
+-- | Parse a user-facing @provenance@ filter value. @where@ is kept as a
+-- legacy alias for @module-local@ (the v3 rename) and canonicalises onto
+-- 'ProvModuleLocal', so a filter written either way matches edges of
+-- either graph vintage (see 'provFilterEq').
 parseProv :: Text -> Maybe Provenance
 parseProv t = case T.toLower t of
-  "signature" -> Just ProvSignature
-  "body"      -> Just ProvBody
-  "where"     -> Just ProvWhere
-  "with"      -> Just ProvWith
-  "unknown"   -> Just ProvUnknown
-  _           -> Nothing
+  "signature"    -> Just ProvSignature
+  "body"         -> Just ProvBody
+  "module-local" -> Just ProvModuleLocal
+  "where"        -> Just ProvModuleLocal  -- legacy alias
+  "with"         -> Just ProvWith
+  "unknown"      -> Just ProvUnknown
+  _              -> Nothing
 
 renderProv :: Provenance -> Text
-renderProv ProvSignature = "signature"
-renderProv ProvBody      = "body"
-renderProv ProvWhere     = "where"
-renderProv ProvWith      = "with"
-renderProv ProvUnknown   = "unknown"
+renderProv ProvSignature   = "signature"
+renderProv ProvBody        = "body"
+renderProv ProvModuleLocal = "module-local"
+renderProv ProvWhere       = "where"        -- only seen on v2 cache edges
+renderProv ProvWith        = "with"
+renderProv ProvUnknown     = "unknown"
+
+-- | Edge-provenance equality for the user filter, collapsing the legacy
+-- 'ProvWhere' tag (pre-v3 caches) onto its v3 rename 'ProvModuleLocal' so
+-- a @provenance:module-local@ (or legacy @provenance:where@) filter
+-- matches edges emitted by either producer vintage.
+provFilterEq :: Provenance -> Provenance -> Bool
+provFilterEq a b = norm a == norm b
+  where norm ProvWhere = ProvModuleLocal
+        norm x         = x
 
 -- | @Just bad@ when a filter string was supplied but didn't parse.
 badParse :: (Text -> Maybe a) -> Maybe Text -> Maybe Text
@@ -382,15 +405,17 @@ edgeProv ix s t = idxEdgeProvenance ix >>= IM.lookup s >>= IM.lookup t
 -- | Shared implementation of callers (reverse edges) and callees
 -- (forward edges), direct or transitive. @mPrefix@ keeps only results
 -- whose module starts with the given prefix; @mProvTxt@ keeps only direct
--- edges of a given provenance (signature/body/where/with/unknown) and
--- annotates each direct line with its tag; @byMod@ renders a per-module
+-- edges of a given provenance (signature/body/module-local/with/unknown;
+-- @where@ is a legacy alias for @module-local@) and annotates each direct
+-- line with its tag; @byMod@ renders a per-module
 -- count summary instead of a flat list.
 edgesQuery :: Bool -> Loaded -> Bool -> Maybe Text -> Maybe Text -> Bool -> Int -> Text -> Text
 edgesQuery wantReverse ld transitive mPrefix mProvTxt byMod lim name =
   case mProvTxt of
     Just p | parseProv p == Nothing ->
       "Unknown provenance filter `" <> p
-        <> "` — use one of signature / body / where / with / unknown."
+        <> "` — use one of signature / body / module-local / with / unknown \
+           \(`where` accepted as a legacy alias for module-local)."
     _ -> case resolveDefNote ld name of
       Nothing        -> notFound ld name
       Just (note, d) -> note <> render d
@@ -415,14 +440,14 @@ edgesQuery wantReverse ld transitive mPrefix mProvTxt byMod lim name =
             -- "who term-depends on X, transitively" (body) vs. mere
             -- type-level reachability.
             | transitive, Just p <- mProv =
-                let frontier = IS.filter (\j -> provOf j == Just p) direct
+                let frontier = IS.filter (\j -> maybe False (provFilterEq p) (provOf j)) direct
                 in IS.delete i (IS.union frontier (closure frontier))
             | transitive  = closure (IS.singleton i)
             | otherwise   = direct
           -- Direct (non-transitive) provenance filter; the transitive
           -- case already folded the first-hop filter into 'set'.
           set' = case (transitive, mProv) of
-            (False, Just p) -> IS.filter (\j -> provOf j == Just p) set
+            (False, Just p) -> IS.filter (\j -> maybe False (provFilterEq p) (provOf j)) set
             _               -> set
           ds  = sortOn defName
                   $ filter (modulePrefixPred mPrefix)
@@ -486,7 +511,7 @@ queryImpact ld lim name = case resolveDefNote ld name of
 -- | Shortest dependency chain(s) @from ⇝ to@ along forward (uses) edges:
 -- the sequence @A → … → B@ that shows /why/ A transitively depends on B.
 -- Each hop is annotated with its edge provenance, so
--- the chain reads e.g. @A —{body}→ H —{where}→ B@. With @k > 1@, up to
+-- the chain reads e.g. @A —{body}→ H —{module-local}→ B@. With @k > 1@, up to
 -- @k@ distinct shortest paths are returned (handy when the first runs
 -- through a helper you don't care about); a non-positive @k@ is clamped
 -- to 1 with an explicit note. @mPrefix@ constrains the
@@ -536,7 +561,7 @@ queryPath ld k mPrefix fromName toName =
 
 -- | Render a node-id path as an indented chain. Hops after the first are
 -- prefixed with the provenance of the edge that justifies them
--- (@{body}@/@{where}@/@{signature}@/@{with}@/@?@ when untagged). Consecutive
+-- (@{body}@/@{module-local}@/@{signature}@/@{with}@/@?@ when untagged). Consecutive
 -- @(source, target)@ pairs are taken once via @zip path (drop 1 path)@.
 renderChain :: Index -> [Int] -> Text
 renderChain ix path = case map (defAt ix) path of

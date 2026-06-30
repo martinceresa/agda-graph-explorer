@@ -97,7 +97,7 @@ export AGDA_EXPLORE_GRAPH=/abs/path/to/deps.json
 | `rebuild`        | Force-regenerate the graph now. |
 | `status`         | Server fingerprint + binary path/mtime, config, freshness, graph stats (flags a stale-format graph or a newer build on disk). |
 
-A fully-qualified name is always accepted; any *unique dotted suffix* (e.g. `roundLeader`, `Theorem3.liveness′`) resolves too. Same-named `where`/anonymous helpers stay distinct, named by binding line (`Mod._.QED@388`). Run `agda-explore --help` for server flags — including `--normalise-signatures` and `--show-implicit`, which tune the types `type_of` reports.
+A fully-qualified name is always accepted; any *unique dotted suffix* (e.g. `roundLeader`, `Theorem3.liveness′`) resolves too. Same-named `where`/anonymous helpers stay distinct, named by binding line (`Mod.QED@388`). Run `agda-explore --help` for server flags — including `--normalise-signatures` and `--show-implicit`, which tune the types `type_of` reports.
 
 ## Write-side interaction bridge (opt-in)
 

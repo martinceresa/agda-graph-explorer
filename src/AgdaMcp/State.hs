@@ -53,6 +53,7 @@ import           Control.Exception    (SomeException, evaluate, finally, try)
 import           Control.Monad        (filterM, forM, forever, void, when)
 import           Data.Aeson           (Value, eitherDecode, encode)
 import qualified Data.ByteString.Lazy as BL
+import           Data.Char            (isDigit)
 import           Data.IORef
 import qualified Data.IntMap.Strict   as IM
 import           Data.List            (isInfixOf, isSuffixOf, maximumBy)
@@ -167,7 +168,7 @@ data ScanSig = ScanSig !Int !(Maybe UTCTime)
 -- serving results keyed by an older convention. Keep in sync with
 -- 'AgdaDeps.Deps.nodeKeyVersion'.
 currentNodeKeyVersion :: Int
-currentNodeKeyVersion = 2
+currentNodeKeyVersion = 3
 
 -- | One immutable graph snapshot held by the daemon.
 data Loaded = Loaded
@@ -592,9 +593,15 @@ buildOwnerMap rds =
                , maybe False (<= ln) (defLine o) ] of
         [] -> Nothing
         os -> Just (defId d, maximumBy (comparing defLine) os)
-    -- A where-block / anonymous-module local carries the @._.@ marker
-    -- Agda inserts for such scopes (mirrors 'AgdaMcp.Query.isLocalName').
-    isLocalName' d = "._." `T.isInfixOf` defName d
+    -- A where-block / anonymous-module local helper. As of producer
+    -- nodeKeyVersion 3 the @._.@ marker is stripped (helpers are lifted
+    -- into their named parent module), but the @\@<binding-line>@
+    -- disambiguator the producer appends to them — and only to them —
+    -- survives and is the node-local signal; keying on it also matches
+    -- pre-v3 names like @Mod._.helper\@15@. Mirrors
+    -- 'AgdaMcp.Query.isLocalName' / 'AgdaMcp.Query.stripLineTag'.
+    isLocalName' d = case T.breakOnEnd "@" (defName d) of
+      (pre, suf) -> not (T.null pre) && not (T.null suf) && T.all isDigit suf
     -- @outer@ is @inner@ or a (segment-aligned) module prefix of it
     -- (mirrors the @enclosingModule@ in 'AgdaMcp.Query.ownerOf').
     enclosingModule outer inner =

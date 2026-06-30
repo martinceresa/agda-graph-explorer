@@ -60,14 +60,14 @@ graphTools =
       "Who uses a definition (reverse dependency edges). `transitive` walks the \
       \whole upstream cone. `module_prefix` keeps only callers under a module \
       \path; `provenance` keeps only direct edges of one kind \
-      \(signature/body/where/with) — e.g. `body` for genuine term-level uses vs \
+      \(signature/body/module-local/with) — e.g. `body` for genuine term-level uses vs \
       \`signature` for in-scope/type-level mentions — and annotates each direct \
       \line with its tag; `by_module` returns a per-module count summary instead \
       \of a flat list (good for large fan-out). Replaces `grep -rn '\\bname\\b'`."
       (objSchema [ ("name", sp "Definition to find callers of.")
                  , ("transitive", bp "Walk all transitive callers (default false).")
                  , ("module_prefix", sp "Only include callers whose module starts with this prefix.")
-                 , ("provenance", sp "Keep only direct edges of this provenance: signature|body|where|with|unknown.")
+                 , ("provenance", sp "Keep only direct edges of this provenance: signature|body|module-local|with|unknown (where = legacy alias for module-local).")
                  , ("by_module", bp "Summarise as per-module counts instead of a flat list (default false).")
                  , ("limit", ip "Max results to list (default 50).")
                  ] ["name"])
@@ -80,13 +80,13 @@ graphTools =
       "What a definition depends on (forward dependency edges). `transitive` \
       \walks the whole downstream cone. `module_prefix` keeps only \
       \dependencies under a module path; `provenance` keeps only direct edges of \
-      \one kind (signature/body/where/with) and annotates each direct line with \
+      \one kind (signature/body/module-local/with) and annotates each direct line with \
       \its tag; `by_module` returns a per-module count summary instead of a flat \
       \list."
       (objSchema [ ("name", sp "Definition to find dependencies of.")
                  , ("transitive", bp "Walk all transitive dependencies (default false).")
                  , ("module_prefix", sp "Only include dependencies whose module starts with this prefix.")
-                 , ("provenance", sp "Keep only direct edges of this provenance: signature|body|where|with|unknown.")
+                 , ("provenance", sp "Keep only direct edges of this provenance: signature|body|module-local|with|unknown (where = legacy alias for module-local).")
                  , ("by_module", bp "Summarise as per-module counts instead of a flat list (default false).")
                  , ("limit", ip "Max results to list (default 50).")
                  ] ["name"])
@@ -108,7 +108,7 @@ graphTools =
       "Shortest dependency chain from one definition to another: the sequence \
       \`from → … → to` along forward (uses) edges, showing *why* `from` \
       \transitively depends on `to`. Each hop is annotated with its edge \
-      \provenance (`{body}`/`{where}`/`{signature}`/`{with}`). Set `k > 1` to \
+      \provenance (`{body}`/`{module-local}`/`{signature}`/`{with}`). Set `k > 1` to \
       \return several distinct shortest paths (useful when the first runs \
       \through a helper you don't care about); a non-positive `k` is clamped to \
       \1 with a note. `module_prefix` keeps the chain within a module subtree. \

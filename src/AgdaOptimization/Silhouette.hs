@@ -6,8 +6,8 @@
 -- When 'agda-deps' tags every edge with a 'Provenance', we can split a
 -- definition's outgoing edges into the /signature subgraph/ (edges
 -- sourced from the def's type — 'ProvSignature') and the /body
--- subgraph/ (everything else — 'ProvBody', 'ProvWhere', 'ProvWith',
--- 'ProvUnknown'). Running Weisfeiler-Lehman fingerprinting independently
+-- subgraph/ (everything else — 'ProvBody', 'ProvModuleLocal', 'ProvWhere',
+-- 'ProvWith', 'ProvUnknown'). Running Weisfeiler-Lehman fingerprinting independently
 -- on each subgraph lets us answer two distinct questions:
 --
 --   * /Do two defs have the same shape of statement?/ — equal signature

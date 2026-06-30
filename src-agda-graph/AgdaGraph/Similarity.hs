@@ -51,8 +51,8 @@ silhouetteDefaultWlK = 2
 
 -- | Split the forward adjacency into the /signature subgraph/ (edges the
 -- producer tagged 'ProvSignature') and the /body subgraph/ (everything
--- else: 'ProvBody' \/ 'ProvWhere' \/ 'ProvWith' \/ 'ProvUnknown', plus any
--- edge missing a tag, which defaults to body).
+-- else: 'ProvBody' \/ 'ProvModuleLocal' \/ 'ProvWhere' \/ 'ProvWith' \/
+-- 'ProvUnknown', plus any edge missing a tag, which defaults to body).
 --
 -- The third component is 'True' when the graph carried per-edge
 -- provenance. When it didn't ('idxEdgeProvenance' is 'Nothing') both

@@ -57,7 +57,7 @@ module) and `AGDA_EXPLORE_INCLUDE` (include dir), or pass `--graph`.
 - `search` filters by `kind` / `state`; pass an empty query to **list** all
   of a kind/state (audit postulates or holes), `module_prefix` to scope,
   `top_level_only: true` to drop where/anonymous locals.
-- `where`/anonymous helpers are own nodes (`Mod._.QED@388`); `locate` reports
+- `where`/anonymous helpers are own nodes (`Mod.QED@388`); `locate` reports
   their `owner`, `callers`/`callees` annotate them with `(in owner)`.
 - `callers`/`callees`: `transitive: true` walks the whole cone;
   `module_prefix` narrows; `by_module: true` gives per-module counts;

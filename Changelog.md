@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+### Adopt producer `nodeKeyVersion` 3 — anonymous-module lifting + `module-local` provenance (2026-06-30)
+
+Tracks the producer's 2026-06-30 change, which lifts `where`-block and
+`module _ (…) where` section members into their nearest *named* parent
+(`Mod._.helper@15` ↦ `Mod.helper@15`, module re-homed to `Mod`) and
+renames the edge-provenance tag `where` → `module-local`. Three parts:
+
+- **Provenance enum (blocking — a v3 graph won't decode otherwise).**
+  `AgdaGraph.Schema` gains a `ProvModuleLocal` constructor with wire tag
+  `module-local`; the legacy `ProvWhere`/`where` case is **kept** so v2
+  fixtures and on-disk caches still parse. `AgdaMcp.Query.parseProv`
+  accepts `module-local` and keeps `where` as a legacy alias (both match
+  edges of either vintage via `provFilterEq`, which collapses `ProvWhere`
+  onto `ProvModuleLocal`); `renderProv` round-trips both. Filter help in
+  `AgdaMcp.Tools` and the `silhouette`/`similar_*` body-bucket docs
+  updated. `Similarity.splitSigBodyAdj` needed no logic change (its
+  `Just _` catch-all already buckets the new tag body-side).
+- **`AgdaMcp.State.currentNodeKeyVersion` 2 → 3.** A v2 cache now
+  correctly trips the live-rebuild / preloaded-stale-warn path instead of
+  being judged current.
+- **Re-keyed locally-scoped-helper detection off the surviving
+  `@<line>` disambiguator** (`AgdaMcp.Query.isLocalName` /
+  `AgdaMcp.State.isLocalName'` in `buildOwnerMap`), since v3 names no
+  longer carry the `._.` marker the old check keyed on. The producer
+  appends `@<line>` to (and only to) anonymous-module helpers, so the tag
+  is the node-local signal — and it matches pre-v3 `Mod._.helper@15`
+  names too. `AgdaUnused.Analysis.isAnonymousModule` and
+  `Fingerprint.derivedOwner` (both `._`-keyed) are now inert for v3 input
+  by producer intent — retained for v2-cache reads, doc-noted. Stale
+  `._.` doc examples swept across `Query.hs` / `Fingerprint.hs`.
+
+Verified against the producer's regenerated v3 golden (`module-local`
+edges, lifted `@<line>` names, no `._.`): `silhouette` / `concept-bundle`
+/ `motif` run clean; `agda-explore` `top_level_only` drops exactly the
+`@<line>` helpers and owner notes resolve on re-homed names; the
+`provenance:module-local` / legacy `provenance:where` filters both hit;
+v2 fixtures still decode and now warn `v1 < v3 (stale)` in preloaded mode.
+
 ### Write-side bridge: file authoring + structured validation (2026-06-16)
 
 The interaction bridge gained tools so agents can WRITE whole files under

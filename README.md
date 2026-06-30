@@ -297,8 +297,10 @@ inspect-port: 7010                  # …on this port (else probes up from 7000)
   lock-step with `agda-deps`' `AgdaDeps.Deps.nodeKeyVersion`** across the
   two repos.
 - Expanded JSON carries optional `definitionEdgesProvenance`
-  (`signature | body | where | with | unknown`) and, under the producer's
-  `--with-signatures`, an optional per-definition `"type"`.
+  (`signature | body | module-local | with | unknown`; `module-local` was
+  `where` before `nodeKeyVersion` 3, still decoded for old caches) and,
+  under the producer's `--with-signatures`, an optional per-definition
+  `"type"`.
 
 A machine-readable JSON Schema (draft 2020-12) for the expanded form
 lives in the producer repo at `schema/graph-v2-expanded.schema.json`;

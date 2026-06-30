@@ -378,6 +378,11 @@ findingsForFile ctx fp body = case M.lookup fp (ctxModuleByFile ctx) of
 -- anonymous section wrapper Agda introduced (parameterised-module
 -- application, anonymous @module _ where@). Its members are not part
 -- of the user-facing API.
+--
+-- As of producer @nodeKeyVersion@ 3 these @_@ segments are lifted away
+-- (re-homed into the nearest named module), so this predicate is dead
+-- for v3 input — retained only for any pre-v3 on-disk cache read before
+-- the daemon rebuilds.
 isAnonymousModule :: Text -> Bool
 isAnonymousModule m = "._" `T.isInfixOf` m || "._" `T.isSuffixOf` m
 

@@ -159,19 +159,26 @@ instance FromJSON ReExport where
 --
 -- The provenance tags mirror the structure the producer walked through:
 --
---   * 'ProvSignature' — edge sourced from @defType@ (argument or
+--   * 'ProvSignature'   — edge sourced from @defType@ (argument or
 --     result-type references).
---   * 'ProvBody'      — edge sourced from @theDef@'s clauses or record
+--   * 'ProvBody'        — edge sourced from @theDef@'s clauses or record
 --     fields.
---   * 'ProvWhere'     — edge sourced from a @where@-block helper that
---     ultimately points outside the helper.
---   * 'ProvWith'      — edge sourced from a @with@-generated auxiliary.
---   * 'ProvUnknown'   — producer couldn't classify (or older JSON
+--   * 'ProvModuleLocal' — target is an anonymous-module-local helper (a
+--     @where@-block helper or a @module _ (…) where@ parameterised-section
+--     member; Agda represents both identically). Describes the /target/,
+--     not a source-ownership relation. Wire tag @module-local@ as of
+--     producer @nodeKeyVersion@ 3.
+--   * 'ProvWhere'       — legacy alias for 'ProvModuleLocal' under the
+--     pre-v3 wire tag @where@. Retained so v2 fixtures / on-disk caches
+--     still decode; analyses treat it identically to 'ProvModuleLocal'.
+--   * 'ProvWith'        — edge sourced from a @with@-generated auxiliary.
+--   * 'ProvUnknown'     — producer couldn't classify (or older JSON
 --     present but field-by-field tagging was indeterminate); analyses
 --     should treat as body-side noise.
 data Provenance
   = ProvSignature
   | ProvBody
+  | ProvModuleLocal
   | ProvWhere
   | ProvWith
   | ProvUnknown
@@ -181,12 +188,13 @@ instance NFData Provenance
 
 instance FromJSON Provenance where
   parseJSON = withText "Provenance" $ \t -> case t of
-    "signature" -> pure ProvSignature
-    "body"      -> pure ProvBody
-    "where"     -> pure ProvWhere
-    "with"      -> pure ProvWith
-    "unknown"   -> pure ProvUnknown
-    _           -> fail $ "unknown provenance: " ++ T.unpack t
+    "signature"    -> pure ProvSignature
+    "body"         -> pure ProvBody
+    "module-local" -> pure ProvModuleLocal
+    "where"        -> pure ProvWhere       -- legacy (pre-v3) tag
+    "with"         -> pure ProvWith
+    "unknown"      -> pure ProvUnknown
+    _              -> fail $ "unknown provenance: " ++ T.unpack t
 
 -- | Diagnostic summary of the externals that @agda-deps --no-externals@
 -- stripped from the graph. Producer-side definition lives in
@@ -390,7 +398,8 @@ instance A.ToJSON Provenance where
   toJSON p = A.toJSON (pt :: Text)
     where pt = case p of
             ProvSignature -> "signature"; ProvBody -> "body"
-            ProvWhere -> "where"; ProvWith -> "with"; ProvUnknown -> "unknown"
+            ProvModuleLocal -> "module-local"; ProvWhere -> "where"
+            ProvWith -> "with"; ProvUnknown -> "unknown"
 
 instance A.ToJSON Definition where
   toJSON d = A.object

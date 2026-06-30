@@ -29,6 +29,9 @@ Forward-looking work on the graph consumers. For runnable examples see
 
 ## Shipped — see Changelog
 
+- [x] Adopt producer `nodeKeyVersion` 3: `module-local` provenance enum
+  (legacy `where` kept), `currentNodeKeyVersion` 2→3, helper detection
+  re-keyed off the `@<line>` disambiguator (the `._.` marker is gone in v3).
 - [x] `agda-explore`: `type_of` from producer-side `--with-signatures`.
 - [x] `agda-explore`: background `fsnotify` file-watch with poll fallback.
 - [x] `agda-explore`: `.agda-explore.yml` config.
