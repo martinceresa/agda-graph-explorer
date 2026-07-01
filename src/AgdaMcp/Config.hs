@@ -68,6 +68,10 @@ data Opts = Opts
   , oAuto     :: Bool
   , oWatch    :: Bool
   , oIncremental :: Bool
+  , oRequireWellTyped :: Bool
+    -- ^ only promote fully-well-typed rebuilds (@--require-well-typed@).
+  , oStrictProducer :: Bool
+    -- ^ strict @agda-deps@: drop @--keep-going@, add @--incremental@ (@--strict-producer@).
   , oQueryLog :: Bool
   , oAutoResolve :: Bool
   , oEnableInteract :: Bool
@@ -118,6 +122,10 @@ data FileConfig = FileConfig
   , fcNoAutoRebuild :: Maybe Bool
   , fcNoWatch       :: Maybe Bool
   , fcNoIncremental :: Maybe Bool
+  , fcRequireWellTyped :: Maybe Bool
+    -- ^ positive flag (default off): only promote fully-well-typed rebuilds.
+  , fcStrictProducer :: Maybe Bool
+    -- ^ positive flag (default off): strict @agda-deps@ (drop @--keep-going@, add @--incremental@).
   , fcNoQueryLog    :: Maybe Bool
   , fcNoAutoResolve :: Maybe Bool
   , fcEnableInteract :: Maybe Bool
@@ -148,6 +156,8 @@ defaultFileConfig = FileConfig
   , fcNoAutoRebuild = Nothing
   , fcNoWatch       = Nothing
   , fcNoIncremental = Nothing
+  , fcRequireWellTyped = Nothing
+  , fcStrictProducer = Nothing
   , fcNoQueryLog    = Nothing
   , fcNoAutoResolve = Nothing
   , fcEnableInteract = Nothing
@@ -178,6 +188,8 @@ instance FromJSON FileConfig where
     fcNoAutoRebuild <- o .:? "no-auto-rebuild"
     fcNoWatch       <- o .:? "no-watch"
     fcNoIncremental <- o .:? "no-incremental"
+    fcRequireWellTyped <- o .:? "require-well-typed"
+    fcStrictProducer <- o .:? "strict-producer"
     fcNoQueryLog    <- o .:? "no-query-log"
     fcNoAutoResolve <- o .:? "no-auto-resolve"
     fcEnableInteract <- o .:? "enable-interact"
@@ -221,6 +233,8 @@ applyConfig FileConfig{..} o = o
   , oAuto     = maybe (oAuto o)  not fcNoAutoRebuild
   , oWatch    = maybe (oWatch o) not fcNoWatch
   , oIncremental = maybe (oIncremental o) not fcNoIncremental
+  , oRequireWellTyped = fromMaybe (oRequireWellTyped o) fcRequireWellTyped
+  , oStrictProducer   = fromMaybe (oStrictProducer o) fcStrictProducer
   , oQueryLog = maybe (oQueryLog o) not fcNoQueryLog
   , oAutoResolve = maybe (oAutoResolve o) not fcNoAutoResolve
   , oEnableInteract = fromMaybe (oEnableInteract o) fcEnableInteract

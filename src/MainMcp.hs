@@ -56,6 +56,7 @@ defOpts = Opts
   , oOut = Nothing, oDeps = Nothing, oUnused = Nothing
   , oHashes = True, oSigs = True, oNormSigs = False, oShowImpl = False
   , oMinDepth = 3, oAuto = True, oWatch = True, oIncremental = True, oQueryLog = True
+  , oRequireWellTyped = False, oStrictProducer = False
   , oAutoResolve = True
   , oEnableInteract = False, oAgdaBin = Nothing, oInteractArgs = []
   , oInteractHeapMb = 0, oMaxSessions = 2, oSessionIdleSecs = 0
@@ -100,6 +101,8 @@ parseOpts (x : xs) o = case x of
   "--no-auto-rebuild" -> parseOpts xs o { oAuto = False }
   "--no-watch"        -> parseOpts xs o { oWatch = False }
   "--no-incremental"  -> parseOpts xs o { oIncremental = False }
+  "--require-well-typed" -> parseOpts xs o { oRequireWellTyped = True }
+  "--strict-producer" -> parseOpts xs o { oStrictProducer = True }
   "--no-query-log"    -> parseOpts xs o { oQueryLog = False }
   "--no-auto-resolve" -> parseOpts xs o { oAutoResolve = False }
   "--enable-interact" -> parseOpts xs o { oEnableInteract = True }
@@ -210,6 +213,8 @@ buildConfig o = do
         , cfgMinTermDepth = oMinDepth o
         , cfgWatch        = oWatch o
         , cfgIncremental  = oIncremental o
+        , cfgRequireWellTyped = oRequireWellTyped o
+        , cfgStrictProducer = oStrictProducer o
         , cfgQueryLog     = oQueryLog o
         , cfgAutoResolveUnique = oAutoResolve o
         , cfgEnableInteract = oEnableInteract o
@@ -304,6 +309,14 @@ usage = unlines
   , "  --min-term-depth N    Term-hash depth filter (default 3)."
   , "  --no-auto-rebuild     Do not regenerate the graph when sources change."
   , "  --no-watch            Disable the fsnotify watcher; poll on each query instead."
+  , "  --require-well-typed  Only promote a rebuild that fully type-checks: while any"
+  , "                        module in the closure has a type error, keep serving the"
+  , "                        last well-typed graph (holes are not errors and still"
+  , "                        refresh). Off by default (a partial graph is served)."
+  , "  --strict-producer     Run agda-deps strictly: drop --keep-going (any type error"
+  , "                        aborts the build, so the last graph is served) and enable"
+  , "                        its --incremental fragment cache for faster rebuilds."
+  , "                        Requires Agda >= 2.9. Off by default."
   , "  --no-query-log        Disable per-query telemetry (else appends one JSON line"
   , "                        per tools/call to <out-dir>/query-log.jsonl; on by default"
   , "                        in live mode, off in preloaded mode)."

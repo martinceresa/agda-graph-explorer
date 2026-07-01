@@ -116,6 +116,8 @@ data Config = Config
   , cfgAutoRebuild  :: !Bool             -- ^ auto-rebuild on detected staleness.
   , cfgWatch        :: !Bool             -- ^ use an fsnotify watcher (live mode) instead of per-query polling.
   , cfgIncremental  :: !Bool             -- ^ multi-entry incremental rebuilds: re-run @agda-deps@ only for entries whose closure a change touches, reusing the others' retained graphs (a RAM-for-speed trade). Off ⇒ every rebuild is full and nothing is retained.
+  , cfgRequireWellTyped :: !Bool         -- ^ only promote a fully well-typed rebuild: a build whose 'ldFailed' is non-empty is refused promotion when a prior snapshot exists (keep serving the last well-typed graph — serve-stale). Holes are not type errors and still promote. Off ⇒ a partial graph (failed modules tagged) is served. Orthogonal to 'cfgStrictProducer' (which, dropping @--keep-going@, makes any error a hard build failure and so leaves 'ldFailed' always empty).
+  , cfgStrictProducer :: !Bool           -- ^ run @agda-deps@ strictly: drop @--keep-going@ (any type error aborts the build ⇒ no graph ⇒ serve stale) and add @--incremental@ + a shared @--cache-dir@ (the producer's per-module fragment cache, keyed on interface hash — the producer disables it under @--keep-going@, so it is only usable here). Faster rebuilds; requires Agda >= 2.9. Off ⇒ tolerant @--keep-going@ builds that emit a partial graph.
   , cfgQueryLog     :: !Bool             -- ^ append one JSON line per @tools/call@ to @cfgOutDir/query-log.jsonl@.
   , cfgAutoResolveUnique :: !Bool        -- ^ auto-resolve a name to the sole "did you mean" candidate (tier 3 of 'AgdaMcp.Query.resolveDefNote').
   , cfgEnableInteract :: !Bool           -- ^ expose the write-side interaction-bridge tools (load/goal_type/give/…).
@@ -146,6 +148,8 @@ defaultConfig = Config
   , cfgAutoRebuild  = True
   , cfgWatch        = True
   , cfgIncremental  = True
+  , cfgRequireWellTyped = False
+  , cfgStrictProducer = False
   , cfgQueryLog     = True
   , cfgAutoResolveUnique = True
   , cfgEnableInteract = False
@@ -609,9 +613,24 @@ buildOwnerMap rds =
 
 -- | The producer flag list shared by every @agda-deps@ run (all but the
 -- out-dir and the trailing entry positional).
+--
+-- Tolerant by default (@--keep-going@): a type error anywhere in the
+-- closure still emits a partial graph (failed modules tagged) rather than
+-- going dark — the daemon's core "serve the sound majority while editing"
+-- behaviour. Under 'cfgStrictProducer' we instead drop @--keep-going@ (so
+-- any error aborts the build and the existing serve-stale path keeps the
+-- last graph) and enable the producer's @--incremental@ fragment cache
+-- (which the producer disables under @--keep-going@). All entries share one
+-- @--cache-dir@ above the per-entry out-dirs: builds are serialised (cross-
+-- process 'buildLockPath' + 'ssRebuildLock', and 'buildMulti' runs entries
+-- sequentially), so a shared cache is race-free and lets entries reuse each
+-- other's fragments (keyed on interface hash).
 buildBaseArgs :: Config -> [String]
 buildBaseArgs Config{..} =
-  [ "--format=json", "--json-mode=expanded", "--no-externals", "--keep-going" ]
+  [ "--format=json", "--json-mode=expanded", "--no-externals" ]
+    ++ (if cfgStrictProducer
+          then [ "--incremental", "--cache-dir=" ++ (cfgOutDir </> ".agda-deps-cache") ]
+          else [ "--keep-going" ])
     ++ [ a | cfgWithHashes
            , a <- ["--with-term-hashes", "--min-term-depth=" ++ show cfgMinTermDepth] ]
     ++ ["--with-signatures" | cfgWithSigs]
@@ -1059,6 +1078,40 @@ noteFailedSig ServerState{..} = do
   fsig <- scanSources (cfgIncludes ssConfig)
   writeIORef ssFailSig (Just fsig)
 
+-- | Outcome of offering a freshly-built snapshot to 'commitOrKeep'.
+data Promotion
+  = Promoted  !Loaded   -- ^ installed as the new snapshot.
+  | KeptStale !Loaded   -- ^ refused under 'cfgRequireWellTyped'; the carried snapshot is the retained well-typed one.
+
+servedSnapshot :: Promotion -> Loaded
+servedSnapshot (Promoted  ld) = ld
+servedSnapshot (KeptStale ld) = ld
+
+-- | Promote a freshly-built snapshot, or keep the current one. Under
+-- 'cfgRequireWellTyped' a build carrying type errors (non-empty 'ldFailed')
+-- does /not/ replace an existing snapshot: the daemon keeps serving the last
+-- well-typed graph and change-gates a retry, exactly as a hard build failure
+-- would (the 'Left' branch of 'rebuildLocked'). Holes never enter 'ldFailed'
+-- (@agda-deps@ tags holey defs 'Hole', not their module failed), so ordinary
+-- hole-filling still promotes. On cold start (no snapshot yet) the partial is
+-- committed regardless, so the daemon degrades rather than going dark. Call
+-- only while holding 'ssRebuildLock'.
+commitOrKeep :: ServerState -> Loaded -> IO Promotion
+commitOrKeep ss@ServerState{..} ld = do
+  cur <- readIORef ssLoaded
+  case cur of
+    Just old | cfgRequireWellTyped ssConfig, not (null (ldFailed ld)) -> do
+      noteFailedSig ss          -- change-gate the retry (see 'ssFailSig')
+      writeIORef ssDirty True   -- queries told "stale"; a later edit retries
+      let fs = ldFailed ld
+      hPutStrLn stderr $
+        "agda-explore: rebuild has type errors in " ++ show (length fs)
+          ++ " module(s) (" ++ T.unpack (T.intercalate ", " (take 3 fs))
+          ++ (if length fs > 3 then ", …" else "")
+          ++ "); serving last well-typed graph"
+      pure (KeptStale old)
+    _ -> commitBuild ss ld >> pure (Promoted ld)
+
 -- | The single serialised rebuild gate, shared by 'ensureFresh' (both
 -- the watched and polled paths) and the watcher's worker. Holds
 -- 'ssRebuildLock' so the worker and a query never spawn @agda-deps@
@@ -1084,7 +1137,7 @@ rebuildLocked ss@ServerState{..} needBuild = withMVar ssRebuildLock $ \_ -> do
       writeIORef ssDirty False
       built <- runBuildShared ss False
       case built of
-        Right ld -> commitBuild ss ld >> pure (Right ld)
+        Right ld -> Right . servedSnapshot <$> commitOrKeep ss ld
         Left err -> do
           noteFailedSig ss   -- change-gate the retry (see 'ssFailSig')
           case cur of
@@ -1111,7 +1164,7 @@ forceRebuild ss@ServerState{..} = withMVar ssRebuildLock $ \_ -> withBuilding ss
   writeIORef ssDirty False
   built <- runBuildShared ss True
   case built of
-    Right ld -> commitBuild ss ld >> pure (Right ld)
+    Right ld -> Right . servedSnapshot <$> commitOrKeep ss ld
     Left err -> do
       noteFailedSig ss   -- gate a later wakeup on the same broken sources
       cur <- readIORef ssLoaded
@@ -1284,11 +1337,15 @@ kickRebuild ss@ServerState{..} file
                    built <- runBuildShared ss False
                    case built of
                      Right ld -> do
-                       commitBuild ss ld
-                       modifyIORef' ssDirtyFiles (S.delete p)
-                       modifyIORef' ssAddedFiles (S.delete p)
-                       rest <- readIORef ssDirtyFiles
-                       writeIORef ssDirty (not (S.null rest))
+                       prom <- commitOrKeep ss ld
+                       case prom of
+                         Promoted _ -> do
+                           modifyIORef' ssDirtyFiles (S.delete p)
+                           modifyIORef' ssAddedFiles (S.delete p)
+                           rest <- readIORef ssDirtyFiles
+                           writeIORef ssDirty (not (S.null rest))
+                         KeptStale _ ->                    -- type errors under require-well-typed:
+                           pure ()                         -- commitOrKeep re-dirtied + noted; leave p pending
                      Left _  -> do                         -- leave it for the watcher,
                        noteFailedSig ss                    -- change-gated like any failed build
                        writeIORef ssDirty True)

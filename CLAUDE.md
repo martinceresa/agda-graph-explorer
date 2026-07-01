@@ -347,6 +347,23 @@ plugin/                         Claude Code plugin: agda-explore MCP server +
   path a synchronous per-query rebuild (it blocks the stdio loop on a
   minutes-long run).
 
+- **`--keep-going` (tolerant) and `--incremental` (fast) are mutually
+  exclusive at the producer** — `agda-deps` disables its fragment cache under
+  `--keep-going`. So `buildBaseArgs` picks one: tolerant by default
+  (`--keep-going` ⇒ a partial graph, failed modules tagged, never dark), or
+  `--strict-producer` (`cfgStrictProducer`) which drops `--keep-going` (any
+  type error aborts ⇒ existing serve-stale keeps the last graph) and turns on
+  `--incremental` + a shared `--cache-dir` above the per-entry out-dirs (safe
+  because builds are serialised and `buildMulti` runs entries sequentially;
+  needs Agda >= 2.9). Orthogonally, `--require-well-typed`
+  (`cfgRequireWellTyped`) gates *promotion*: `commitOrKeep` refuses a fresh
+  snapshot whose `ldFailed` is non-empty when a prior snapshot exists (keep
+  serving the last well-typed graph), but always commits on cold start (don't
+  go dark). Holes are not type errors — `agda-deps` tags them `Hole`, never
+  `failedModules` — so hole-filling still refreshes. Both flags default off
+  (current partial-graph behaviour); `--strict-producer` makes
+  `--require-well-typed` moot (no partial ever reaches `commitOrKeep`).
+
 - **Warm cold-start reuses the last run's on-disk graphs (`warmStart`).**
   Called at daemon init *after* `startWatcher`, it decodes the per-entry graphs
   the previous run left in `cfgOutDir/entry-i/deps.json`, seeds the snapshot +
