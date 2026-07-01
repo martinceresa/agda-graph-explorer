@@ -1107,7 +1107,7 @@ commitOrKeep ss@ServerState{..} ld = do
       hPutStrLn stderr $
         "agda-explore: rebuild has type errors in " ++ show (length fs)
           ++ " module(s) (" ++ T.unpack (T.intercalate ", " (take 3 fs))
-          ++ (if length fs > 3 then ", …" else "")
+          ++ (if null (drop 3 fs) then "" else ", …")
           ++ "); serving last well-typed graph"
       pure (KeptStale old)
     _ -> commitBuild ss ld >> pure (Promoted ld)
@@ -1276,6 +1276,10 @@ warmStart ss@ServerState{..}
       writeIORef ssDirtyFiles dirty
       writeIORef ssAddedFiles added
       writeIORef ssDirty needBuild
+      -- Cold start (ssLoaded == Nothing): commit directly, bypassing the
+      -- 'commitOrKeep' gate. Its cold-start arm would promote regardless, so
+      -- 'cfgRequireWellTyped' never withholds the first served snapshot
+      -- ("degrade, not go dark") — a warm-seeded union may carry 'ldFailed'.
       commitBuild ss ld   -- install snapshot + GC the transient decodes
       hPutStrLn stderr $
         "agda-explore: warm start — reused " ++ show (length present)
