@@ -116,8 +116,8 @@ data Config = Config
   , cfgAutoRebuild  :: !Bool             -- ^ auto-rebuild on detected staleness.
   , cfgWatch        :: !Bool             -- ^ use an fsnotify watcher (live mode) instead of per-query polling.
   , cfgIncremental  :: !Bool             -- ^ multi-entry incremental rebuilds: re-run @agda-deps@ only for entries whose closure a change touches, reusing the others' retained graphs (a RAM-for-speed trade). Off ⇒ every rebuild is full and nothing is retained.
-  , cfgRequireWellTyped :: !Bool         -- ^ only promote a fully well-typed rebuild: a build whose 'ldFailed' is non-empty is refused promotion when a prior snapshot exists (keep serving the last well-typed graph — serve-stale). Holes are not type errors and still promote. Off ⇒ a partial graph (failed modules tagged) is served. Orthogonal to 'cfgStrictProducer' (which, dropping @--keep-going@, makes any error a hard build failure and so leaves 'ldFailed' always empty).
-  , cfgStrictProducer :: !Bool           -- ^ run @agda-deps@ strictly: drop @--keep-going@ (any type error aborts the build ⇒ no graph ⇒ serve stale) and add @--incremental@ + a shared @--cache-dir@ (the producer's per-module fragment cache, keyed on interface hash — the producer disables it under @--keep-going@, so it is only usable here). Faster rebuilds; requires Agda >= 2.9. Off ⇒ tolerant @--keep-going@ builds that emit a partial graph.
+  , cfgRequireWellTyped :: !Bool         -- ^ only promote a well-typed rebuild: a build with failed modules is withheld while a prior snapshot exists (serve-stale); holes still promote. See 'commitOrKeep'.
+  , cfgStrictProducer :: !Bool           -- ^ strict @agda-deps@: drop @--keep-going@ (any error ⇒ serve stale) and enable @--incremental@ (needs Agda >= 2.9). See 'buildBaseArgs'.
   , cfgQueryLog     :: !Bool             -- ^ append one JSON line per @tools/call@ to @cfgOutDir/query-log.jsonl@.
   , cfgAutoResolveUnique :: !Bool        -- ^ auto-resolve a name to the sole "did you mean" candidate (tier 3 of 'AgdaMcp.Query.resolveDefNote').
   , cfgEnableInteract :: !Bool           -- ^ expose the write-side interaction-bridge tools (load/goal_type/give/…).
@@ -614,17 +614,12 @@ buildOwnerMap rds =
 -- | The producer flag list shared by every @agda-deps@ run (all but the
 -- out-dir and the trailing entry positional).
 --
--- Tolerant by default (@--keep-going@): a type error anywhere in the
--- closure still emits a partial graph (failed modules tagged) rather than
--- going dark — the daemon's core "serve the sound majority while editing"
--- behaviour. Under 'cfgStrictProducer' we instead drop @--keep-going@ (so
--- any error aborts the build and the existing serve-stale path keeps the
--- last graph) and enable the producer's @--incremental@ fragment cache
--- (which the producer disables under @--keep-going@). All entries share one
--- @--cache-dir@ above the per-entry out-dirs: builds are serialised (cross-
--- process 'buildLockPath' + 'ssRebuildLock', and 'buildMulti' runs entries
--- sequentially), so a shared cache is race-free and lets entries reuse each
--- other's fragments (keyed on interface hash).
+-- Default @--keep-going@ emits a partial graph on a type error rather than
+-- nothing. 'cfgStrictProducer' instead drops it (any error ⇒ no graph ⇒
+-- serve stale) and enables @--incremental@ — the two are mutually exclusive
+-- at the producer. The shared @--cache-dir@ above the per-entry out-dirs is
+-- race-free (builds are serialised; 'buildMulti' runs entries sequentially)
+-- and lets entries reuse each other's fragments.
 buildBaseArgs :: Config -> [String]
 buildBaseArgs Config{..} =
   [ "--format=json", "--json-mode=expanded", "--no-externals" ]
@@ -1078,24 +1073,23 @@ noteFailedSig ServerState{..} = do
   fsig <- scanSources (cfgIncludes ssConfig)
   writeIORef ssFailSig (Just fsig)
 
--- | Outcome of offering a freshly-built snapshot to 'commitOrKeep'.
+-- | Outcome of offering a freshly-built snapshot to 'commitOrKeep'. Both
+-- constructors carry the snapshot now being served ('servedSnapshot').
 data Promotion
   = Promoted  !Loaded   -- ^ installed as the new snapshot.
-  | KeptStale !Loaded   -- ^ refused under 'cfgRequireWellTyped'; the carried snapshot is the retained well-typed one.
+  | KeptStale !Loaded   -- ^ withheld under 'cfgRequireWellTyped'; carries the retained snapshot.
 
 servedSnapshot :: Promotion -> Loaded
 servedSnapshot (Promoted  ld) = ld
 servedSnapshot (KeptStale ld) = ld
 
 -- | Promote a freshly-built snapshot, or keep the current one. Under
--- 'cfgRequireWellTyped' a build carrying type errors (non-empty 'ldFailed')
--- does /not/ replace an existing snapshot: the daemon keeps serving the last
--- well-typed graph and change-gates a retry, exactly as a hard build failure
--- would (the 'Left' branch of 'rebuildLocked'). Holes never enter 'ldFailed'
--- (@agda-deps@ tags holey defs 'Hole', not their module failed), so ordinary
--- hole-filling still promotes. On cold start (no snapshot yet) the partial is
--- committed regardless, so the daemon degrades rather than going dark. Call
--- only while holding 'ssRebuildLock'.
+-- 'cfgRequireWellTyped' a build with type errors (non-empty 'ldFailed') does
+-- not replace an existing snapshot — keep serving the last well-typed graph
+-- and change-gate a retry. Holes never enter 'ldFailed' (@agda-deps@ tags
+-- them 'Hole'), so hole-filling still promotes. On cold start (no snapshot)
+-- the partial is committed regardless, so the daemon degrades rather than
+-- going dark. Call only under 'ssRebuildLock'.
 commitOrKeep :: ServerState -> Loaded -> IO Promotion
 commitOrKeep ss@ServerState{..} ld = do
   cur <- readIORef ssLoaded
@@ -1276,10 +1270,9 @@ warmStart ss@ServerState{..}
       writeIORef ssDirtyFiles dirty
       writeIORef ssAddedFiles added
       writeIORef ssDirty needBuild
-      -- Cold start (ssLoaded == Nothing): commit directly, bypassing the
-      -- 'commitOrKeep' gate. Its cold-start arm would promote regardless, so
-      -- 'cfgRequireWellTyped' never withholds the first served snapshot
-      -- ("degrade, not go dark") — a warm-seeded union may carry 'ldFailed'.
+      -- Cold start (ssLoaded == Nothing): commit directly. The 'commitOrKeep'
+      -- gate would promote regardless here, so 'cfgRequireWellTyped' never
+      -- withholds the first snapshot ("degrade, not go dark").
       commitBuild ss ld   -- install snapshot + GC the transient decodes
       hPutStrLn stderr $
         "agda-explore: warm start — reused " ++ show (length present)

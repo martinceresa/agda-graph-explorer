@@ -69,9 +69,7 @@ data Opts = Opts
   , oWatch    :: Bool
   , oIncremental :: Bool
   , oRequireWellTyped :: Bool
-    -- ^ only promote fully-well-typed rebuilds (@--require-well-typed@).
   , oStrictProducer :: Bool
-    -- ^ strict @agda-deps@: drop @--keep-going@, add @--incremental@ (@--strict-producer@).
   , oQueryLog :: Bool
   , oAutoResolve :: Bool
   , oEnableInteract :: Bool
@@ -123,9 +121,7 @@ data FileConfig = FileConfig
   , fcNoWatch       :: Maybe Bool
   , fcNoIncremental :: Maybe Bool
   , fcRequireWellTyped :: Maybe Bool
-    -- ^ positive flag (default off): only promote fully-well-typed rebuilds.
   , fcStrictProducer :: Maybe Bool
-    -- ^ positive flag (default off): strict @agda-deps@ (drop @--keep-going@, add @--incremental@).
   , fcNoQueryLog    :: Maybe Bool
   , fcNoAutoResolve :: Maybe Bool
   , fcEnableInteract :: Maybe Bool

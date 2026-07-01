@@ -4,31 +4,19 @@
 
 ### `agda-explore`: opt-in strict producer + well-typed-only promotion (2026-07-01)
 
-Two independent, default-off knobs on the daemon, controlling how it
-consumes `agda-deps` builds. Both moot in preloaded mode.
+Two independent, default-off daemon knobs for how it consumes `agda-deps`
+builds (both moot in preloaded mode):
 
-- **`--strict-producer` (`strict-producer:`).** Drops `--keep-going` so
-  any type error aborts the build (the existing serve-stale path keeps
-  the last graph) and enables `agda-deps`' `--incremental` fragment cache
-  plus a shared `--cache-dir` above the per-entry out-dirs. The producer
-  disables `--incremental` under `--keep-going`, so the two are mutually
-  exclusive — `buildBaseArgs` now picks one. The shared cache is race-free
-  (builds are serialised; `buildMulti` runs entries sequentially) and lets
-  entries reuse each other's fragments (keyed on interface hash). Needs
-  Agda ≥ 2.9.
-- **`--require-well-typed` (`require-well-typed:`).** Gates *promotion*
-  via the new `commitOrKeep` seam (shared by `rebuildLocked` /
-  `forceRebuild` / `kickRebuild`): a rebuild whose `ldFailed` is non-empty
-  is refused when a prior snapshot exists — the daemon keeps serving the
-  last well-typed graph and change-gates a retry — but always commits on
-  cold start (don't go dark). Holes are tagged `Hole`, never
-  `failedModules`, so hole-filling still refreshes. `--strict-producer`
-  subsumes it (no partial ever reaches the gate).
-
-Verified: `buildBaseArgs` emits the right producer argv per flag; the
-`commitOrKeep` gate refuses-then-recovers across the cold / gate-off /
-clean-rebuild cases; real `agda-deps` 1.1 + Agda 2.9 accept the strict
-argv and populate the fragment cache.
+- **`--strict-producer` (`strict-producer:`).** Drops `--keep-going` (any
+  error aborts ⇒ serve-stale keeps the last graph) and enables `agda-deps`'
+  `--incremental` fragment cache under a shared `--cache-dir`. The producer
+  disables `--incremental` under `--keep-going`, so `buildBaseArgs` picks
+  one. Needs Agda ≥ 2.9.
+- **`--require-well-typed` (`require-well-typed:`).** The new `commitOrKeep`
+  seam withholds a rebuild whose `ldFailed` is non-empty while a prior
+  snapshot exists (keep serving the last well-typed graph), but always
+  commits on cold start. Holes are tagged `Hole`, never `failedModules`, so
+  hole-filling still refreshes. `--strict-producer` subsumes it.
 
 ### Adopt producer `nodeKeyVersion` 3 — anonymous-module lifting + `module-local` provenance (2026-06-30)
 

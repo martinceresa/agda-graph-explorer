@@ -106,11 +106,10 @@ rebuild · status
 ```
 
 When sources change it re-runs `agda-deps` as a subprocess (reusing
-Agda's `.agdai` cache) and hot-swaps the in-memory `Index`. Two opt-in
-modes tighten this: `--require-well-typed` keeps serving the last
-well-typed graph while a type error stands (holes still refresh), and
-`--strict-producer` runs `agda-deps` strictly to unlock its
-`--incremental` fragment cache. A Claude Code plugin under
+Agda's `.agdai` cache) and hot-swaps the in-memory `Index`.
+`--require-well-typed` keeps serving the last well-typed graph while a
+type error stands; `--strict-producer` unlocks `agda-deps`' faster
+`--incremental` cache. A Claude Code plugin under
 [`plugin/`](plugin/README.md) bundles the server with a skill and two
 Agda agents.
 
@@ -252,10 +251,9 @@ list), `graph` (a prebuilt `graph.json` for preloaded mode), `project`,
 `out-dir`, `agda-deps-bin`, `agda-unused-bin`. Behaviour toggles (bools):
 `no-term-hashes`, `no-signatures`, `normalise-signatures`,
 `show-implicit`, `no-auto-rebuild`, `no-watch`, `require-well-typed`
-(only promote a rebuild that fully type-checks — otherwise keep serving
-the last well-typed graph; holes still refresh), `strict-producer`
-(strict `agda-deps`: drop `--keep-going`, enable its `--incremental`
-fragment cache for faster rebuilds; needs Agda ≥ 2.9), `enable-interact`
+(only promote a fully type-checking rebuild; holes still refresh),
+`strict-producer` (strict `agda-deps`: drop `--keep-going` for its
+`--incremental` cache; needs Agda ≥ 2.9), `enable-interact`
 (write-side bridge), `inspect` (web inspector); plus `min-term-depth`
 (int), `inspect-port` (start port, default 7000; implies `inspect`),
 `agda-bin` (else `$AGDA_BIN` / `$PATH`), and `agda-arg` (extra flags for
