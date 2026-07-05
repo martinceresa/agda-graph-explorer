@@ -22,25 +22,33 @@ module Main (main) where
 import           Control.Concurrent (forkIO)
 import           Control.Exception  (SomeException, finally, try)
 import           Control.Monad      (forM, void, when)
-import           Data.List          (intercalate, isSuffixOf, sortOn)
+import           Data.Aeson         (Value (..), object, toJSON, (.=))
+import qualified Data.Aeson.Key     as Key
+import           Data.List          (intercalate, isPrefixOf, isSuffixOf,
+                                     partition, sortOn)
 import           Data.Maybe         (fromMaybe)
+import qualified Data.Text          as T
+import qualified Data.Text.IO       as TIO
 import           System.Directory   (doesDirectoryExist, doesFileExist,
                                      getCurrentDirectory, listDirectory,
-                                     makeAbsolute)
+                                     makeAbsolute, removePathForcibly)
 import           System.Environment (getArgs, lookupEnv)
-import           System.Exit        (exitFailure)
-import           System.FilePath    (splitSearchPath, takeDirectory,
+import           System.Exit        (exitFailure, exitSuccess)
+import           System.FilePath    (isAbsolute, splitSearchPath, takeDirectory,
                                      takeFileName, (</>))
 import           System.IO          (hPutStrLn, stderr)
 
 import           AgdaMcp.Config     (Opts (..), applyConfig,
                                      discoverConfigPath, extractConfigArg,
                                      loadConfig, orderNub)
+import           AgdaMcp.Control    (startControl)
 import           AgdaMcp.Inspect    (startInspector)
 import           AgdaMcp.Rpc        (runStdioLoop)
 import           AgdaMcp.State
-import           AgdaInteract.Tools (closeAllSessions, reapIdleSessions)
-import           AgdaMcp.Tools      (dispatch)
+import           AgdaMcp.ToolDef    (Tool (..))
+import           AgdaInteract.Tools (closeAllSessions, interactTools,
+                                     reapIdleSessions)
+import           AgdaMcp.Tools      (dispatch, enabledTools)
 import qualified BuildInfo
 
 -- ---------------------------------------------------------------------
@@ -61,6 +69,10 @@ defOpts = Opts
   , oEnableInteract = False, oAgdaBin = Nothing, oInteractArgs = []
   , oInteractHeapMb = 0, oMaxSessions = 2, oSessionIdleSecs = 0
   , oInspect = False, oInspectPort = 7000
+  , oAutoHints = True, oAutoHintsLimit = 3, oAutoHintsSecs = 1
+  , oControlPort = 0
+  , oCoverageIgnore = []
+  , oOverlayGraphs = []
   , oHelp = False, oVer = False
   }
 
@@ -113,6 +125,12 @@ parseOpts (x : xs) o = case x of
   "--interaction-idle-timeout" -> need $ \v -> o { oSessionIdleSecs = readInt v (oSessionIdleSecs o) }
   "--inspect"         -> parseOpts xs o { oInspect = True }
   "--inspect-port"    -> need $ \v -> o { oInspect = True, oInspectPort = readInt v (oInspectPort o) }
+  "--no-auto-hints"      -> parseOpts xs o { oAutoHints = False }
+  "--auto-hints-limit"   -> need $ \v -> o { oAutoHintsLimit = readInt v (oAutoHintsLimit o) }
+  "--auto-hints-timeout" -> need $ \v -> o { oAutoHintsSecs = readInt v (oAutoHintsSecs o) }
+  "--control-port"       -> need $ \v -> o { oControlPort = readInt v (oControlPort o) }
+  "--coverage-ignore"    -> need $ \v -> o { oCoverageIgnore = oCoverageIgnore o ++ [v] }
+  "--overlay-graph"      -> need $ \v -> o { oOverlayGraphs = oOverlayGraphs o ++ [v] }
   _ | isAgdaFile x    -> parseOpts xs o { oEntries = oEntries o ++ [x] }
     | otherwise       -> Left ("unknown argument: " ++ x)
   where
@@ -188,6 +206,9 @@ buildConfig o = do
   envIncl  <- lookupEnv "AGDA_EXPLORE_INCLUDE"
   cwd      <- getCurrentDirectory
   proj     <- makeAbsolute (fromMaybe cwd (oProj o `orElse` envProj))
+  -- Decode + origin-tag the overlay graphs once (warns and skips bad ones);
+  -- retained on the Config and re-unioned into every snapshot.
+  overlays <- loadOverlays =<< mapM makeAbsolute (oOverlayGraphs o)
   let inclRaw  = if not (null (oIncl o)) then oIncl o
                  else maybe [] splitSearchPath envIncl
       -- Entries: the CLI/config list ('oEntries', already appended in
@@ -225,6 +246,12 @@ buildConfig o = do
         , cfgSessionIdleSecs = oSessionIdleSecs o
         , cfgInspect      = oInspect o
         , cfgInspectPort  = oInspectPort o
+        , cfgAutoHints    = oAutoHints o
+        , cfgAutoHintsLimit = oAutoHintsLimit o
+        , cfgAutoHintsSecs = oAutoHintsSecs o
+        , cfgControlPort  = oControlPort o
+        , cfgCoverageIgnore = oCoverageIgnore o
+        , cfgOverlays     = overlays
         , cfgIncludes     = bin
         }
       preloaded g incl = do
@@ -290,7 +317,13 @@ usage = unlines
   , "an Agda project's dependency graph. Normally launched by the bundled"
   , "Claude Code plugin, not by hand."
   , ""
-  , "Options:"
+  , "One-shot query (no daemon), for scripting / non-MCP use:"
+  , "  agda-explore query <tool> [key=value ...] [--json] [--graph FILE] [-i DIR]"
+  , "    Runs a read tool once and prints its result (add --json for a structured"
+  , "    envelope). E.g.:  agda-explore query brief name=Foo.bar --graph deps.json"
+  , "                      agda-explore query search query=map --graph deps.json --json | jq"
+  , ""
+  , "Options (server mode):"
   , "  --entry FILE          Agda entry module to build the graph from"
   , "                        (repeatable; several entries union their import"
   , "                        closures into one graph — see config `entries:`)."
@@ -331,6 +364,20 @@ usage = unlines
   , "                        Events. Off by default; localhost-only, no auth."
   , "  --inspect-port N      Inspector start port (implies --inspect; probes upward"
   , "                        from N if busy, so several projects don't clash)."
+  , "  --no-auto-hints       Disable the speculative Mimer probe `check` runs over"
+  , "                        remaining goals (on by default; solutions it finds are"
+  , "                        reported inline)."
+  , "  --auto-hints-limit N  Max goals the check-time Mimer probe tries (default 3)."
+  , "  --auto-hints-timeout N  Mimer budget per probed goal, seconds (default 1)."
+  , "  --control-port N      Serve a localhost control endpoint (GET /check?file=…)"
+  , "                        for PostToolUse hooks; probes upward from N, writes the"
+  , "                        bound port to <out-dir>/control-port. Needs"
+  , "                        --enable-interact. Off by default."
+  , "  --coverage-ignore GLOB  Source files (matching GLOB) intentionally outside every"
+  , "                        entry's closure; excluded from the coverage warning. Repeatable."
+  , "  --overlay-graph FILE  Federate a prebuilt expanded graph.json (e.g. an agda-stdlib"
+  , "                        graph) into every snapshot so search/type_of/find_lemma see its"
+  , "                        definitions ([external: …]-tagged). Project defs win. Repeatable."
   , "  --config FILE         Load this .agda-explore.yml (else discovered; see below)."
   , "  -h, --help            This help."
   , "  -V, --version         Version."
@@ -346,9 +393,68 @@ usage = unlines
   , "AGDA_UNUSED_BIN."
   ]
 
+-- | One-shot read query: @agda-explore query \<tool\> [key=value ...] [--json]
+-- [server flags]@. Loads the graph once (no daemon) and dispatches through the
+-- same tool table the server uses, so the CLI inherits every read tool. Exit 0
+-- on any answer (incl. "no results"), nonzero on an operational error.
+-- @key=value@ tokens (no leading dash) are tool args; other tokens are
+-- server/config flags (@--graph FILE@, @-i DIR@). Read-oriented; the write
+-- bridge stays MCP-only.
+runQuery :: [String] -> IO ()
+runQuery [] = do
+  hPutStrLn stderr "usage: agda-explore query <tool> [key=value ...] [--json] [--graph FILE] [-i DIR ...]"
+  exitFailure
+runQuery (tool : rest) = do
+  let isKv a         = not ("-" `isPrefixOf` a) && '=' `elem` a
+      (kvs, flags0)  = partition isKv rest
+      wantJson       = "--json" `elem` flags0
+      flags          = filter (/= "--json") flags0
+      (mCfgArg, fl') = extractConfigArg (preprocess flags)
+  (seed, _) <- loadSeed mCfgArg
+  finalOpts <- case parseOpts fl' seed of
+    Left e  -> hPutStrLn stderr ("agda-explore: " ++ e) >> exitFailure
+    Right f -> pure f
+  cfg <- buildConfig finalOpts
+  ss  <- newServerState cfg
+  let args = object $ map kvPair kvs
+                        ++ [ (Key.fromText "format", toJSON ("json" :: T.Text)) | wantJson ]
+  case [ t | t <- enabledTools ss, tName t == T.pack tool ] of
+    [] -> do
+      hPutStrLn stderr $ "agda-explore: unknown tool `" ++ tool ++ "`. Available: "
+                           ++ intercalate ", " [ T.unpack (tName t) | t <- enabledTools ss ]
+      exitFailure
+    (t : _) -> do
+      r <- tRun t ss args
+      case r of
+        Right txt -> TIO.putStrLn txt >> exitSuccess
+        Left  err -> TIO.hPutStrLn stderr err >> exitFailure
+
+-- | Parse one @key=value@ token into an aeson pair, coercing the value to a
+-- JSON number/bool when it clearly is one (so @limit=50@ reaches 'argInt' as a
+-- @Number@, not a string). Everything else stays a string.
+kvPair :: String -> (Key.Key, Value)
+kvPair s =
+  let (k, v0) = break (== '=') s
+  in (Key.fromText (T.pack k), coerceVal (drop 1 v0))
+
+coerceVal :: String -> Value
+coerceVal "true"  = Bool True
+coerceVal "false" = Bool False
+coerceVal s
+  | [(n, "")] <- (reads s :: [(Int, String)])    = toJSON n
+  | [(d, "")] <- (reads s :: [(Double, String)]) = toJSON d
+  | otherwise                                     = toJSON (T.pack s)
+
 main :: IO ()
 main = do
   argv <- getArgs
+  case argv of
+    ("query" : rest) -> runQuery rest
+    _                -> mainServer argv
+
+-- | The default mode: the long-lived MCP stdio server.
+mainServer :: [String] -> IO ()
+mainServer argv = do
   -- Lift --config out before the hand-rolled parser sees it (after the
   -- --key=value splitter, so only the space-separated form reaches here).
   let (mCfgArg, argv') = extractConfigArg (preprocess argv)
@@ -376,14 +482,18 @@ main = do
           -- incremental path is live).
           warmStart ss
           startInspect ss cfg
+          mPortFile <- startControlEndpoint ss cfg
           -- Idle-session reaper: only when interaction is on and a timeout is
           -- configured (interaction-idle-timeout > 0); otherwise no thread.
           when (cfgEnableInteract cfg && cfgSessionIdleSecs cfg > 0) $
             void (forkIO (reapIdleSessions ss))
           hPutStrLn stderr ("agda-explore: ready (" ++ modeDesc cfg ++ ")")
           -- Reap any live interaction sessions when the stdio loop ends
-          -- (stdin EOF) or throws, so child agda processes aren't orphaned.
-          runStdioLoop (dispatch ss) `finally` closeAllSessions ss
+          -- (stdin EOF) or throws, so child agda processes aren't orphaned;
+          -- also drop the control-port discovery file so hooks stop probing
+          -- a dead endpoint.
+          runStdioLoop (dispatch ss)
+            `finally` (closeAllSessions ss >> mapM_ removeQuiet mPortFile)
 
 -- | Start the localhost web inspector when @--inspect@ is on. Binds the
 -- listening socket (probing upward from 'cfgInspectPort' so several daemons
@@ -403,6 +513,39 @@ startInspect ss cfg = case ssInspect ss of
       Nothing -> hPutStrLn stderr
         ("agda-explore: inspector could not bind a port near "
            ++ show (cfgInspectPort cfg) ++ "; continuing without it.")
+
+-- | Start the localhost control endpoint when @--control-port@ is set (and
+-- the interaction bridge is on — @/check@ runs through it). Returns the
+-- port-file path for shutdown cleanup. The callback dispatches to the same
+-- @check@ runner the MCP tool uses, so an external hook and the agent see
+-- byte-identical verdicts. A bind failure is logged but never fatal.
+startControlEndpoint :: ServerState -> Config -> IO (Maybe FilePath)
+startControlEndpoint ss cfg
+  | cfgControlPort cfg <= 0 = pure Nothing
+  | not (cfgEnableInteract cfg) = do
+      hPutStrLn stderr "agda-explore: --control-port needs --enable-interact (its /check runs the bridge); not starting it."
+      pure Nothing
+  | otherwise = do
+      let outAbs   = let od = cfgOutDir cfg
+                     in if isAbsolute od then od else cfgProjectRoot cfg </> od
+          portFile = outAbs </> "control-port"
+          checkCb f = case [ t | t <- interactTools, tName t == "check" ] of
+            (t : _) -> tRun t ss (object ["file" .= f])
+            []      -> pure (Left "check tool unavailable")
+      mport <- startControl (cfgControlPort cfg) portFile checkCb
+      case mport of
+        Just p  -> do
+          hPutStrLn stderr ("agda-explore: control endpoint at http://127.0.0.1:"
+                              ++ show p ++ " (port file " ++ portFile ++ ")")
+          pure (Just portFile)
+        Nothing -> do
+          hPutStrLn stderr ("agda-explore: control endpoint could not bind a port near "
+                              ++ show (cfgControlPort cfg) ++ "; continuing without it.")
+          pure Nothing
+
+-- | Best-effort file removal (shutdown path; never throws).
+removeQuiet :: FilePath -> IO ()
+removeQuiet p = void (try (removePathForcibly p) :: IO (Either SomeException ()))
 
 -- | Discover + load a config file and overlay it onto 'defOpts',
 -- returning the seed 'Opts' and the applied path (for the breadcrumb).

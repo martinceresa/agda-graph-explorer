@@ -3,8 +3,7 @@
 -- | SCC-condensation of an 'Index': collapse each strongly-connected
 -- component to a single node so downstream passes can run a topological DP
 -- on the resulting DAG. Shared by every analysis that needs it
--- (@load-bearing@, @horizon@, @pyre@, @chokepoint@) — previously each
--- carried a byte-identical private copy.
+-- (@load-bearing@, @horizon@, @pyre@, @chokepoint@).
 module AgdaOptimization.Condense
   ( Condensation(..)
   , buildCondensation

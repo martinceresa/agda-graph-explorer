@@ -24,6 +24,7 @@ library agda-graph
   exposed-modules:  AgdaGraph.Schema
                     AgdaGraph.Index
                     AgdaGraph.Union
+                    AgdaGraph.Glob
                     AgdaGraph.WL
                     AgdaGraph.Similarity
                     AgdaGraph.GoalCanon
@@ -116,6 +117,7 @@ executable agda-explore
                        AgdaMcp.Tools
                        AgdaMcp.ToolDef
                        AgdaMcp.Inspect
+                       AgdaMcp.Control
                        AgdaInteract.Session
                        AgdaInteract.Registry
                        AgdaInteract.GoalId

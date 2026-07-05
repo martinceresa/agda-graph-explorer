@@ -4,7 +4,7 @@
 -- and weighted-Jaccard similarity over the resulting fingerprints. Shared
 -- by the structural-similarity analyses (@fingerprint@, @echo@,
 -- @silhouette@ in @agda-optimization@, and @similar_types@ in
--- @agda-explore@), which previously each carried a bit-identical copy.
+-- @agda-explore@).
 --
 -- It lives in the @agda-graph@ library (rather than the
 -- @agda-optimization@ executable) precisely so the @agda-explore@ daemon

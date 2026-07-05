@@ -32,6 +32,7 @@ module AgdaMcp.State
   , forceRebuild
   , kickRebuild
   , warmStart
+  , loadOverlays
     -- * Query telemetry
   , appendQueryLog
     -- * Background file-watch
@@ -56,7 +57,7 @@ import qualified Data.ByteString.Lazy as BL
 import           Data.Char            (isDigit)
 import           Data.IORef
 import qualified Data.IntMap.Strict   as IM
-import           Data.List            (isInfixOf, isSuffixOf, maximumBy)
+import           Data.List            (isInfixOf, isSuffixOf, maximumBy, sort)
 import qualified Data.Map.Strict      as M
 import           Data.Maybe           (catMaybes, isJust, mapMaybe)
 import qualified Data.Set             as S
@@ -73,7 +74,8 @@ import           System.Directory     (canonicalizePath,
                                        listDirectory, renameFile)
 import           System.Environment   (getExecutablePath, lookupEnv)
 import           System.Exit          (ExitCode (..))
-import           System.FilePath      ((</>))
+import           System.FilePath      ((</>), makeRelative, takeBaseName,
+                                       takeDirectory, takeFileName)
 import           System.FSNotify      (Event (..), WatchManager, eventPath,
                                        startManager, watchTree)
 import           System.IO            (IOMode (ReadWriteMode), hPutStrLn,
@@ -82,6 +84,7 @@ import           System.Mem           (performMajorGC)
 import           System.Process       (CreateProcess (..), proc,
                                        readCreateProcessWithExitCode)
 
+import           AgdaGraph.Glob       (globMatch)
 import           AgdaGraph.Index      (Index, buildIndexLean, idxDefs, idxRealCount)
 import           AgdaGraph.Schema     (Definition (..), ExpandedGraph (..))
 import           AgdaGraph.Union      (unionExpandedGraphs)
@@ -128,6 +131,12 @@ data Config = Config
   , cfgSessionIdleSecs :: !Int           -- ^ close an interaction session idle this many seconds; @<= 0@ = never (no reaper).
   , cfgInspect      :: !Bool             -- ^ run the localhost web inspector (@--inspect@).
   , cfgInspectPort  :: !Int              -- ^ start port for the inspector (probes upward on conflict).
+  , cfgAutoHints    :: !Bool             -- ^ speculative Mimer hints on @check@: probe remaining goals and report found terms inline.
+  , cfgAutoHintsLimit :: !Int            -- ^ max goals Mimer probes per @check@.
+  , cfgAutoHintsSecs :: !Int             -- ^ Mimer per-goal budget in seconds (its @-t@ option).
+  , cfgControlPort  :: !Int              -- ^ localhost control endpoint start port (hooks call @/check@); @<= 0@ = off.
+  , cfgCoverageIgnore :: ![String]       -- ^ globs for source files intentionally outside every entry's closure; suppressed from the coverage warning.
+  , cfgOverlays     :: ![ExpandedGraph]  -- ^ static overlay graphs (e.g. a prebuilt agda-stdlib graph), decoded once at startup and unioned into every snapshot so queries see external defs. Project defs win collisions.
   }
 
 defaultConfig :: Config
@@ -156,10 +165,16 @@ defaultConfig = Config
   , cfgAgdaBin      = Nothing
   , cfgInteractArgs = []
   , cfgInteractHeapMb = 0          -- no agda heap cap unless configured
-  , cfgMaxSessions  = 2            -- bound the worst-case live-session RAM (was a hard-coded 6)
+  , cfgMaxSessions  = 2            -- bound the worst-case live-session RAM
   , cfgSessionIdleSecs = 0         -- idle-session reaper off unless configured
   , cfgInspect      = False
   , cfgInspectPort  = 7000
+  , cfgAutoHints    = True
+  , cfgAutoHintsLimit = 3
+  , cfgAutoHintsSecs = 1
+  , cfgControlPort  = 0            -- control endpoint off unless configured
+  , cfgCoverageIgnore = []
+  , cfgOverlays     = []
   }
 
 -- | A cheap fingerprint of the source tree: file count + newest mtime.
@@ -218,6 +233,11 @@ data Loaded = Loaded
     -- 'AgdaMcp.Query.resolveDefNote'). Carried on the snapshot — rather
     -- than read from 'Config' — so "AgdaMcp.Query" needs no 'Config'
     -- import. Set in 'loadLoaded' from 'cfgAutoResolveUnique'.
+  , ldOrphanFiles :: ![FilePath]
+    -- ^ Source files on disk but outside every entry's import closure
+    -- (already @coverage-ignore@-filtered), so invisible to queries.
+    -- Surfaced by @status@ and by the empty-result coverage note. Empty in
+    -- preloaded mode.
   }
 
 -- | Is this snapshot's node-key format current? When 'False' in live
@@ -261,10 +281,10 @@ data ServerState = ServerState
     -- fallback ('ensureWorker') go through this, so exactly one worker ever
     -- drains 'ssWake' — otherwise two workers could double-build.
   , ssLastRebuilt :: !(IORef Bool)
-    -- ^ Telemetry (E6): whether the /most recent/ tool runner served a
+    -- ^ Telemetry: whether the /most recent/ tool runner served a
     -- stale snapshot — i.e. a rebuild was pending/in-flight (the @stale@
     -- column), NOT "this query itself ran a rebuild". The tool runners
-    -- write it via the E1 @(Loaded, Bool)@ plumbing;
+    -- write it via the @(Loaded, Bool)@ plumbing;
     -- 'AgdaMcp.Tools.handleCall' reads and
     -- resets it after each @tools/call@. (status sets it 'False'; the
     -- @rebuild@ tool sets it 'True'.)
@@ -328,6 +348,12 @@ data ServerState = ServerState
     -- is a no-op and no socket/thread exists, so the feature is inert. The
     -- listening socket itself is started separately in @Main@
     -- ('AgdaMcp.Inspect.startInspector').
+  , ssToolCounts  :: !(IORef (M.Map Text Int))
+    -- ^ Per-run @tools/call@ histogram (tool name → invocation count),
+    -- incremented in 'AgdaMcp.Tools.handleCall' and rendered by @status@ —
+    -- passive adoption telemetry, so which tools agents actually use is
+    -- visible without parsing transcripts. In-memory only (resets with the
+    -- daemon).
   }
 
 newServerState :: Config -> IO ServerState
@@ -351,6 +377,7 @@ newServerState c =
     <*> newIORef []
     <*> newIORef S.empty
     <*> (if cfgInspect c then Just <$> newInspectHub else pure Nothing)
+    <*> newIORef M.empty        -- ssToolCounts
 
 -- ---------------------------------------------------------------------
 -- Source scanning
@@ -507,11 +534,11 @@ stalenessBanner ss = do
 -- Load / build
 -- ---------------------------------------------------------------------
 
-loadLoaded :: Bool -> [FilePath] -> FilePath -> IO (Either String Loaded)
-loadLoaded autoResolveUnique includes graphFile =
+loadLoaded :: Config -> FilePath -> IO (Either String Loaded)
+loadLoaded cfg graphFile =
   decodeGraphFile graphFile
     >>= either (pure . Left)
-               (fmap Right . loadedFromGraph autoResolveUnique includes (Just graphFile))
+               (fmap Right . loadedFromGraph cfg (Just graphFile))
 
 -- | Decode an expanded @graph.json@ from disk, returning the parsed
 -- 'ExpandedGraph' (or a clean diagnostic). Shared by the single-entry
@@ -526,13 +553,65 @@ decodeGraphFile graphFile = do
       Left perr            -> Left ("cannot parse " ++ graphFile ++ ": " ++ perr)
       Right (eg :: ExpandedGraph) -> Right eg
 
+-- | A short human-readable origin label for an overlay graph, derived from
+-- its path: the containing directory's basename (e.g. a cache dir named
+-- @stdlib-2.9-2.0@), falling back to the file's own basename. Rendered in
+-- query output as @[external: <label>]@.
+overlayLabel :: FilePath -> Text
+overlayLabel p =
+  let dir = takeFileName (takeDirectory p)
+  in T.pack (if null dir || dir == "." then takeBaseName p else dir)
+
+-- | Decode one overlay graph, validate it, and tag every definition with an
+-- origin label. Rejected (a decode failure, or a node-key version that
+-- differs from this binary's — its keys wouldn't cross-reference the
+-- project graph's) with a clean diagnostic; a static overlay can't be
+-- rebuilt, so a mismatch is skipped, never fatal.
+loadOverlayGraph :: FilePath -> IO (Either String ExpandedGraph)
+loadOverlayGraph path = do
+  e <- decodeGraphFile path
+  pure $ case e of
+    Left err -> Left err
+    Right eg
+      | egNodeKeyVersion eg /= currentNodeKeyVersion ->
+          Left ("node-key format v" ++ show (egNodeKeyVersion eg) ++ " != v"
+                  ++ show currentNodeKeyVersion ++ " (this binary) — keys would not "
+                  ++ "cross-reference the project graph")
+      | otherwise ->
+          let lbl = overlayLabel path
+          in Right eg { egDefinitions =
+                          map (\d -> d { defOrigin = Just lbl }) (egDefinitions eg) }
+
+-- | Decode + tag the configured overlay graphs, warning-and-skipping any
+-- that fail to load or version-mismatch (never fatal — a stale cache must
+-- not take the daemon down). Called once at startup ('buildConfig');
+-- the result is retained on 'cfgOverlays' and re-unioned into every
+-- snapshot.
+loadOverlays :: [FilePath] -> IO [ExpandedGraph]
+loadOverlays paths = fmap catMaybes $ forM paths $ \p -> do
+  r <- loadOverlayGraph p
+  case r of
+    Left err -> do
+      hPutStrLn stderr ("agda-explore: skipping overlay graph " ++ p ++ ": " ++ err)
+      pure Nothing
+    Right eg -> do
+      hPutStrLn stderr ("agda-explore: overlay graph " ++ p ++ " loaded ("
+                          ++ show (length (egDefinitions eg)) ++ " defs, origin "
+                          ++ show (overlayLabel p) ++ ")")
+      pure (Just eg)
+
 -- | Build a 'Loaded' snapshot from an already-parsed 'ExpandedGraph'. The
 -- @mGraphFile@ is purely cosmetic — it names the source in the stale-format
 -- warning; 'Nothing' for an in-memory union (no single backing file). The
 -- index-construction / forcing / similarity-cache wiring lives here so the
 -- disk path and the union path produce identical snapshots.
-loadedFromGraph :: Bool -> [FilePath] -> Maybe FilePath -> ExpandedGraph -> IO Loaded
-loadedFromGraph autoResolveUnique includes mGraphFile eg = do
+loadedFromGraph :: Config -> Maybe FilePath -> ExpandedGraph -> IO Loaded
+loadedFromGraph cfg mGraphFile egProject = do
+  -- Federate static overlay graphs (e.g. a stdlib graph) before indexing.
+  -- Project graph FIRST: 'unionExpandedGraphs' keeps the earliest-seen record,
+  -- so project defs win collisions and overlay-only names keep their origin.
+  let eg | null (cfgOverlays cfg) = egProject
+         | otherwise              = unionExpandedGraphs (egProject : cfgOverlays cfg)
   -- Take the module count up front so the rest of the snapshot can be built
   -- without keeping a reference to the full graph (see 'ldModuleCount').
   let !nMods = length (egModules eg)
@@ -546,7 +625,11 @@ loadedFromGraph autoResolveUnique includes mGraphFile eg = do
   _   <- evaluate (force (length rds))
   _   <- evaluate (force (IM.size ownerMap))
   now <- getCurrentTime
-  sig <- scanSources includes
+  sig <- scanSources (cfgIncludes cfg)
+  -- Coverage is a project concern: diff on-disk sources against the PROJECT
+  -- graph's closure, not the overlay-merged one (overlay files live outside
+  -- the project include roots anyway).
+  orphans <- computeOrphanFiles (cfgIncludes cfg) (cfgCoverageIgnore cfg) egProject
   let nkv = egNodeKeyVersion eg
   if nkv < currentNodeKeyVersion
     then hPutStrLn stderr
@@ -569,7 +652,8 @@ loadedFromGraph autoResolveUnique includes mGraphFile eg = do
     , ldOwnerMap = ownerMap
     , ldSigBodyFp = buildSigBodyFingerprints silhouetteDefaultWlK ix
     , ldSubtermFp = subtermMultisetsVec ix
-    , ldAutoResolveUnique = autoResolveUnique
+    , ldAutoResolveUnique = cfgAutoResolveUnique cfg
+    , ldOrphanFiles = orphans
     }
 
 -- | Precompute the @where@-/anonymous-module owner lookup consumed by
@@ -577,10 +661,10 @@ loadedFromGraph autoResolveUnique includes mGraphFile eg = do
 -- its enclosing top-level def — the nearest non-local def at or above the
 -- helper's start line, in the helper's own module or an enclosing one —
 -- and key it by the local def's 'defId'. A local def with no such owner
--- (or no line) is simply absent from the map, matching the old 'Nothing'.
+-- (or no line) is simply absent from the map (returns 'Nothing').
 --
--- Equivalent, by construction, to the per-call scan + @maximumBy (comparing
--- defLine)@ the query used to run for each rendered result line; folded
+-- Equivalent, by construction, to a per-call scan + @maximumBy (comparing
+-- defLine)@ over each rendered result line; folded
 -- once here so a query touching N lines is O(N log n) rather than
 -- O(N · nDefs). The non-local candidates are pulled out once and shared
 -- across all locals.
@@ -660,7 +744,7 @@ runOneEntry cfg deps outDir entry = do
 buildSingle :: Config -> FilePath -> FilePath -> IO (Either String Loaded)
 buildSingle cfg deps entry =
   runOneEntry cfg deps (cfgOutDir cfg) entry
-    >>= either (pure . Left) (loadLoaded (cfgAutoResolveUnique cfg) (cfgIncludes cfg))
+    >>= either (pure . Left) (loadLoaded cfg)
 
 -- | 'canonicalizePath' collapsing any IO failure to the input path, so a
 -- transient/edge case degrades to a non-match rather than a crash.
@@ -672,6 +756,23 @@ safeCanon p =
 -- compare exactly against the watcher's (also canonicalised) change paths.
 closureFiles :: ExpandedGraph -> IO (S.Set FilePath)
 closureFiles eg = S.fromList <$> mapM safeCanon (M.elems (egModuleFiles eg))
+
+-- | Source files under the @includes@ roots that are in no module of
+-- @egProject@'s closure ('closureFiles') — on disk but outside every entry's
+-- import closure, so invisible to every query. Both sides are canonicalised
+-- (path-normalisation-independent), then @coverage-ignore@ globs drop matches;
+-- each glob is tried against the absolute path, the basename, and the
+-- include-relative path (so @papers/**@ and @Scratch.agda@ both work). Empty
+-- when @includes@ is empty (preloaded mode).
+computeOrphanFiles :: [FilePath] -> [String] -> ExpandedGraph -> IO [FilePath]
+computeOrphanFiles includes ignore egProject = do
+  onDisk  <- listAgdaFiles includes
+  inGraph <- closureFiles egProject
+  keep    <- filterM (fmap (\c -> not (S.member c inGraph)) . safeCanon) onDisk
+  pure (sort [ f | f <- keep, not (ignored f) ])
+  where
+    ignored f = any (\g -> any (globMatch g) (forms f)) ignore
+    forms f   = f : takeFileName f : [ makeRelative r f | r <- includes ]
 
 -- | Decide which entries a rebuild must re-run @agda-deps@ for, given the
 -- changed-file set. An edit usually touches only one entry's closure, so
@@ -726,7 +827,7 @@ chooseReRun cfg forceFull watching cache dirty newAdhoc
 unionAndIndex :: Config -> [ExpandedGraph] -> IO (ExpandedGraph, Loaded)
 unionAndIndex cfg egs = do
   let !eg = unionExpandedGraphs egs
-  ld <- loadedFromGraph (cfgAutoResolveUnique cfg) (cfgIncludes cfg) Nothing eg
+  ld <- loadedFromGraph cfg Nothing eg
   pure (eg, ld)
 
 -- | Multi-entry build with reuse over the given entry list (configured +
@@ -840,7 +941,7 @@ withTryBuildLock path act =
 runBuildShared :: ServerState -> Bool -> IO (Either String Loaded)
 runBuildShared ss forceFull
   | cfgPreloaded cfg =
-      loadLoaded (cfgAutoResolveUnique cfg) (cfgIncludes cfg) (cfgGraphPath cfg)
+      loadLoaded cfg (cfgGraphPath cfg)
   | null (cfgEntries cfg) =
       pure (Left "no entry module configured; start the server with --entry FILE (repeatable), \
                  \config `entries:`, or --graph FILE")
@@ -856,7 +957,7 @@ runBuildShared ss forceFull
         "agda-explore: another daemon holds the build lock for this \
         \project; reading its published graph instead of running a \
         \competing agda-deps."
-      loadLoaded (cfgAutoResolveUnique cfg) (cfgIncludes cfg) (cfgGraphPath cfg)
+      loadLoaded cfg (cfgGraphPath cfg)
 
     build = do
       mdeps <- findBin "agda-deps" (cfgDepsBin cfg) "AGDA_DEPS_BIN"
@@ -933,7 +1034,7 @@ runBuildShared ss forceFull
 -- flight (or pending) and the results reflect a previously-built snapshot
 -- rather than a guaranteed-fresh one. Callers ('AgdaMcp.Tools.withFresh'
 -- /etc./) surface it as a one-line footer. The flag is the foundation the
--- telemetry (E6) and other-tool fast-paths (E2) build on, so it is kept
+-- telemetry and other-tool fast-paths build on, so it is kept
 -- explicit here. Serve-stale is /always on/ — there is no opt-out.
 --
 -- Two staleness-detection paths decide whether a rebuild is warranted:
@@ -959,7 +1060,7 @@ ensureFresh ss@ServerState{..}
           cur' <- readIORef ssLoaded
           case cur' of
             Just ld -> pure (Right (ld, False))
-            Nothing -> seedFrom (loadLoaded (cfgAutoResolveUnique ssConfig) (cfgIncludes ssConfig) (cfgGraphPath ssConfig))
+            Nothing -> seedFrom (loadLoaded ssConfig (cfgGraphPath ssConfig))
   | otherwise = do
       cur <- readIORef ssLoaded
       case cur of
@@ -1287,7 +1388,7 @@ warmStart ss@ServerState{..}
     -- repopulating the cache). If the union is absent too, do nothing and
     -- let the normal cold build run.
     seedFromUnion = do
-      r <- loadLoaded (cfgAutoResolveUnique cfg) (cfgIncludes cfg) (cfgGraphPath cfg)
+      r <- loadLoaded cfg (cfgGraphPath cfg)
       case r of
         Left _   -> pure ()
         Right ld -> do
@@ -1360,7 +1461,7 @@ coldStartDiag raw = T.pack $
   \once it does (no reconnect needed).\n\n" ++ raw
 
 -- ---------------------------------------------------------------------
--- Query telemetry (E6)
+-- Query telemetry
 -- ---------------------------------------------------------------------
 
 -- | Append one telemetry record (a pre-built aeson 'Value') as a single

@@ -29,29 +29,45 @@ One shared library and four executables:
   on `$PATH`; links no Agda.
 - **`agda-explore`** — *interactive MCP server*: loads the expanded
   `graph.json` once into `AgdaGraph.Index` and answers point queries over
-  stdio (`locate` / `callers` / `callees` / `impact` / `path` / `roots` /
-  `type_of` / `similar_types` / `similar_bodies` / `find_lemma` / `search` /
-  `unused`), regenerating the graph on the fly by re-running `agda-deps` as a
-  subprocess. Under `--enable-interact` it also exposes a **write-side
-  interaction bridge** (`load` / `check` / `goal_type` / `goal_context` /
+  stdio (`brief` / `locate` / `callers` / `callees` / `impact` / `path` /
+  `roots` / `type_of` / `similar_types` / `similar_bodies` / `find_lemma` /
+  `search` / `unused`; `brief` is a one-call orientation bundle, and
+  `search`/`callers`/`callees` take `format:json` for a structured envelope),
+  regenerating the graph on the fly by re-running `agda-deps` as a
+  subprocess. `--overlay-graph FILE` (repeatable) federates a prebuilt
+  overlay graph (e.g. agda-stdlib) into every snapshot — its defs render an
+  `[external: …]` tag; project defs win key collisions. A closure-coverage
+  warning (config `coverage-ignore:` globs) flags source files outside every
+  entry's closure. A one-shot `agda-explore query <tool> key=value…` CLI
+  dispatches through the same read-tool table without a daemon. Under
+  `--enable-interact` it also exposes a **write-side
+  interaction bridge** (`load` / `goal_brief` / `check` / `goal_type` / `goal_context` /
   `infer` / `normalize` / `case_split` / `refine` / `give` / `give_many` /
-  `auto` / `construct` / `give_file` / `new_module` / `lemmas` / `stage` /
-  `promote` / `discard`) over a long-lived `agda --interaction-json`
+  `auto` / `auto_all` / `construct` / `give_file` / `new_module` / `lemmas` /
+  `stage` / `promote` / `discard`; `goal_brief` is the hole-side orientation
+  bundle) over a long-lived `agda --interaction-json`
   subprocess: every mutator is Agda-validated and returns a unified diff (no
   write unless passed `write:true`, which applies + reloads), under a hard
   zero-axiom contract. Beyond hole-filling it authors files (`check`,
   `give_file`, `new_module`, `construct`, `lemmas`). A *second, independent*
   subprocess model beside the graph daemon — interaction tools reflect live
   on-disk state and bypass `ensureFresh` (except `lemmas` and `new_module`
-  import resolution, which read the graph index). Under
+  import resolution, which read the graph index). A live `check` also probes
+  remaining goals with Mimer (`auto-hints`, on by default) and reports found
+  terms inline. Under
   `--inspect`/`--inspect-port N` it also serves an opt-in localhost web
   inspector (`AgdaMcp.Inspect`): a live activity feed + editing view over
   HTTP+SSE, off by default, localhost-only, never touching the JSON-RPC
-  stdout; probes upward from the start port so several daemons coexist. Needs
-  `agda` on `$PATH` (or `--agda-bin`).
+  stdout; probes upward from the start port so several daemons coexist.
+  Under `--control-port N` (needs `--enable-interact`) it serves a second
+  localhost side channel (`AgdaMcp.Control`, `GET /check?file=…`) so the
+  plugin's PostToolUse hook can run the warm check from outside the MCP
+  transport. Needs `agda` on `$PATH` (or `--agda-bin`).
 
 A Claude Code plugin under `plugin/` bundles the `agda-explore` server with a
-skill and two Agda agents. See [plugin/README.md](plugin/README.md).
+skill, two Agda agents, and two hooks (PostToolUse: validate Agda text edits
+through the warm bridge / control endpoint; PreToolUse: route the first
+structural grep to the graph tools). See [plugin/README.md](plugin/README.md).
 
 ## Build / run
 
@@ -183,6 +199,15 @@ src/
                                 leads with a `server` identity frame. Imports
                                 no project module (so State can hold the hub
                                 without a cycle).
+    Control.hs                  opt-in localhost control endpoint
+                                (--control-port, needs --enable-interact):
+                                GET /check?file=… runs the same runner as the
+                                `check` tool (MainMcp passes it as a plain
+                                callback — imports no project module, no
+                                cycle); 503 while busy; writes the bound port
+                                to <out-dir>/control-port (removed on
+                                shutdown). Serves the plugin's PostToolUse
+                                hook.
 
   AgdaInteract/                 Write-side interaction bridge (agda-explore
                                 only; the long-lived agda session model).
@@ -234,11 +259,18 @@ src-agda-graph/AgdaGraph/       Shared library.
   Similarity.hs                 shared structural-similarity cores so
                                 silhouette / term-cluster / similar_* agree by
                                 construction.
-  Union.hs                      union of per-entry expanded graphs (multi-entry).
+  Union.hs                      union of per-entry expanded graphs (multi-entry
+                                and overlay federation; first graph wins on key
+                                collision).
+  Glob.hs                       tiny hand-rolled glob matcher (**/*/?), shared
+                                by agda-unused --exclude and agda-explore
+                                coverage-ignore.
 
 scripts/
   fiedler_helper.py             SciPy λ₂ / Fiedler-vector helper for
                                 AgdaOptimization.Fiedler (stdin → stdout).
+  build-stdlib-graph.sh         build a reusable overlay graph (e.g. agda-stdlib)
+                                for agda-explore --overlay-graph.
                                 Needs `pip install scipy numpy`.
 
 plugin/                         Claude Code plugin: agda-explore MCP server +
@@ -327,7 +359,17 @@ plugin/                         Claude Code plugin: agda-explore MCP server +
   **`write:true`** (via `applyOrDiff`) instead writes + reloads + returns the
   refreshed goals in one round-trip. `auto` runs Mimer via
   `Cmd_autoOne Rewrite InteractionId Range String` — the leading `Rewrite` is
-  mandatory (omit it and Agda "cannot read").
+  mandatory (omit it and Agda "cannot read"); the trailing string carries
+  Mimer options (`-t <secs>` bounds the search, verified on Agda 2.9).
+
+- **A successful Mimer probe solves the meta in Agda's *session* state, so
+  anything that runs `Cmd_autoOne` without writing must mark the session
+  dirty.** Both the check-time `auto-hints` probe and `auto_all` do this
+  (the next interaction reloads from unchanged disk); dropping the
+  `markSessionDirty` makes later goal queries disagree with the file.
+  `auto_all` accumulates its edits in ORIGINAL-text offsets (in-session
+  gives never move the disk file), merged by `spliceRanges` like
+  `give_many`/`construct`.
 
 - **`agda-goals` and the bridge share one session driver
   (`AgdaInteract.Session`), which must stay goal-id-free.** Per-session

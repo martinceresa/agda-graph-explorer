@@ -119,6 +119,11 @@ data Definition = Definition
     -- (no @--show-implicit@).
   , defX      :: !Double
   , defY      :: !Double
+  , defOrigin :: !(Maybe Text)
+    -- ^ Consumer-internal source tag, NOT on the wire (always decodes to
+    -- 'Nothing'): 'Nothing' for the project graph, @Just label@ for a def
+    -- from a federated overlay. Set at overlay-decode time; rendered as an
+    -- @[external: label]@ suffix.
   } deriving (Show, Generic)
 
 instance NFData Definition
@@ -136,6 +141,7 @@ instance FromJSON Definition where
       <*> o .:? "type"
       <*> o .:? "x"      .!= 0.0
       <*> o .:? "y"      .!= 0.0
+      <*> pure Nothing
 
 -- | One public-re-export row. @rxFrom@ = host module doing
 -- @open import M public@; @rxTo@ = source module @M@; @rxNames@ are the

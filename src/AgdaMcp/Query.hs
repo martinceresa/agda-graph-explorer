@@ -12,7 +12,10 @@
 -- /where is X/, /who calls X/, /what does X use/, /what breaks if I
 -- change X/, /what's the type of X/, /what resembles X/.
 module AgdaMcp.Query
-  ( queryLocate
+  ( OutFmt(..)
+  , parseFmt
+  , queryLocate
+  , queryBrief
   , queryCallers
   , queryCallees
   , queryImpact
@@ -27,9 +30,12 @@ module AgdaMcp.Query
   , suggestions
   , nameInSnapshot
   , notInGraph
+  , orphanWarning
   ) where
 
 import           Control.Exception  (SomeException, try)
+import           Data.Aeson         (Value, object, (.=))
+import           Data.Aeson.Text    (encodeToLazyText)
 import           Data.Char          (isDigit, isSpace)
 import           Data.Maybe         (isJust)
 import           Data.Set           (Set)
@@ -44,6 +50,7 @@ import qualified Data.Sequence      as Seq
 import           Data.Sequence      (ViewL (..), (|>))
 import           Data.Text          (Text)
 import qualified Data.Text          as T
+import qualified Data.Text.Lazy     as TL
 import qualified Data.Vector        as V
 
 import           AgdaGraph.Index
@@ -63,6 +70,50 @@ import           AgdaMcp.State      (Loaded (..))
 
 tshow :: Show a => a -> Text
 tshow = T.pack . show
+
+-- | Output format for the list queries ('querySearch' / 'queryCallers' /
+-- 'queryCallees'). 'FmtText' (default) is the prose; 'FmtJson' a structured
+-- envelope for scripting.
+data OutFmt = FmtText | FmtJson
+  deriving (Eq)
+
+-- | @format@ arg → 'OutFmt' (anything but the literal @"json"@ is text).
+parseFmt :: Maybe Text -> OutFmt
+parseFmt (Just f) | T.toLower f == "json" = FmtJson
+parseFmt _                                = FmtText
+
+-- | Encode a JSON 'Value' to compact strict 'Text' (the text content of a
+-- tool result under @format:json@).
+jsonText :: Value -> Text
+jsonText = TL.toStrict . encodeToLazyText
+
+-- | One definition as a JSON object: the fields a list result carries, plus
+-- an optional edge 'Provenance' (direct callers/callees only) and the
+-- overlay origin tag when present. Mirrors the columns of 'oneLine'.
+defItem :: Definition -> Maybe Provenance -> Value
+defItem d mp = object $
+  [ "name"   .= defName d
+  , "module" .= defModule d
+  , "kind"   .= renderKind (defKind d)
+  , "state"  .= renderState (defState d)
+  , "access" .= renderAccess (defAccess d)
+  ]
+  ++ [ "line"       .= l          | Just l <- [defLine d] ]
+  ++ [ "origin"     .= og         | Just og <- [defOrigin d] ]
+  ++ [ "provenance" .= renderProv p | Just p <- [mp] ]
+
+-- | The shared list-result JSON envelope: tool, echoed query, resolved
+-- canonical name (if any), total match count, shown count (after @limit@),
+-- and rows. @total@/@shown@ keep the @…and N more@ affordance.
+listEnvelope :: Text -> Value -> Maybe Text -> Int -> [Value] -> Text
+listEnvelope tool q resolved total items = jsonText $ object $
+  [ "tool"  .= tool
+  , "query" .= q
+  , "total" .= total
+  , "shown" .= length items
+  , "items" .= items
+  ]
+  ++ [ "resolved" .= r | Just r <- [resolved] ]
 
 renderState :: State -> Text
 renderState Defined   = "Defined"
@@ -88,10 +139,16 @@ renderAccess Private = "private"
 loc :: Definition -> Text
 loc d = defModule d <> maybe "" ((":" <>) . tshow) (defLine d)
 
+-- | @[external: <label>]@ tag for a def federated in from an overlay graph
+-- (its 'defOrigin'); empty for a project def. Signals it needs an @open
+-- import@, and that edge queries (callers/impact/path) don't reach it.
+originSuffix :: Definition -> Text
+originSuffix d = maybe "" (\o -> "  [external: " <> o <> "]") (defOrigin d)
+
 oneLine :: Definition -> Text
 oneLine d =
   "- `" <> defName d <> "`  [" <> renderKind (defKind d) <> "/"
-        <> renderState (defState d) <> "]  " <> loc d
+        <> renderState (defState d) <> "]  " <> loc d <> originSuffix d
 
 -- | Bullet list of definitions, each annotated with its enclosing owner
 -- when it's a @where@-/anonymous helper, truncated to @lim@ with a
@@ -119,15 +176,36 @@ defsOf ld is = [ defAt (ldIndex ld) i | i <- IS.toList is ]
 
 notFound :: Loaded -> Text -> Text
 notFound ld name =
-  "No definition named `" <> name <> "`.\n" <>
-  case suggestions ld name 8 of
-    []  -> "No similarly-named definitions found. Try the `search` tool with a substring."
-    sug -> "Did you mean one of:\n" <> bulletList ld 8 sug
+  ("No definition named `" <> name <> "`.\n" <>
+   case suggestions ld name 8 of
+     []  -> "No similarly-named definitions found. Try the `search` tool with a substring."
+     sug -> "Did you mean one of:\n" <> bulletList ld 8 sug)
+  <> coverageNote ld
+
+-- | The closure-coverage warning body for a set of orphan files (empty when
+-- there are none). Shared by the empty-result note here ('coverageNote') and
+-- the @status@ report, so the phrasing and the 3-file sample stay identical.
+orphanWarning :: [FilePath] -> Text
+orphanWarning [] = ""
+orphanWarning fs =
+  "⚠ " <> tshow (length fs) <> " source file(s) under the include roots are outside \
+  \every entry's import closure, so their definitions are invisible to every query \
+  \(e.g. " <> T.intercalate ", " (map T.pack (take 3 fs)) <> "). Add them to a barrel / \
+  \entry root, or list them under `coverage-ignore:` in .agda-explore.yml."
+
+-- | Appended to an /empty/ lookup result when the snapshot knows of source
+-- files outside every entry's closure: an absent name is then "not in any
+-- entry's closure", not "does not exist" (see 'orphanWarning'). Silent when
+-- nothing is orphaned (the common case), so it stays high-signal.
+coverageNote :: Loaded -> Text
+coverageNote ld = case orphanWarning (ldOrphanFiles ld) of
+  "" -> ""
+  w  -> "\n\n" <> w
 
 -- | Does @name@ resolve to a definition in this snapshot? Uses the full
 -- 'resolveDefNote' resolver (not bare 'lookupDef'), so a legitimately
 -- resolvable short/dotted-suffix name (e.g. a bare @sq@ ↦ @Where.sq\@15@)
--- or a unique near-match (E4 auto-resolve) counts as present. This is the
+-- or a unique near-match (auto-resolve) counts as present. This is the
 -- @type_of@ fast-path predicate ('AgdaMcp.Tools.withFreshFailFast'): when
 -- it is 'False' against the already-loaded snapshot, the daemon answers
 -- 'notInGraph' instantly instead of paying the 'ensureFresh' barrier.
@@ -171,7 +249,7 @@ rankedMatches ld q =
         | otherwise                             = 3
       -- defName is the final tiebreak so the order is a strict total order
       -- (independent of input order), not merely stable — the "did you mean"
-      -- list and the E4 unique-candidate auto-resolve both read this.
+      -- list and the unique-candidate auto-resolve both read this.
   in sortOn (\d -> (score d, T.length (defName d), defName d))
             (filter hit (realDefs ld))
 
@@ -384,6 +462,9 @@ queryLocate ld name = case resolveDefNote ld name of
          ] ++
          [ "  owner:    " <> defName o <> maybe "" ((":" <>) . tshow) (defLine o)
          | Just o <- [ownerOf ld d] ] ++
+         [ "  origin:   external overlay `" <> og <> "` — needs an `open import` before use; \
+           \graph-edge queries (callers/impact/path) do not cross into it"
+         | Just og <- [defOrigin d] ] ++
          [ "  used by:  " <> tshow nIn <> " direct caller(s)"
          , "  uses:     " <> tshow nOut <> " direct dependency(ies)"
          , "  blast radius: " <> tshow transUp <> " transitive caller(s), "
@@ -392,10 +473,34 @@ queryLocate ld name = case resolveDefNote ld name of
          [ "  note:     referenced but has no definition record "
              <> "(external, or compiler-generated)" | synth ]
 
-queryCallers :: Loaded -> Bool -> Maybe Text -> Maybe Text -> Bool -> Int -> Text -> Text
+-- | A one-call orientation bundle for a definition: the 'queryLocate' block,
+-- its type signature, direct callers and callees (each capped at @lim@), and
+-- its top body-twins. Pure composition of the point queries; resolves the name
+-- once and drives every section off the canonical FQN, so the "(auto-resolved
+-- …)" note appears at most once. Type comes from 'defSig' (else points at
+-- @type_of@).
+queryBrief :: Loaded -> Int -> Text -> Text
+queryBrief ld lim name = case resolveDefNote ld name of
+  Nothing        -> notFound ld name
+  Just (note, d) ->
+    let fqn = defName d
+        sig = case defSig d of
+                Just t | not (T.null (T.strip t)) -> t
+                _ -> "(no signature in the graph — run `type_of name=" <> fqn <> "`)"
+        section h b = "── " <> h <> " ──\n" <> T.stripEnd b
+        blocks =
+          [ T.stripEnd (queryLocate ld fqn)
+          , section "type"             sig
+          , section "callers (direct)" (queryCallers ld False Nothing Nothing False lim FmtText fqn)
+          , section "callees (direct)" (queryCallees ld False Nothing Nothing False lim FmtText fqn)
+          , section "similar bodies"   (querySimilarBodies ld 3 0.3 fqn)
+          ]
+    in note <> T.intercalate "\n\n" blocks
+
+queryCallers :: Loaded -> Bool -> Maybe Text -> Maybe Text -> Bool -> Int -> OutFmt -> Text -> Text
 queryCallers = edgesQuery True
 
-queryCallees :: Loaded -> Bool -> Maybe Text -> Maybe Text -> Bool -> Int -> Text -> Text
+queryCallees :: Loaded -> Bool -> Maybe Text -> Maybe Text -> Bool -> Int -> OutFmt -> Text -> Text
 queryCallees = edgesQuery False
 
 -- | Provenance of the edge @s -> t@, if the graph carries per-edge tags.
@@ -409,19 +514,27 @@ edgeProv ix s t = idxEdgeProvenance ix >>= IM.lookup s >>= IM.lookup t
 -- @where@ is a legacy alias for @module-local@) and annotates each direct
 -- line with its tag; @byMod@ renders a per-module
 -- count summary instead of a flat list.
-edgesQuery :: Bool -> Loaded -> Bool -> Maybe Text -> Maybe Text -> Bool -> Int -> Text -> Text
-edgesQuery wantReverse ld transitive mPrefix mProvTxt byMod lim name =
+edgesQuery :: Bool -> Loaded -> Bool -> Maybe Text -> Maybe Text -> Bool -> Int -> OutFmt -> Text -> Text
+edgesQuery wantReverse ld transitive mPrefix mProvTxt byMod lim fmt name =
   case mProvTxt of
     Just p | parseProv p == Nothing ->
       "Unknown provenance filter `" <> p
         <> "` — use one of signature / body / module-local / with / unknown \
            \(`where` accepted as a legacy alias for module-local)."
     _ -> case resolveDefNote ld name of
-      Nothing        -> notFound ld name
-      Just (note, d) -> note <> render d
+      Nothing        -> case fmt of
+        FmtText -> notFound ld name
+        FmtJson -> listEnvelope tool queryObj Nothing 0 []
+      Just (note, d) -> render note d
   where
+    tool  = if wantReverse then "callers" else "callees"
+    queryObj = object $
+      [ "name" .= name, "direction" .= tool, "transitive" .= transitive, "limit" .= lim ]
+      ++ [ "module_prefix" .= p | Just p <- [mPrefix] ]
+      ++ [ "provenance"    .= p | Just p <- [mProvTxt] ]
+      ++ [ "by_module"     .= True | byMod ]
     mProv = mProvTxt >>= parseProv
-    render d =
+    render note d =
       let ix  = ldIndex ld
           i   = defId d
           -- Direction-dependent pair: the subject's direct neighbours and
@@ -466,9 +579,18 @@ edgesQuery wantReverse ld transitive mPrefix mProvTxt byMod lim name =
             | byMod      = moduleSummary 20 ds
             | transitive = bulletList ld lim ds
             | otherwise  = provBulletList ld lim [ (dx, provOf (defId dx)) | dx <- ds ]
-      in if n == 0
-           then "`" <> name <> "` has no " <> what <> scopeNote <> provNote <> "."
-           else tshow n <> " " <> what <> scopeNote <> provNote <> " of `" <> name <> "`:\n" <> body
+      in case fmt of
+           FmtText ->
+             note <> (if n == 0
+                        then "`" <> name <> "` has no " <> what <> scopeNote <> provNote <> "."
+                        else tshow n <> " " <> what <> scopeNote <> provNote <> " of `" <> name <> "`:\n" <> body)
+           FmtJson ->
+             -- provenance is a direct-edge notion (matches 'provBulletList'
+             -- being used only on the direct, non-by_module branch).
+             let wantProv = not transitive && not byMod
+                 items = [ defItem dx (if wantProv then provOf (defId dx) else Nothing)
+                         | dx <- take lim ds ]
+             in listEnvelope tool queryObj (Just (defName d)) n items
 
 -- | Like 'bulletList' but annotates each line with its edge provenance
 -- (when the graph carries tags). Used for direct callers/callees.
@@ -831,7 +953,7 @@ rankedList :: Int -> [(Double, Definition)] -> Text
 rankedList lim xs =
   T.intercalate "\n"
     [ "- " <> pctOf s <> "  `" <> defName d <> "`  ["
-            <> renderKind (defKind d) <> "]  " <> loc d
+            <> renderKind (defKind d) <> "]  " <> loc d <> originSuffix d
     | (s, d) <- take lim xs ]
 
 pctOf :: Double -> Text
@@ -972,7 +1094,7 @@ queryFindLemma ld lim minSim mKindTxt mModPrefix mGoal mAnchor =
     lemmaList ranked = T.intercalate "\n"
       [ "- " <> pctOf s <> "  `" <> defName d <> "`  ["
               <> renderKind (defKind d) <> "/" <> renderState (defState d)
-              <> "]  " <> loc d <> concSuffix d
+              <> "]  " <> loc d <> concSuffix d <> originSuffix d
       | (s, d) <- ranked ]
 
 -- ---------------------------------------------------------------------
@@ -983,8 +1105,8 @@ queryFindLemma ld lim minSim mKindTxt mModPrefix mGoal mAnchor =
 -- when at least one of @mKind@ / @mState@ is given — that lists every
 -- definition of a kind/state. @topLevelOnly@ drops @where@-/anonymous
 -- locals. Bad kind/state filter values produce an explicit error.
-querySearch :: Loaded -> Bool -> Maybe Text -> Maybe Text -> Maybe Text -> Int -> Text -> Text
-querySearch ld topLevelOnly mModPrefix mKindTxt mStateTxt lim q =
+querySearch :: Loaded -> Bool -> Maybe Text -> Maybe Text -> Maybe Text -> Int -> OutFmt -> Text -> Text
+querySearch ld topLevelOnly mModPrefix mKindTxt mStateTxt lim fmt q =
   case filterError mKindTxt mStateTxt of
     Just err -> err
     Nothing
@@ -1004,13 +1126,21 @@ querySearch ld topLevelOnly mModPrefix mKindTxt mStateTxt lim q =
                          , maybe "" (\s -> " state=" <> s) mStateTxt ]
               subj   = if T.null q then "definitions" <> notes
                                    else "match(es)" <> notes <> " for `" <> q <> "`"
-          in case kept of
-               [] -> "No definitions" <> (if T.null q then "" else " matching `" <> q <> "`")
-                       <> notes <> "."
-               _  -> tshow (length kept) <> " " <> subj <> ":\n" <> bulletList ld lim kept
+          in case fmt of
+               FmtJson -> listEnvelope "search" queryObj Nothing (length kept)
+                            [ defItem d Nothing | d <- take lim kept ]
+               FmtText -> case kept of
+                 [] -> "No definitions" <> (if T.null q then "" else " matching `" <> q <> "`")
+                         <> notes <> "." <> coverageNote ld
+                 _  -> tshow (length kept) <> " " <> subj <> ":\n" <> bulletList ld lim kept
   where
     mKind  = mKindTxt  >>= parseKind
     mState = mStateTxt >>= parseState
+    queryObj = object $
+      [ "query" .= q, "limit" .= lim, "top_level_only" .= topLevelOnly ]
+      ++ [ "module_prefix" .= p | Just p <- [mModPrefix] ]
+      ++ [ "kind"  .= k | Just k <- [mKindTxt] ]
+      ++ [ "state" .= s | Just s <- [mStateTxt] ]
 
 -- | Group definitions by their defining module, with a count each.
 -- Shared by 'queryImpact' and 'moduleSummary'.

@@ -39,6 +39,7 @@ import           System.Exit ( exitFailure, exitSuccess )
 import           System.FilePath ( (</>), normalise, takeDirectory )
 import           System.IO ( hPutStrLn, stderr )
 
+import           AgdaGraph.Glob      ( globMatch )
 import           AgdaUnused.Analysis
 import           AgdaUnused.Config   ( ConfigTarget(..)
                                      , applyConfig, discoverConfigPath, loadConfig
@@ -359,35 +360,6 @@ chunksOf n xs
   | null xs   = []
   | otherwise = let (h, t) = splitAt n xs in h : chunksOf n t
 
--- ** Exclude globbing
-
--- | Minimal glob matcher for @--exclude@. @**@ matches any run of
--- characters (including @\/@); @*@ matches any run /except/ @\/@; @?@
--- matches a single non-@\/@ char; everything else is literal. The
--- pattern is tested against both the absolute file path and the dotted
--- module name, so @**\/Init.agda@ and @Prelude.*@ both work. No new
--- dependency — patterns are short so the back-tracking match is cheap.
-data GTok = GStarStar | GStar | GQuest | GLit !Char
-
-globTokens :: String -> [GTok]
-globTokens []           = []
-globTokens ('*':'*':cs) = GStarStar : globTokens cs
-globTokens ('*':cs)     = GStar     : globTokens cs
-globTokens ('?':cs)     = GQuest    : globTokens cs
-globTokens (c:cs)       = GLit c    : globTokens cs
-
-globMatch :: String -> String -> Bool
-globMatch pat = match (globTokens pat)
-  where
-    match []                s  = null s
-    match (GStarStar : ts)  s  =
-      match ts s || case s of { (_:cs) -> match (GStarStar : ts) cs; [] -> False }
-    match (GStar : ts)      s  =
-      match ts s || case s of { (c:cs) | c /= '/' -> match (GStar : ts) cs; _ -> False }
-    match (GQuest : ts) (c:cs) | c /= '/' = match ts cs
-    match (GQuest : _)  _      = False
-    match (GLit p : ts) (c:cs) | p == c   = match ts cs
-    match (GLit _ : _)  _      = False
 
 -- | Strip @--config=PATH@ (or @--config PATH@) from argv, returning
 -- the path (if any) and the remaining args.

@@ -9,6 +9,16 @@ Forward-looking work on the graph consumers. For runnable examples see
 
 ## Open
 
+- [ ] Stdlib federation follow-ups (base landed 2026-07-05 — see Changelog:
+  `--overlay-graph` / `overlay-graphs:` + `scripts/build-stdlib-graph.sh`).
+  Remaining: auto-build + auto-register a stdlib overlay on first run (warm
+  compilation), and a producer flag keeping cross-boundary external edges as
+  dangling refs (would let `callers`/`impact` cross into the overlay — belongs
+  in the `agda-deps` repo).
+- [ ] `format: json` for `unused` (deferred): it shells out to `agda-unused`,
+  so JSON means threading a stdout-JSON flag through the subprocess, not the
+  in-process row split the other list tools got. Low priority.
+
 - [ ] **Round-6 P5 follow-up: structural goal canonicalisation.** `agda-goals`
   canonicalises goal types textually (whitespace + alpha-rename) because
   `--interaction-json` only exposes rendered strings, not internal `Term`s. To
@@ -29,6 +39,16 @@ Forward-looking work on the graph consumers. For runnable examples see
 
 ## Shipped — see Changelog
 
+- [x] `agda-explore`: orientation bundles + federation + JSON + coverage + CLI
+  (2026-07-05) — `brief`/`goal_brief` one-call orientation, `--overlay-graph`
+  stdlib federation (`[external: …]` tags, project-wins), `format: json` on
+  `search`/`callers`/`callees`, closure-coverage warning (`coverage-ignore:`),
+  and the one-shot `agda-explore query <tool> key=value…` CLI.
+- [x] `agda-explore`: drive agents toward the write bridge (2026-07-05) —
+  `check` next-step footer + speculative Mimer hints, new `auto_all` tool,
+  plugin loop-closing hooks (validate-on-edit / route-first-grep),
+  `--control-port` endpoint for the edit hook, tool-usage histogram in
+  `status`.
 - [x] Adopt producer `nodeKeyVersion` 3: `module-local` provenance enum
   (legacy `where` kept), `currentNodeKeyVersion` 2→3, helper detection
   re-keyed off the `@<line>` disambiguator (the `._.` marker is gone in v3).

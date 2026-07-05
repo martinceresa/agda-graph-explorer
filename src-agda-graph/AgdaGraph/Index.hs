@@ -162,6 +162,7 @@ buildIndex ExpandedGraph{..} =
             , defSig    = Nothing
             , defX      = 0
             , defY      = 0
+            , defOrigin = Nothing
             }
         | (qn, i) <- sortOn snd [ (qn, i)
                                 | (qn, i) <- HM.toList nameToId

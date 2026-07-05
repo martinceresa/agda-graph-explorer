@@ -96,7 +96,7 @@ iotcmRefineOrIntro modPath iid hint =
 
 -- | @Cmd_autoOne@ — Mimer proof search at a goal. Agda 2.9's signature is
 -- @Cmd_autoOne Rewrite InteractionId Range String@; the leading 'Rewrite'
--- is what the earlier "cannot read" attempts were missing. The trailing
+-- is required (Agda cannot parse the command without it). The trailing
 -- string carries Mimer options (empty = defaults). On success Agda replies
 -- with a @GiveAction@ carrying the found term.
 iotcmAutoOne :: FilePath -> Rewrite -> Int -> String -> String

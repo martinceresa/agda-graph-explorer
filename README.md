@@ -110,8 +110,9 @@ Agda's `.agdai` cache) and hot-swaps the in-memory `Index`.
 `--require-well-typed` keeps serving the last well-typed graph while a
 type error stands; `--strict-producer` unlocks `agda-deps`' faster
 `--incremental` cache. A Claude Code plugin under
-[`plugin/`](plugin/README.md) bundles the server with a skill and two
-Agda agents.
+[`plugin/`](plugin/README.md) bundles the server with a skill, two Agda
+agents, and two loop-closing hooks (validate Agda edits through the warm
+bridge; route the first structural grep to the graph tools).
 
 ```sh
 agda-explore --version
@@ -123,21 +124,23 @@ Config: [`.agda-explore.yml`](#agda-exploreyml).
 **Write-side interaction bridge (opt-in).** With `--enable-interact` and
 `agda` on `$PATH`, the daemon also exposes Agda-validated authoring +
 editing tools backed by a live `agda --interaction-json` session — the
-validated alternative to a blind `Write` + `agda File`. 18 tools:
+validated alternative to a blind `Write` + `agda File`. 19 tools:
 
 ```
 load · check · goal_type · goal_context · infer · normalize · lemmas ·
 new_module · give_file · case_split · refine · give · give_many ·
-construct · auto · stage · promote · discard
+construct · auto · auto_all · stage · promote · discard
 ```
 
-Every mutator (`case_split` / `refine` / `give` / `auto`) is
+Every mutator (`case_split` / `refine` / `give` / `auto` / `auto_all`) is
 Agda-validated and by default returns a unified diff **without writing**;
 pass `write:true` to apply, reload, and return the diff plus refreshed
 goals in one round-trip. A hard zero-axiom contract refuses any
 `postulate`, termination/coverage/unsafe-`OPTIONS` pragma, or escape
-hatch up front. `.lagda.md` literate sources are handled. Full detail:
-[`plugin/`](plugin/README.md).
+hatch up front. `.lagda.md` literate sources are handled. `check` also
+probes any remaining goals with Mimer and reports ready-made solutions
+inline (`--no-auto-hints` to disable); `auto_all` runs Mimer over every
+open goal in one call. Full detail: [`plugin/`](plugin/README.md).
 
 ```sh
 agda-explore --project /path/to/agda/project --enable-interact
@@ -154,6 +157,17 @@ JSON-RPC stdout. `--inspect-port N` sets the start port (implies
 ```sh
 agda-explore --project /path/to/agda/project --inspect      # → http://127.0.0.1:7000
 ```
+
+**Loop-closing hooks + control endpoint (opt-in).** The plugin ships two
+Claude Code hooks: after any text edit to an Agda file, validate it
+through the warm bridge (or nudge to); on the first structural `grep`,
+route to the graph tools instead. To let the edit hook run the *real*
+warm `check` from outside the MCP transport, start the daemon with
+`--control-port N` (needs `--enable-interact`) — it serves
+`GET /check?file=…` on localhost and writes the bound port to
+`<out-dir>/control-port` for discovery. `status` also reports a per-run
+tool-usage histogram, so which tools agents actually reach for is visible
+without parsing transcripts. Full detail: [`plugin/`](plugin/README.md).
 
 ## Configuration (YAML)
 
@@ -254,10 +268,15 @@ list), `graph` (a prebuilt `graph.json` for preloaded mode), `project`,
 (only promote a fully type-checking rebuild; holes still refresh),
 `strict-producer` (strict `agda-deps`: drop `--keep-going` for its
 `--incremental` cache; needs Agda ≥ 2.9), `enable-interact`
-(write-side bridge), `inspect` (web inspector); plus `min-term-depth`
-(int), `inspect-port` (start port, default 7000; implies `inspect`),
-`agda-bin` (else `$AGDA_BIN` / `$PATH`), and `agda-arg` (extra flags for
-`agda --interaction-json`, e.g. `--safe`).
+(write-side bridge), `no-auto-hints` (disable the speculative Mimer probe
+`check` runs over remaining goals), `inspect` (web inspector); plus
+`min-term-depth` (int), `auto-hints-limit` (goals the check-time Mimer
+probe tries, default 3), `auto-hints-timeout` (Mimer budget per goal in
+seconds, default 1), `control-port` (localhost `/check` endpoint for the
+edit hook; needs `enable-interact`; `0` = off), `inspect-port` (start
+port, default 7000; implies `inspect`), `agda-bin` (else `$AGDA_BIN` /
+`$PATH`), and `agda-arg` (extra flags for `agda --interaction-json`, e.g.
+`--safe`).
 
 **Multiple entry modules.** `--entry` is repeatable on the CLI and the
 config accepts an `entries:` list alongside the back-compat scalar
@@ -280,6 +299,42 @@ no-watch: false
 min-term-depth: 0
 inspect: true                       # localhost web inspector
 inspect-port: 7010                  # …on this port (else probes up from 7000)
+overlay-graphs:                     # federate prebuilt overlay graph(s)
+  - ~/.cache/agda-explore/stdlib-2.9.0/deps.json
+coverage-ignore: ["**/scratch/**"]  # source outside every closure to ignore
+```
+
+**Orientation bundle.** `brief name=X` answers the opening sequence in one
+call — location + type + direct callers/callees + closest body-twins — instead
+of four round trips (`goal_brief goal=gN` is the hole-side analogue under
+`--enable-interact`).
+
+**Structured output.** `search` / `callers` / `callees` accept
+`format: json` for a `{tool, query, total, shown, items}` envelope; the default
+stays prose.
+
+**Stdlib federation.** `--overlay-graph FILE` (repeatable) / `overlay-graphs:`
+federate a prebuilt expanded graph — typically agda-stdlib, built once via
+`scripts/build-stdlib-graph.sh` — into every snapshot, so `search` / `type_of`
+/ `find_lemma` answer "does the library already have this?". Overlay results
+carry an `[external: <label>]` tag (they need an `open import`; edge queries
+don't cross into them); project definitions win any name collision, and a
+stale / unparseable overlay is warned-and-skipped, never fatal.
+
+**Closure-coverage warning.** Source files under the include roots but outside
+every entry's import closure are invisible to queries; the daemon flags them
+in `status` and on an empty `search` / `locate` (so an absent name reads as
+"outside the closure", not "does not exist"). Silence intentional ones with
+`coverage-ignore:` globs.
+
+**One-shot CLI.** `agda-explore query <tool> key=value… [--json] [--graph FILE]`
+runs a read tool once (no daemon) and prints the result — for scripting, CI,
+and non-MCP harnesses. Exit 0 on any answer (including "no results"), nonzero
+only on an operational error.
+
+```
+agda-explore query brief name=Consensus.roundLeader --graph out/deps.json
+agda-explore query search query=toWitness --graph out/deps.json --json | jq '.items[].name'
 ```
 
 ## Cross-repo runtime link

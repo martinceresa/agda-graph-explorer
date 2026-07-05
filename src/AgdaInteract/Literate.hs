@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- | Literate-Markdown awareness for the interaction bridge.
 --
--- Phase-0 fixtures confirmed that Agda reports interaction ranges as
+-- Agda reports interaction ranges as
 -- absolute, 1-based __character__ offsets into the /full/ on-disk file —
 -- prose included (the literate preprocessor blanks non-code regions in
 -- place rather than stripping them). So range translation is the

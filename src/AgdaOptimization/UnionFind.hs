@@ -3,8 +3,7 @@
 
 -- | A path-light union-find over 'Int' keys, backed by an 'IM.IntMap' so
 -- it can union over a sparse subset of node ids cheaply. Shared by the
--- clustering analyses (@fingerprint@, @echo@), which previously each
--- carried a verbatim copy.
+-- clustering analyses (@fingerprint@, @echo@).
 module AgdaOptimization.UnionFind
   ( UF
   , emptyUF

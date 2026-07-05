@@ -3,9 +3,8 @@
 
 -- | Small graph / name helpers shared across the analyses: unqualified-name
 -- extraction, the "foundational prelude" and theorem-tag heuristics, the
--- terminal-node set, and the @--exclude-name-regex@ → node-id set.
--- Previously each analysis carried its own (often "Mirrors X"-annotated)
--- copy; this is the single source of truth so they cannot drift.
+-- terminal-node set, and the @--exclude-name-regex@ → node-id set. The single
+-- source of truth for these, so the analyses cannot drift.
 module AgdaOptimization.Common
   ( lastSegment
   , isFoundationalModule

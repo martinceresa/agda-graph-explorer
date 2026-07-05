@@ -1,9 +1,8 @@
 {-# LANGUAGE BangPatterns #-}
 
 -- | Shared primitives for the graph-clustering analyses (@fingerprint@
--- and @echo@), which previously each carried a near-verbatim copy of the
--- bounded/unbounded BFS walks, the union-find clusterisation and the
--- intra-cluster average-similarity score.
+-- and @echo@): the bounded/unbounded BFS walks, the union-find
+-- clusterisation and the intra-cluster average-similarity score.
 --
 -- The bits that genuinely diverge between the two analyses stay in their
 -- own modules: the direction enum ('AgdaOptimization.Fingerprint.Direction'

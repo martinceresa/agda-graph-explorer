@@ -2,6 +2,113 @@
 
 ## Unreleased
 
+### `agda-explore`: trim the always-on tool catalogue (FableAna §4) (2026-07-05)
+
+The `tools/list` payload is loaded into every session where the plugin is
+enabled — including sessions that never touch Agda — so the tool *descriptions*
+are pure always-on context. Rewrote all 35 to ≤2 sentences (one "what does it
+answer", one routing cue), relocating parameter/recipe depth to the JSON-schema
+property descriptions and `SKILL.md` (the skill loads on demand, not always).
+**No tool renames, no schema-structure changes** — Jolteon's
+`mcp__agda-explore__*` allow-lists and agent memory files stay valid.
+
+- Shared property values so repeated boilerplate is written once: `fmtProp`
+  (the `format` enum, ×3), `fileProp` / `goalProp` (the write-side `file` /
+  `goal` params, ×~18).
+- Measured `tools/list` (via `initialize` + `tools/list` on `test/deps.json`):
+  **description bytes −61%** read-only (6310→2453) / **−55%** full catalogue
+  (14342→6388); total payload −32% (15780→10738) / −26% (35784→26498). The
+  remainder is JSON schema *structure* (per-property type wrappers, `required`,
+  `additionalProperties`) — a functional floor, not trimmable prose.
+- Overlap-pruning (merging near-duplicate tools like `find_lemma`/`lemmas`)
+  stays open, pending the usage histogram's data.
+
+### `agda-explore`: orientation bundles, stdlib federation, JSON output, coverage warning, one-shot CLI (2026-07-05)
+
+Five capability additions (FableAna §2–§7), each verified end-to-end against
+Agda 2.9.0:
+
+- **Orientation bundles `brief` / `goal_brief` (§3).** `brief name=X` composes
+  `locate` + type signature + direct `callers`/`callees` (capped) +
+  `similar_bodies` into one sectioned block — the opening sequence an agent
+  otherwise pays ~4 round trips for. `goal_brief goal=gN` (write side) does the
+  same for a hole: live `goal_type` (type + context) + top reusable `lemmas`.
+  Both are pure composition of existing runners (resolve once, drive off the
+  canonical FQN so the auto-resolve note appears at most once); read-only.
+- **Stdlib graph federation (§2).** `--overlay-graph FILE` (repeatable) /
+  `overlay-graphs:` decode a prebuilt expanded graph (e.g. agda-stdlib) once at
+  startup, origin-tag every def (`defOrigin`), and union it into every snapshot
+  inside `loadedFromGraph` (project graph FIRST ⇒ project wins every key
+  collision). Overlay defs render an `[external: <label>]` suffix so an agent
+  knows they need an `open import`; `search`/`type_of`/`find_lemma` gain overlay
+  coverage (edge queries don't — overlays carry no cross-boundary edges). A
+  version-mismatched / unparseable overlay is warned-and-skipped, never fatal.
+  `scripts/build-stdlib-graph.sh` builds one. `loadedFromGraph`/`loadLoaded`
+  now take `Config` (subsumes the earlier per-arg threading).
+- **`format: json` on `search`/`callers`/`callees` (§5).** Opt-in structured
+  `{tool, query, resolved?, total, shown, items[]}` envelope (`total`/`shown`
+  keep the `…and N more` affordance); each item carries name/module/line/kind/
+  state/access + edge provenance + overlay origin. Default stays prose
+  (byte-identical to before — the text branch is untouched). New `ep` enum
+  schema builder in `ToolDef`.
+- **Closure-coverage warning (§6).** At snapshot commit, `loadedFromGraph`
+  diffs on-disk sources under the include roots against the graph's module
+  files; files outside every entry's closure (invisible to queries) are stored
+  on `ldOrphanFiles`, filtered through `coverage-ignore:` globs
+  (`--coverage-ignore`, matched against absolute/basename/root-relative forms).
+  Surfaced in `status` and appended to an *empty* `search`/`locate` result — so
+  an absent name reads as "outside the closure", not "does not exist". Glob
+  matcher lifted to the shared `AgdaGraph.Glob` (deduped with `agda-unused`).
+- **One-shot CLI `agda-explore query <tool> key=value… [--json] (§7)`.** Loads
+  the graph once (no daemon/watcher) and dispatches through the SAME tool table
+  the server uses — inherits every read tool for free. Numeric/bool values are
+  coerced so `limit=50` reaches `argInt` as a JSON number. Exit 0 on an answer
+  (including "no results"), nonzero only on operational error (bad graph,
+  unknown tool, missing arg). Read-oriented; the write bridge stays MCP-only.
+
+### `agda-explore`: drive agents toward the write-side bridge (2026-07-05)
+
+The write bridge went essentially unused in practice — across the VerinaAgda
+A/B benchmark (364 transcripts) and Jolteon-FastBFT (909 MCP calls) agents
+authored with `Edit`/`Write` and validated with `check`, but never touched
+`auto`/`give`/`refine`/`case_split`/… (0 calls). These five changes target
+the moments an agent already passes through, so proof search and hole-driving
+become the path of least resistance rather than a catalogue entry read once.
+
+- **`check` next-step footer.** Wherever open goals are listed (`check`,
+  `load`, a `write:true` reload) the output now ends with a copy-pasteable
+  routing footer naming the first live goal id (`auto goal=g0 write:true` ·
+  `auto_all` · `goal_type` · `case_split` · `give` · `lemmas`).
+- **Speculative Mimer hints on `check`.** A live `check` probes the first few
+  remaining goals with Mimer (`Cmd_autoOne … "-t <secs>"`) and reports any
+  ready-made solutions inline, so the payoff of proof search is visible
+  without the agent having to remember `auto` exists. Bounded by
+  `--auto-hints-limit` (default 3) and `--auto-hints-timeout` (default 1s);
+  `--no-auto-hints` disables. A success solves the meta in Agda's *session*
+  state, so it marks the session dirty (the file is untouched).
+- **New `auto_all` tool.** Runs Mimer over **every** open goal of a module in
+  one call — no goal ids to manage — accumulating one atomic diff for the
+  solved goals (via `spliceRanges`, like `give_many`) and listing the
+  survivors. `write:true` applies + reloads. Per-goal budget via `timeout`
+  (default 5s); continue-on-failure (an unsolved goal is a result, not an
+  abort).
+- **Loop-closing plugin hooks (`plugin/hooks/`).** A PostToolUse hook
+  (Edit|Write) validates every Agda text edit through the warm bridge — a
+  real `check` via the control endpoint when available, else a rate-limited
+  nudge — and a PreToolUse hook denies the *first* structural `grep` per
+  session with the grep→graph tool mapping (later greps sail through). Need
+  `jq`; kill switch is disabling the plugin or blanking `hooks/hooks.json`.
+- **`--control-port` localhost endpoint (`AgdaMcp.Control`).** Serves
+  `GET /check?file=…` (the same runner as the `check` tool) so the edit hook
+  can validate from outside the MCP transport; `503` while busy, writes the
+  bound port to `<out-dir>/control-port` (removed on shutdown). Needs
+  `--enable-interact`; off by default. A new module imported by no other
+  project module (MainMcp passes it the check runner as a callback — no
+  cycle, same layering rule as `AgdaMcp.Inspect`).
+- **Tool-usage histogram in `status`.** `handleCall` counts every dispatch
+  per tool name (`ssToolCounts`); `status` renders a per-run histogram, so
+  adoption is measurable passively instead of by parsing transcripts.
+
 ### `agda-explore`: opt-in strict producer + well-typed-only promotion (2026-07-01)
 
 Two independent, default-off daemon knobs for how it consumes `agda-deps`

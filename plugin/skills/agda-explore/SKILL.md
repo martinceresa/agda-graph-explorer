@@ -37,6 +37,7 @@ module) and `AGDA_EXPLORE_INCLUDE` (include dir), or pass `--graph`.
 
 | You want to know…                                   | Use            |
 |-----------------------------------------------------|----------------|
+| **Orient on `X` in one call** (location + type + callers + callees + twins) | **`brief`** |
 | Where is `X` defined? (module, file:line, kind)     | `locate`       |
 | Who calls / uses `X`?                                | `callers`      |
 | What does `X` depend on?                             | `callees`      |
@@ -57,6 +58,11 @@ module) and `AGDA_EXPLORE_INCLUDE` (include dir), or pass `--graph`.
 - `search` filters by `kind` / `state`; pass an empty query to **list** all
   of a kind/state (audit postulates or holes), `module_prefix` to scope,
   `top_level_only: true` to drop where/anonymous locals.
+- `search` / `callers` / `callees` take `format: json` for a structured
+  `{tool, query, total, shown, items}` envelope (scripting); default is prose.
+- A result tagged `[external: <lib>]` comes from a federated overlay graph
+  (e.g. stdlib): it needs an `open import` before use, and edge queries
+  (`callers`/`impact`/`path`) don't cross into it.
 - `where`/anonymous helpers are own nodes (`Mod.QED@388`); `locate` reports
   their `owner`, `callers`/`callees` annotate them with `(in owner)`.
 - `callers`/`callees`: `transitive: true` walks the whole cone;
@@ -112,6 +118,7 @@ hatches), and returns a diff plus remaining goals.
 | You want to…                                          | Use            |
 |-------------------------------------------------------|----------------|
 | Open a module and see its open goals (ids + positions) | `load`         |
+| **Orient on a goal in one call** (type + context + candidate lemmas) | **`goal_brief`** |
 | Type-check a file → errors + warnings + open goals     | `check`        |
 | Read a goal's type + in-scope context                  | `goal_type` / `goal_context` |
 | Infer / normalise an expression in a goal's context    | `infer` / `normalize` |
@@ -124,6 +131,7 @@ hatches), and returns a diff plus remaining goals.
 | Fill SEVERAL independent goals in one load (one diff)  | `give_many`    |
 | Run a planned batch of give/refine/case_split/auto     | `construct`    |
 | Run Mimer proof search to solve a goal                 | `auto`         |
+| Run Mimer over EVERY open goal in one call             | `auto_all`     |
 | Build a NEW def in isolation, then splice it in        | `stage` → `promote` (or `discard`) |
 
 **Authoring files (validated):**
@@ -133,11 +141,15 @@ hatches), and returns a diff plus remaining goals.
 - Whole file / one new def → `give_file file=<f>` with `content` (full text,
   also creates new files) or `append` (a block spliced onto the end).
 - After editing as text → `check file=<f>` (not `agda <f>`): reuses the warm
-  session, returns ✓/✗ + every error/warning + open goals. `content` dry-runs
-  proposed text without writing.
+  session, returns ✓/✗ + every error/warning + open goals — and probes the
+  remaining goals with Mimer, reporting any ready-made solutions inline
+  (accept one with `auto goal=gN write:true`, or all with `auto_all
+  write:true`). `content` dry-runs proposed text without writing.
 
 **Driving holes:**
 - `load <file>` first → goals as `g0, g1, …` with `(line:col)`; pass an id.
+- Then lead with `goal_brief goal=g0`: its type + context + the top reusable
+  lemmas in one call. Reach for `goal_type` / `lemmas` individually to go deeper.
 - Default `case_split`/`refine`/`give` return a diff without writing; **pass
   `write:true`** to apply + reload in one step and get the refreshed goals.
 - Ids renumber after an edit — re-`load` (or use `write:true`) and re-select
@@ -146,7 +158,11 @@ hatches), and returns a diff plus remaining goals.
 - `give_many` fills several independent holes against one load (one atomic
   diff). `construct` runs a planned heterogeneous sequence against one warm
   load (re-run for holes a split introduces).
-- `auto` runs Mimer; if it finds nothing, guide it with `refine`/`give`.
+- `auto` runs Mimer on one goal; `auto_all` tries EVERY open goal in one
+  call (per-goal `timeout`, default 5s) and returns one combined diff for
+  the solved ones plus the survivors — the cheapest first move whenever a
+  `check`/`load` leaves goals open. If Mimer finds nothing, guide it with
+  `refine`/`give`.
 - Stuck? `lemmas goal=g0` finds a def whose conclusion matches the goal, then
   `give`/`refine` with it.
 - `.lagda.md` works; edits stay inside the code fence.
@@ -156,9 +172,10 @@ hatches), and returns a diff plus remaining goals.
 
 ## Good habits
 
-- Lead with `locate`/`type_of` to orient, `callers`/`impact` before editing,
-  `similar_bodies`/`similar_types` to find reuse. When proving, try
-  `find_lemma` *before* hand-deriving.
+- Lead with `brief name=X` to orient on a definition (one call ≈ `locate` +
+  `type_of` + `callers` + `callees` + `similar_bodies`); drill in with the
+  individual tools only when a section warrants it. `impact` before editing a
+  widely-used signature. When proving, try `find_lemma` *before* hand-deriving.
 - Fall back to reading/grepping only for the *prose* around a definition or to
   verify an `unused` finding.
 - When writing, prefer the bridge over `Write` + `agda File`: `new_module` /

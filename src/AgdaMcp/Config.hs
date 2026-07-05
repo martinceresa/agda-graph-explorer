@@ -88,6 +88,20 @@ data Opts = Opts
     -- ^ run the localhost web inspector (@--inspect@).
   , oInspectPort :: Int
     -- ^ start port for the inspector (probes upward on conflict; @--inspect-port@).
+  , oAutoHints :: Bool
+    -- ^ speculative Mimer hints on @check@ (@--no-auto-hints@ turns off).
+  , oAutoHintsLimit :: Int
+    -- ^ max goals Mimer probes per @check@ (@--auto-hints-limit@).
+  , oAutoHintsSecs :: Int
+    -- ^ Mimer per-goal budget in seconds (@--auto-hints-timeout@).
+  , oControlPort :: Int
+    -- ^ localhost control endpoint start port (@--control-port@); @0@ = off.
+  , oCoverageIgnore :: [String]
+    -- ^ globs for source files intentionally outside every entry's closure
+    -- (repeatable @--coverage-ignore@); suppressed from the coverage warning.
+  , oOverlayGraphs :: [FilePath]
+    -- ^ static federated overlay graph files (repeatable @--overlay-graph@),
+    -- e.g. a prebuilt agda-stdlib graph, unioned into every snapshot.
   , oHelp     :: Bool
   , oVer      :: Bool
   }
@@ -132,6 +146,12 @@ data FileConfig = FileConfig
   , fcSessionIdleSecs :: Maybe Int
   , fcInspect        :: Maybe Bool
   , fcInspectPort    :: Maybe Int
+  , fcNoAutoHints    :: Maybe Bool
+  , fcAutoHintsLimit :: Maybe Int
+  , fcAutoHintsSecs  :: Maybe Int
+  , fcControlPort    :: Maybe Int
+  , fcCoverageIgnore :: Maybe [String]
+  , fcOverlayGraphs  :: Maybe [FilePath]
   }
 
 defaultFileConfig :: FileConfig
@@ -164,6 +184,12 @@ defaultFileConfig = FileConfig
   , fcSessionIdleSecs = Nothing
   , fcInspect        = Nothing
   , fcInspectPort    = Nothing
+  , fcNoAutoHints    = Nothing
+  , fcAutoHintsLimit = Nothing
+  , fcAutoHintsSecs  = Nothing
+  , fcControlPort    = Nothing
+  , fcCoverageIgnore = Nothing
+  , fcOverlayGraphs  = Nothing
   }
 
 instance FromJSON FileConfig where
@@ -196,6 +222,12 @@ instance FromJSON FileConfig where
     fcSessionIdleSecs <- o .:? "interaction-idle-timeout"
     fcInspect        <- o .:? "inspect"
     fcInspectPort    <- o .:? "inspect-port"
+    fcNoAutoHints    <- o .:? "no-auto-hints"
+    fcAutoHintsLimit <- o .:? "auto-hints-limit"
+    fcAutoHintsSecs  <- o .:? "auto-hints-timeout"
+    fcControlPort    <- o .:? "control-port"
+    fcCoverageIgnore <- o .:? "coverage-ignore"
+    fcOverlayGraphs  <- o .:? "overlay-graphs"
     pure FileConfig{..}
 
 -- ---------------------------------------------------------------------
@@ -245,6 +277,14 @@ applyConfig FileConfig{..} o = o
                      Just b  -> b
                      Nothing -> oInspect o || isJust fcInspectPort
   , oInspectPort = fromMaybe (oInspectPort o) fcInspectPort
+  , oAutoHints      = maybe (oAutoHints o) not fcNoAutoHints
+  , oAutoHintsLimit = fromMaybe (oAutoHintsLimit o) fcAutoHintsLimit
+  , oAutoHintsSecs  = fromMaybe (oAutoHintsSecs o) fcAutoHintsSecs
+  , oControlPort    = fromMaybe (oControlPort o) fcControlPort
+  , oCoverageIgnore = fromMaybe (oCoverageIgnore o) fcCoverageIgnore
+    -- Config sets the base overlay list; a CLI --overlay-graph then appends
+    -- (union of config + CLI), mirroring the --agda-arg idiom above.
+  , oOverlayGraphs  = fromMaybe (oOverlayGraphs o) fcOverlayGraphs
   }
   where
     -- A present config value wins over the (default) seed; 'Maybe' field.

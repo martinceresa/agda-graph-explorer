@@ -5,6 +5,7 @@ An interactive Agda library explorer for [Claude Code](https://code.claude.com).
 - **An MCP server (`agda-explore`)** — a daemon that holds an Agda project's dependency graph in memory and answers point queries instead of `grep`. The graph is regenerated on the fly (re-runs `agda-deps`, hot-swaps the in-memory graph). `--enable-interact` adds a write-side interaction bridge; `--inspect` adds a localhost web inspector (both below).
 - **A skill (`agda-explore`)** — teaches Claude when to use the tools and how to read their output.
 - **Two Agda agents** — `agda-simplifier` and `agda-protocol-formalizer`.
+- **Two hooks** — after any text edit to an Agda file, validate it through the warm bridge (or nudge to); on the first structural `grep`, route to the graph tools instead (below).
 
 The server reuses the `agda-deps` toolset; it does not link Agda itself.
 
@@ -106,7 +107,7 @@ Start with **`--enable-interact`** (or `enable-interact: true` in `.agda-explore
 | Tool           | Question / action |
 |----------------|-------------------|
 | `load`         | Open a module; list goals (`g0, g1, …`) + positions. Re-`load` after edits — diffs can renumber goals. |
-| `check`        | Type-check a module (on-disk or `content` dry-run) → ✓/✗ + every error/warning + open goals. |
+| `check`        | Type-check a module (on-disk or `content` dry-run) → ✓/✗ + every error/warning + open goals. On the live path it also probes remaining goals with Mimer and reports ready-made solutions inline (`--no-auto-hints` disables; `--auto-hints-limit` / `--auto-hints-timeout` tune). |
 | `goal_type`    | A hole's goal type + in-scope context. |
 | `goal_context` | Just the in-scope binders and their types. |
 | `infer`        | Infer the type of an expression in a goal's context. |
@@ -120,11 +121,25 @@ Start with **`--enable-interact`** (or `enable-interact: true` in `.agda-explore
 | `give_many`    | Fill several goals in one load → one combined, atomic diff. |
 | `construct`    | Run a planned batch of `give`/`refine`/`case_split`/`auto` steps against one warm load → one combined diff. |
 | `auto`         | Mimer proof search → a fill diff, or a "no solution" note. |
+| `auto_all`     | Mimer over EVERY open goal in one call (per-goal `timeout`) → one combined diff for the solved ones + the survivors. No goal ids to manage. |
 | `stage`        | Open an ephemeral scratch module (seeded with a target's imports) to build a new def in isolation. |
 | `promote`      | Splice a `stage` def into a real target: merge imports, re-validate the whole target → diff (or error, nothing changed). |
 | `discard`      | Drop a `stage` scratch buffer. |
 
 By default each mutator **returns a diff and does not write** — apply it yourself, then `load` again. **`write:true`** instead applies the edit, reloads, and returns the diff plus refreshed goals. A bad term fails locally (file never left broken). Any `postulate` / termination / coverage / unsafe-`OPTIONS` pragma / escape hatch is rejected before Agda sees it (a hard zero-axiom contract, enforced over whole-file content too). `.lagda.md` edits land inside the ```` ```agda ```` fence, never the prose. To turn the bridge on for the plugin, add `enable-interact: true` to the project's `.agda-explore.yml`.
+
+## Hooks
+
+The plugin ships two hooks (`hooks/hooks.json`; they need `jq` on `PATH` and are active only while the plugin is enabled):
+
+- **`post-agda-edit`** (PostToolUse on `Edit`/`Write`): after any text edit to an `.agda` / `.lagda*` file, close the edit→check loop. If the daemon serves its control endpoint (below), the hook runs a REAL warm `check` and injects the verdict + diagnostics + goals as context; otherwise it injects a one-line nudge to call the bridge's `check` (rate-limited per session+file, so refactors aren't spammed). It never blocks the edit.
+- **`pre-grep-route`** (PreToolUse on `Grep`): the FIRST structural grep over Agda sources in a session is denied with the grep→graph tool mapping (`locate` / `search` / `callers` / `callees` / `type_of` / `find_lemma`); every later grep sails through — text searches over prose and comments are legitimate.
+
+**Kill switch:** disable the plugin, or delete/blank `hooks/hooks.json`.
+
+### Control endpoint (Phase 2 of the edit hook)
+
+Start the daemon with **`--control-port N`** (or `control-port: N` in `.agda-explore.yml`; needs `--enable-interact`) to serve `GET /check?file=…` on localhost — the same warm check the MCP `check` tool runs, callable by the hook from outside the MCP transport. The bound port (probed upward from N) is written to `<out-dir>/control-port` for discovery and removed on shutdown; a busy endpoint answers `503` and the hook degrades to the nudge. Localhost-only, off by default.
 
 ## Live web inspector (opt-in)
 

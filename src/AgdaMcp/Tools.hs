@@ -8,14 +8,16 @@
 -- @grep@-driven exploration of an Agda corpus.
 module AgdaMcp.Tools
   ( dispatch
+  , enabledTools
   ) where
 
 import           Data.Aeson         (Value (..), object, (.=))
 import qualified Data.Aeson.KeyMap  as KM
-import           Data.IORef         (readIORef, writeIORef)
-import           Data.List          (isPrefixOf)
+import           Data.IORef         (modifyIORef', readIORef, writeIORef)
+import           Data.List          (isPrefixOf, sortOn)
 import qualified Data.Map.Strict    as M
 import           Data.Maybe         (fromMaybe)
+import           Data.Ord           (Down (..))
 import           Data.Text          (Text)
 import qualified Data.Text          as T
 import           Data.Time.Clock    (diffUTCTime, getCurrentTime)
@@ -43,80 +45,79 @@ import qualified BuildInfo
 enabledTools :: ServerState -> [Tool]
 enabledTools ss = graphTools ++ [ t | cfgEnableInteract (ssConfig ss), t <- interactTools ]
 
+-- | The @format@ property, shared by the list tools (search / callers /
+-- callees). Kept terse — the structured-output contract is in the skill.
+fmtProp :: (Text, Value)
+fmtProp = ("format", ep "`text` (default) or `json` (structured envelope)." ["text", "json"])
+
 graphTools :: [Tool]
 graphTools =
-  [ Tool "locate"
-      "Where a definition lives: its module, source file:line, kind, state, \
-      \visibility, direct caller/dependency counts, and transitive blast radius. \
-      \For a where-/anonymous-module helper it also reports the enclosing \
-      \top-level `owner`. Accepts a fully-qualified name or any unique \
-      \dotted-suffix (e.g. `liveness′`); a single unambiguous near-match \
-      \(case-insensitive infix) is resolved automatically, with a one-line \
-      \`(auto-resolved …)` note. Use instead of grepping for a definition site."
-      (objSchema [("name", sp "Fully-qualified name or any unique dotted-suffix of one. A single unambiguous near-match is auto-resolved (noted in the output); ambiguous names list candidates.")] ["name"])
+  [ Tool "brief"
+      "One-call orientation on a definition: location + blast radius, type, \
+      \direct callers/callees (capped), and closest body-twins. Lead with this; \
+      \use the individual tools to go deeper on a section."
+      (objSchema [ ("name", sp "FQN or unique dotted-suffix (resolved as `locate`).")
+                 , ("limit", ip "Max callers/callees per section (default 10).")
+                 ] ["name"])
+      (\ss a -> needName a $ \n -> withFresh ss (\ld -> queryBrief ld (argInt a "limit" 10) n))
+
+  , Tool "locate"
+      "Where a definition lives: module, file:line, kind, state, visibility, \
+      \caller/dependency counts, blast radius, and enclosing owner for a \
+      \where-helper. Use instead of grepping for a definition site."
+      (objSchema [("name", sp "FQN or unique dotted-suffix; a unique near-match is auto-resolved, ambiguous names list candidates.")] ["name"])
       (\ss a -> needName a $ \n -> withFresh ss (\ld -> queryLocate ld n))
 
   , Tool "callers"
-      "Who uses a definition (reverse dependency edges). `transitive` walks the \
-      \whole upstream cone. `module_prefix` keeps only callers under a module \
-      \path; `provenance` keeps only direct edges of one kind \
-      \(signature/body/module-local/with) — e.g. `body` for genuine term-level uses vs \
-      \`signature` for in-scope/type-level mentions — and annotates each direct \
-      \line with its tag; `by_module` returns a per-module count summary instead \
-      \of a flat list (good for large fan-out). Replaces `grep -rn '\\bname\\b'`."
+      "Who uses a definition (reverse dependency edges); `transitive` walks the \
+      \whole upstream cone. Replaces `grep -rn '\\bname\\b'`."
       (objSchema [ ("name", sp "Definition to find callers of.")
                  , ("transitive", bp "Walk all transitive callers (default false).")
-                 , ("module_prefix", sp "Only include callers whose module starts with this prefix.")
-                 , ("provenance", sp "Keep only direct edges of this provenance: signature|body|module-local|with|unknown (where = legacy alias for module-local).")
-                 , ("by_module", bp "Summarise as per-module counts instead of a flat list (default false).")
-                 , ("limit", ip "Max results to list (default 50).")
+                 , ("module_prefix", sp "Only callers whose module starts with this prefix.")
+                 , ("provenance", sp "Keep only direct edges of this provenance: signature|body|module-local|with|unknown (where=module-local).")
+                 , ("by_module", bp "Per-module count summary instead of a flat list (default false).")
+                 , ("limit", ip "Max results (default 50).")
+                 , fmtProp
                  ] ["name"])
       (\ss a -> needName a $ \n ->
           withFresh ss (\ld -> queryCallers ld (argBool a "transitive" False)
                                  (argText a "module_prefix") (argText a "provenance")
-                                 (argBool a "by_module" False) (argInt a "limit" 50) n))
+                                 (argBool a "by_module" False) (argInt a "limit" 50)
+                                 (parseFmt (argText a "format")) n))
 
   , Tool "callees"
-      "What a definition depends on (forward dependency edges). `transitive` \
-      \walks the whole downstream cone. `module_prefix` keeps only \
-      \dependencies under a module path; `provenance` keeps only direct edges of \
-      \one kind (signature/body/module-local/with) and annotates each direct line with \
-      \its tag; `by_module` returns a per-module count summary instead of a flat \
-      \list."
+      "What a definition depends on (forward dependency edges); `transitive` \
+      \walks the whole downstream cone."
       (objSchema [ ("name", sp "Definition to find dependencies of.")
                  , ("transitive", bp "Walk all transitive dependencies (default false).")
-                 , ("module_prefix", sp "Only include dependencies whose module starts with this prefix.")
-                 , ("provenance", sp "Keep only direct edges of this provenance: signature|body|module-local|with|unknown (where = legacy alias for module-local).")
-                 , ("by_module", bp "Summarise as per-module counts instead of a flat list (default false).")
-                 , ("limit", ip "Max results to list (default 50).")
+                 , ("module_prefix", sp "Only dependencies whose module starts with this prefix.")
+                 , ("provenance", sp "Keep only direct edges of this provenance: signature|body|module-local|with|unknown (where=module-local).")
+                 , ("by_module", bp "Per-module count summary instead of a flat list (default false).")
+                 , ("limit", ip "Max results (default 50).")
+                 , fmtProp
                  ] ["name"])
       (\ss a -> needName a $ \n ->
           withFresh ss (\ld -> queryCallees ld (argBool a "transitive" False)
                                  (argText a "module_prefix") (argText a "provenance")
-                                 (argBool a "by_module" False) (argInt a "limit" 50) n))
+                                 (argBool a "by_module" False) (argInt a "limit" 50)
+                                 (parseFmt (argText a "format")) n))
 
   , Tool "impact"
-      "Blast radius of changing a definition's type/signature: every \
-      \definition that transitively depends on it, summarised by module. \
-      \Answers \"what breaks if I change X?\"."
+      "Blast radius of changing a definition's type: everything that \
+      \transitively depends on it, by module. Answers \"what breaks if I change X?\"."
       (objSchema [ ("name", sp "Definition you intend to change.")
-                 , ("limit", ip "Max affected definitions to list (default 60).")
+                 , ("limit", ip "Max affected definitions (default 60).")
                  ] ["name"])
       (\ss a -> needName a $ \n -> withFresh ss (\ld -> queryImpact ld (argInt a "limit" 60) n))
 
   , Tool "path"
-      "Shortest dependency chain from one definition to another: the sequence \
-      \`from → … → to` along forward (uses) edges, showing *why* `from` \
-      \transitively depends on `to`. Each hop is annotated with its edge \
-      \provenance (`{body}`/`{module-local}`/`{signature}`/`{with}`). Set `k > 1` to \
-      \return several distinct shortest paths (useful when the first runs \
-      \through a helper you don't care about); a non-positive `k` is clamped to \
-      \1 with a note. `module_prefix` keeps the chain within a module subtree. \
-      \Answers \"how does this proof reach that assumption?\" in one call."
-      (objSchema [ ("from", sp "Start definition (the user / dependent).")
+      "Shortest dependency chain `from → … → to` along uses-edges, each hop \
+      \tagged with its provenance — why `from` transitively needs `to`. `k>1` \
+      \returns several distinct paths."
+      (objSchema [ ("from", sp "Start definition (the dependent).")
                  , ("to", sp "End definition (the dependency to reach).")
-                 , ("k", ip "Max number of distinct shortest paths to return (default 1).")
-                 , ("module_prefix", sp "Only route through intermediate nodes whose module starts with this prefix (endpoints exempt).")
+                 , ("k", ip "Max distinct shortest paths (default 1).")
+                 , ("module_prefix", sp "Only route through intermediate nodes under this module prefix (endpoints exempt).")
                  ] ["from", "to"])
       (\ss a -> case (argText a "from", argText a "to") of
           (Just f, Just t) -> withFresh ss (\ld ->
@@ -124,23 +125,16 @@ graphTools =
           _                -> pure (Left "path requires both `from` and `to` arguments."))
 
   , Tool "roots"
-      "Which assumptions a definition ultimately rests on: its transitive \
-      \dependencies that are postulates / primitives (or a given `kind`/`state`), \
-      \each with a shortest witnessing chain. Answers \"what axioms does theorem \
-      \T depend on?\" in one call. For a project whose axioms live in record \
-      \fields rather than postulates, scope with `kind=projection \
-      \module_prefix=<your Assumptions module>` to audit exactly those. \
-      \`by_module` gives a per-module count summary and `chains=false` drops the \
-      \witness chains — both for scanning a large root set."
+      "Which assumptions a definition rests on: its transitive postulate/primitive \
+      \(or a given kind/state) dependencies, each with a witness chain. Answers \
+      \\"what axioms does theorem T depend on?\" (see the skill for record-field axioms)."
       (objSchema [ ("name", sp "Definition (e.g. a theorem) to audit.")
-                 , ("kind", sp "Restrict roots to this structural kind \
-                               \(function|projection|datatype|record|constructor|postulate|primitive|other). \
-                               \Default: postulate + primitive.")
-                 , ("state", sp "Restrict roots to this lifecycle state (defined|postulate|hole|failed).")
-                 , ("module_prefix", sp "Only report roots whose module starts with this prefix (e.g. an Assumptions module).")
-                 , ("by_module", bp "Summarise roots as per-module counts instead of a list (default false).")
-                 , ("chains", bp "Show a witness chain per root (default true; set false for a bare list).")
-                 , ("limit", ip "Max roots to list (default 20).")
+                 , ("kind", sp "Restrict roots to this kind (function|projection|datatype|record|constructor|postulate|primitive|other). Default: postulate + primitive.")
+                 , ("state", sp "Restrict roots to this state (defined|postulate|hole|failed).")
+                 , ("module_prefix", sp "Only roots whose module starts with this prefix.")
+                 , ("by_module", bp "Per-module count summary instead of a list (default false).")
+                 , ("chains", bp "Show a witness chain per root (default true).")
+                 , ("limit", ip "Max roots (default 20).")
                  ] ["name"])
       (\ss a -> needName a $ \n ->
           withFresh ss (\ld -> queryRoots ld (argInt a "limit" 20)
@@ -149,13 +143,8 @@ graphTools =
                                  (argText a "kind") (argText a "state") n))
 
   , Tool "type_of"
-      "The type signature of a definition. By default this is the *elaborated* \
-      \type reified from the type-checker (fully qualified, Agda's default \
-      \printing — so numeric literals and instance dictionaries may be expanded). \
-      \Set `source=true` to show the signature as *written* in the file instead \
-      \(best-effort for multi-line signatures). The reified form's \
-      \normalise / show-implicit dimensions are daemon-level settings; the output \
-      \footer reports the active mode."
+      "The type signature of a definition — the elaborated (type-checker) form \
+      \by default, or the as-written source with `source=true`."
       (objSchema [ ("name", sp "Definition whose type signature you want.")
                  , ("source", bp "Show the as-written source signature instead of the elaborated type (default false).")
                  ] ["name"])
@@ -164,10 +153,8 @@ graphTools =
             (cfgNormaliseSigs (ssConfig ss)) (cfgShowImplicit (ssConfig ss)) n))
 
   , Tool "similar_types"
-      "Definitions whose type-signature *shape* resembles X's, ranked by \
-      \weighted Jaccard of their Weisfeiler-Leman signature fingerprints. \
-      \Uses the same shared core as the batch `silhouette` analysis, so a \
-      \100-percent hit is exactly one of X's structural twins there. Answers \
+      "Definitions whose type-signature shape resembles X's (Weisfeiler-Leman \
+      \fingerprint Jaccard; same core as the `silhouette` analysis). Answers \
       \\"what else has a type shaped like X's?\"."
       (objSchema [ ("name", sp "Reference definition.")
                  , ("limit", ip "Max results (default 10).")
@@ -177,11 +164,9 @@ graphTools =
           withFresh ss (\ld -> querySimilarTypes ld (argInt a "limit" 10) (argDouble a "min_sim" 0.5) n))
 
   , Tool "similar_bodies"
-      "Definitions whose elaborated bodies share canonical AST subterms, \
-      \ranked by occurrence-weighted Jaccard of their subterm-hash multisets \
-      \— the same per-def view the batch `term-cluster` analysis buckets over. \
-      \Answers \"what else is implemented like X?\". Requires a graph built \
-      \with term hashes (the daemon does this by default)."
+      "Definitions whose elaborated bodies share canonical AST subterms (same \
+      \core as the `term-cluster` analysis). Answers \"what else is implemented \
+      \like X?\"."
       (objSchema [ ("name", sp "Reference definition.")
                  , ("limit", ip "Max results (default 10).")
                  , ("min_sim", np "Minimum similarity 0..1 (default 0.3).")
@@ -190,23 +175,14 @@ graphTools =
           withFresh ss (\ld -> querySimilarBodies ld (argInt a "limit" 10) (argDouble a "min_sim" 0.3) n))
 
   , Tool "find_lemma"
-      "Goal-directed lemma search: find existing definitions whose \
-      \*conclusion* (result type) resembles a proof goal, so you can reuse a \
-      \lemma instead of re-deriving it. Two modes (supply EXACTLY ONE of \
-      \`goal`/`anchor`): (1) `anchor=<existing def>` ranks by the same \
-      \Weisfeiler-Leman signature-fingerprint shape as `similar_types` (true \
-      \structural matching, requires a graph node with edges); (2) \
-      \`goal=\"<rendered goal type>\"` canonicalises the free-text goal, takes \
-      \its conclusion (after the last top-level arrow), and ranks candidate \
-      \signatures by identifier-token Jaccard over their conclusions — a \
-      \name-overlap proxy, NOT WL (an out-of-graph string has no edges to \
-      \fingerprint). Optional `kind`/`module_prefix` filter candidates. \
-      \Free-text mode needs a signatures-enabled graph (the daemon default); \
-      \against a signature-less graph it returns a rebuild note."
-      (objSchema [ ("goal", sp "Free-text goal type to match (e.g. `xs ++ [] ≡ xs`); mutually exclusive with `anchor`. Ranks by conclusion-token overlap.")
-                 , ("anchor", sp "An existing definition whose result type is the goal shape; mutually exclusive with `goal`. Ranks by WL signature-fingerprint shape (like `similar_types`).")
-                 , ("kind", sp "Restrict candidates to this structural kind: function|projection|datatype|record|constructor|postulate|primitive|other.")
-                 , ("module_prefix", sp "Only consider candidates whose module starts with this prefix.")
+      "Goal-directed lemma search: find definitions whose conclusion resembles a \
+      \goal, to reuse instead of re-deriving. Supply EXACTLY ONE of `anchor` (an \
+      \existing def; WL shape match) or `goal` (free-text type; conclusion-token \
+      \match) — see the skill for the mode contract."
+      (objSchema [ ("goal", sp "Free-text goal type (e.g. `xs ++ [] ≡ xs`); ranks by conclusion-token overlap. Exclusive with `anchor`.")
+                 , ("anchor", sp "An existing def whose result type is the goal shape; ranks by WL fingerprint. Exclusive with `goal`.")
+                 , ("kind", sp "Restrict candidates to this kind: function|projection|datatype|record|constructor|postulate|primitive|other.")
+                 , ("module_prefix", sp "Only candidates whose module starts with this prefix.")
                  , ("limit", ip "Max results (default 10).")
                  , ("min_sim", np "Minimum similarity 0..1 (default 0.3).")
                  ] [])
@@ -220,60 +196,38 @@ graphTools =
 
   , Tool "search"
       "Find definitions whose qualified name contains a substring, ranked by \
-      \match tightness. Use to discover exact names before other queries. \
-      \`kind` (function/projection/datatype/record/constructor/postulate/\
-      \primitive/other), `state` (defined/postulate/hole/failed), and \
-      \`module_prefix` filter structurally — supply any of them with an empty \
-      \`query` to *list* (e.g. every postulate, or every datatype under a \
-      \module subtree). Set `top_level_only` to drop where-block / \
-      \anonymous-module locals."
-      (objSchema [ ("query", sp "Substring to search for (case-insensitive). May be empty when kind/state/module_prefix is given.")
-                 , ("kind", sp "Filter by structural kind: function|projection|datatype|record|constructor|postulate|primitive|other.")
-                 , ("state", sp "Filter by lifecycle state: defined|postulate|hole|failed.")
-                 , ("module_prefix", sp "Only list definitions whose module starts with this prefix (e.g. `Data.List.Base`).")
+      \match tightness; `kind`/`state`/`module_prefix` filter (an empty `query` \
+      \plus a filter *lists* all of a kind/state)."
+      (objSchema [ ("query", sp "Case-insensitive substring; may be empty when a kind/state/module_prefix filter is given.")
+                 , ("kind", sp "Filter by kind: function|projection|datatype|record|constructor|postulate|primitive|other.")
+                 , ("state", sp "Filter by state: defined|postulate|hole|failed.")
+                 , ("module_prefix", sp "Only definitions whose module starts with this prefix.")
                  , ("limit", ip "Max results (default 30).")
                  , ("top_level_only", bp "Drop where-block / anonymous-module locals (default false).")
+                 , fmtProp
                  ] [])
       (\ss a -> withFresh ss (\ld ->
                   querySearch ld (argBool a "top_level_only" False)
                     (argText a "module_prefix")
                     (argText a "kind") (argText a "state") (argInt a "limit" 30)
+                    (parseFmt (argText a "format"))
                     (fromMaybe "" (argText a "query"))))
 
   , Tool "unused"
-      "Run agda-unused over the current graph: unused `using` imports, \
-      \duplicate opens, and (opt-in) dead definitions. High-signal for \
-      \import hygiene; carries the known instance/`with`-clause false-positive \
-      \caveat. Each `dead` finding is tagged high- or low-confidence (the \
-      \low ones have trivial bodies the elaborator may have inlined) — verify \
-      \low-confidence ones before deleting; high-confidence ones are safe. \
-      \The response header echoes the resolved scope, effective kinds, \
-      \and any exclude globs, and the trailing `# excluded:` line reports how \
-      \many findings the excludes suppressed."
-      (objSchema [ ("scope", sp "Restrict the scan to a directory, file, or module name \
-                                 \(e.g. `Prelude.Init`). Relative paths resolve against the \
-                                 \project root; a scope matching no module is rejected. \
-                                 \Default: project root.")
+      "Run agda-unused over the graph: unused imports, duplicate opens, and \
+      \(opt-in) dead definitions, confidence-tagged. See the skill for the \
+      \false-positive caveats."
+      (objSchema [ ("scope", sp "Restrict to a directory, file, or module name (e.g. `Prelude.Init`); relative to project root. Default: project root.")
                  , ("kinds", sp "agda-unused --kinds value, e.g. `all` or `using,duplicate`.")
-                 , ("exclude", sp "Comma-separated *glob(s)* (not substrings) tested against \
-                                   \each finding's absolute file path and dotted module name; a \
-                                   \finding is dropped if either matches. `**` spans directories, \
-                                   \`*` stops at `/`, `?` is one char — e.g. `**/Init.agda` for a \
-                                   \re-export hub, or `Prelude.*`. The output's `# excluded:` line \
-                                   \reports how many findings were suppressed.")
-                 , ("group_by", sp "Aggregate findings into per-group counts instead of one \
-                                    \line per finding: `dir` (directory of the relativised path), \
-                                    \`file` (relativised path), or `kind`. Rows are sorted by \
-                                    \descending count, ties broken by group key.")
-                 , ("count_only", bp "Print only the grand total (default false). Wins over \
-                                      \group_by if both are set.")
+                 , ("exclude", sp "Comma-separated globs matched against each finding's file path and module name (`**` spans dirs, `*` stops at `/`); a match drops the finding.")
+                 , ("group_by", sp "Per-group counts instead of per-finding lines: `dir`, `file`, or `kind`.")
+                 , ("count_only", bp "Print only the grand total (default false; wins over group_by).")
                  ] [])
       runUnused
 
   , Tool "rebuild"
-      "Force-regenerate the dependency graph now (runs agda-deps, reusing \
-      \Agda's .agdai cache) and report fresh statistics. Normally unnecessary \
-      \— queries auto-rebuild when sources change."
+      "Force-regenerate the dependency graph now (runs agda-deps). Normally \
+      \unnecessary — queries auto-rebuild when sources change."
       (objSchema [] [])
       (\ss _ -> do
           -- The @rebuild@ tool always (force-)rebuilds: stale=True.
@@ -305,7 +259,7 @@ staleFooter ld =
     <> T.pack (show (ldBuiltAt ld))
 
 -- | Record the @stale@ telemetry column for the request currently in
--- flight. Every tool runner that calls 'ensureFresh' threads the E1
+-- flight. Every tool runner that calls 'ensureFresh' threads the
 -- @(Loaded, Bool)@ stale flag through here; 'handleCall' reads + resets it
 -- after the runner returns. (The @rebuild@ tool sets 'True', @status@
 -- 'False' directly — see the catalogue.)
@@ -327,8 +281,8 @@ withFreshIO ss f = do
         Left err  -> Left err
         Right txt -> Right (txt <> if stale then staleFooter ld else "")
 
--- | The E2 fail-fast wrapper used by @type_of@. Before paying the
--- 'ensureFresh' barrier (which, post-E1, may schedule a background
+-- | The fail-fast wrapper used by @type_of@. Before paying the
+-- 'ensureFresh' barrier (which may schedule a background
 -- rebuild and serve stale), it resolves @name@ against the
 -- /already-loaded/ snapshot. If a snapshot exists and the name is absent
 -- from it ('nameInSnapshot' 'False'), it answers the 'notInGraph' message
@@ -455,7 +409,19 @@ statusText ss = do
   -- queries are served from the prior snapshot until the build lands.
   dirty    <- readIORef (ssDirty ss)
   building <- readIORef (ssBuilding ss)
+  counts   <- readIORef (ssToolCounts ss)
   let c = ssConfig ss
+      -- Per-run adoption histogram (see 'ssToolCounts'); top rows only,
+      -- with the standard `…and N more` tail.
+      usage
+        | M.null counts = ""
+        | otherwise =
+            let rows = sortOn (\(n, k) -> (Down k, n)) (M.toList counts)
+                top  = take 15 rows
+                more = length rows - length top
+            in "  tool usage (this run):\n"
+                 <> T.unlines [ "    " <> n <> ": " <> T.pack (show k) | (n, k) <- top ]
+                 <> (if more > 0 then "    …and " <> T.pack (show more) <> " more tools\n" else "")
       base = T.unlines
         [ "agda-explore status"
         , "  server build: " <> T.pack BuildInfo.buildFingerprint
@@ -481,7 +447,7 @@ statusText ss = do
                                     else "idle (snapshot is fresh)")
         , "  term hashes:  " <> (if cfgWithHashes c then "on" else "off")
         ]
-  pure $ banner <> base <> "\n" <> case cur of
+  pure $ banner <> base <> usage <> "\n" <> case cur of
     Nothing -> case cold of
       Just diag -> "Cold start — no graph yet:\n  " <> diag
                      <> "\n(retrying in the background; will self-heal once the corpus builds)"
@@ -495,6 +461,9 @@ statusText ss = do
                               <> "; rebuild to refresh)"
                        else " (current)")
                  <> "\n\n" <> queryStats ld
+                 <> (case orphanWarning (ldOrphanFiles ld) of
+                       "" -> ""
+                       w  -> "\n\n" <> w)
 
 -- ---------------------------------------------------------------------
 -- Dispatch
@@ -527,7 +496,11 @@ handleCall ss theId params = case argText params "name" of
     []      -> pure (errorResponse theId codeMethodNotFound ("unknown tool: " <> tn))
     (t : _) -> do
       let args = fromMaybe (Object KM.empty) (argLookup params "arguments")
-      -- Telemetry (E6): time the runner, capture whether it triggered a
+      -- Adoption telemetry: count every dispatch per tool name (rendered by
+      -- @status@), so which tools agents actually reach for is visible
+      -- without parsing transcripts.
+      modifyIORef' (ssToolCounts ss) (M.insertWith (+) tn 1)
+      -- Telemetry: time the runner, capture whether it triggered a
       -- live rebuild (the runner writes 'ssLastRebuilt'; reset first so a
       -- runner that doesn't touch it reads a clean False), and append one
       -- JSON line per tools/call when cfgQueryLog is on. This is the single

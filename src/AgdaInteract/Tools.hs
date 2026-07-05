@@ -27,10 +27,10 @@ module AgdaInteract.Tools
   , reapIdleSessions
   ) where
 
-import           Control.Concurrent      (forkIO, threadDelay)
+import           Control.Concurrent      (threadDelay)
 import           Control.Concurrent.MVar (modifyMVar, modifyMVar_, readMVar)
 import           Control.Exception       (SomeException, try)
-import           Control.Monad           (foldM, forM, forM_, forever, void, when)
+import           Control.Monad           (foldM, forM, forM_, forever, when)
 import           Data.Aeson              (FromJSON (..), Value, object, withObject,
                                           (.:), (.:?), (.=))
 import           Data.Aeson.Types        (parseMaybe)
@@ -86,129 +86,118 @@ interactTools =
                  ["file"])
       runLoad
 
-  , Tool "goal_type"
-      "The type of an open goal, plus its in-scope context (binders and \
-      \their types) — the interaction-hole analogue of `type_of`. Takes a \
-      \stable goal id from `load` (e.g. `g0`)."
-      (objSchema [ ("goal", sp "Stable goal id from `load`, e.g. `g0`.")
-                 , ("file", sp "Module file, if more than one is loaded (else inferred).")
+  , Tool "goal_brief"
+      "One-call orientation on an open goal: its type + in-scope context and the \
+      \top reusable lemmas whose conclusion resembles it. Lead with this after \
+      \`load`; read-only."
+      (objSchema [ goalProp, fileProp
+                 , ("limit", ip "Max candidate lemmas (default 5).")
+                 , ("kind", sp "Restrict lemma candidates to a kind: function|projection|datatype|record|constructor|postulate|primitive|other.")
+                 , ("module_prefix", sp "Only lemma candidates whose module starts with this prefix.")
+                 , ("min_sim", np "Minimum lemma similarity 0..1 (default 0.3).")
                  ] ["goal"])
+      runGoalBrief
+
+  , Tool "goal_type"
+      "The type of an open goal plus its in-scope context — the interaction-hole \
+      \analogue of `type_of`."
+      (objSchema [ goalProp, fileProp ] ["goal"])
       (runGoalInfo renderGoalTypeFull)
 
   , Tool "goal_context"
-      "The in-scope context at an open goal: every visible binder and its \
-      \type. Takes a stable goal id from `load`."
-      (objSchema [ ("goal", sp "Stable goal id from `load`, e.g. `g0`.")
-                 , ("file", sp "Module file, if more than one is loaded (else inferred).")
-                 ] ["goal"])
+      "The in-scope context at an open goal: every visible binder and its type."
+      (objSchema [ goalProp, fileProp ] ["goal"])
       (runGoalInfo renderContextOnly)
 
   , Tool "infer"
-      "Infer the type of an expression in a goal's context (Cmd_infer). \
-      \Read-only: does not modify the goal or the file."
-      (objSchema [ ("goal", sp "Stable goal id whose context to use, e.g. `g0`.")
+      "Infer the type of an expression in a goal's context. Read-only."
+      (objSchema [ goalProp
                  , ("expr", sp "The expression to infer the type of.")
-                 , ("file", sp "Module file, if more than one is loaded (else inferred).")
+                 , fileProp
                  ] ["goal", "expr"])
       (runExpr (\f iid e -> iotcmInfer f Simplified iid e))
 
   , Tool "normalize"
-      "Normalise (compute) an expression in a goal's context (Cmd_compute). \
-      \Read-only."
-      (objSchema [ ("goal", sp "Stable goal id whose context to use, e.g. `g0`.")
+      "Normalise (compute) an expression in a goal's context. Read-only."
+      (objSchema [ goalProp
                  , ("expr", sp "The expression to normalise.")
-                 , ("file", sp "Module file, if more than one is loaded (else inferred).")
+                 , fileProp
                  ] ["goal", "expr"])
       (runExpr (\f iid e -> iotcmCompute f DefaultCompute iid e))
 
   , Tool "case_split"
-      "Case-split a goal on one or more pattern variables (Agda's \
-      \`Cmd_make_case`). Returns a unified diff that replaces the clause \
-      \with the generated clauses. The bridge does NOT write the file — \
-      \apply the diff yourself, then call `load` to refresh the goals."
-      (objSchema [ ("goal", sp "Stable goal id to split, e.g. `g0`.")
-                 , ("var", sp "Variable(s) to split on (space-separated), e.g. `n` or `xs ys`.")
-                 , ("file", sp "Module file, if more than one is loaded (else inferred).")
+      "Case-split a goal on one or more pattern variables; returns a diff \
+      \replacing the clause with the generated clauses."
+      (objSchema [ goalProp
+                 , ("var", sp "Variable(s) to split on, space-separated (e.g. `n` or `xs ys`).")
+                 , fileProp
                  , ("write", writeArg)
                  ] ["goal", "var"])
       runCaseSplit
 
   , Tool "refine"
-      "Refine a goal by a head symbol — fill it with `f ?` for the given \
-      \head `f`, leaving fresh subgoals (Agda's `Cmd_refine_or_intro`; an \
-      \empty hint does `intro`). Returns a unified diff; the bridge does \
-      \NOT write the file. The hint is checked against the no-postulate \
-      \contract before Agda sees it."
-      (objSchema [ ("goal", sp "Stable goal id to refine, e.g. `g0`.")
+      "Refine a goal by a head symbol `f` → fill it with `f ?`, leaving fresh \
+      \subgoals (empty hint does `intro`)."
+      (objSchema [ goalProp
                  , ("expr", sp "Head symbol / refinement hint (may be empty to intro).")
-                 , ("file", sp "Module file, if more than one is loaded (else inferred).")
+                 , fileProp
                  , ("write", writeArg)
                  ] ["goal"])
       runRefine
 
   , Tool "give"
-      "Fill a goal with a complete term, Agda-validated (`Cmd_give`): a \
-      \term that does not typecheck returns the localized Agda error and \
-      \the file is left untouched. On success returns a unified diff \
-      \replacing the hole. The bridge does NOT write the file. The term is \
-      \rejected up front if it uses `postulate`, a termination/coverage/\
-      \OPTIONS pragma, or another escape hatch (zero-axiom contract)."
-      (objSchema [ ("goal", sp "Stable goal id to fill, e.g. `g0`.")
+      "Fill a goal with a complete term, Agda-validated: a term that doesn't \
+      \typecheck returns the localized error with the file untouched."
+      (objSchema [ goalProp
                  , ("term", sp "The term to fill the hole with.")
-                 , ("file", sp "Module file, if more than one is loaded (else inferred).")
+                 , fileProp
                  , ("write", writeArg)
                  ] ["goal", "term"])
       runGive
 
   , Tool "give_many"
-      "Fill SEVERAL open goals in one shot against a single live session — \
-      \pays the (possibly expensive) module load ONCE instead of reloading \
-      \between each give, so it's the tool for closing many independent \
-      \holes in a slow-to-load module. Takes a `gives` list of \
-      \{goal, term}; each term is Agda-validated and guarded (no \
-      \postulate / escape hatches). Returns ONE combined unified diff for \
-      \all the fills (the bridge does not write the file). Atomic: if ANY \
-      \term is rejected, NOTHING is applied and the error names the \
-      \offending goal. For case-split / refine, or fills that depend on a \
-      \previous one, use the single-goal tools."
+      "Fill SEVERAL independent goals against one load (pays the module load \
+      \once) → one atomic diff; if any term is rejected nothing applies and the \
+      \error names the offending goal. For dependent fills use the single-goal tools."
       (objSchema [ ("gives", givesSchema)
-                 , ("file", sp "Module file, if more than one is loaded (else inferred).")
+                 , fileProp
                  , ("write", writeArg)
                  ] ["gives"])
       runGiveMany
 
   , Tool "auto"
-      "Search for a term that solves the goal with Agda's Mimer (auto). On \
-      \success returns a unified diff filling the hole (the bridge does not \
-      \write the file); if Mimer finds nothing you get a 'no solution' note \
-      \— guide it with `refine`, or `give` an explicit term."
-      (objSchema [ ("goal", sp "Stable goal id to solve, e.g. `g0`.")
-                 , ("file", sp "Module file, if more than one is loaded (else inferred).")
+      "Mimer proof search for one goal; returns a diff filling the hole, or a \
+      \'no solution' note (guide it with `refine`/`give`). For every goal at \
+      \once use `auto_all`."
+      (objSchema [ goalProp
+                 , fileProp
                  , ("write", writeArg)
                  ] ["goal"])
       runAuto
 
+  , Tool "auto_all"
+      "Run Mimer over EVERY open goal in one call (no goal ids to manage) → one \
+      \combined diff for the solved goals plus the survivors. Cheap to try \
+      \whenever a `check` leaves goals open."
+      (objSchema [ fileProp
+                 , ("timeout", ip "Mimer budget per goal in seconds (default 5).")
+                 , ("write", writeArg)
+                 ] [])
+      runAutoAll
+
   , Tool "stage"
-      "Open an ephemeral SCRATCH module (under .agda-explore/scratch/, \
-      \outside the source tree) for building a *new* definition in \
-      \isolation — so the real module isn't left half-written and each \
-      \`load` re-checks only the scratch's tiny closure, not the target's. \
-      \Optionally seed it with `target`'s imports so scratch scope \
-      \approximates the destination. Returns the scratch file path: add \
-      \your `name : T` + `name = ?` to it, construct with the usual tools \
-      \(`load`/`goal_type`/`case_split`/`refine`/`give`), then `promote` it \
-      \into a real module (or `discard`)."
+      "Open an ephemeral SCRATCH module (under .agda-explore/scratch/) to build \
+      \a NEW definition in isolation — the real module isn't left half-written \
+      \and each re-check is tiny. Returns the scratch path; construct with the \
+      \usual tools, then `promote` (or `discard`)."
       (objSchema [ ("target", sp "Real module to seed imports from + the eventual promote destination (optional).") ] [])
       runStage
 
   , Tool "promote"
-      "Splice the definition(s) you built in a `stage` scratch into a real \
-      \target module: merges any missing imports, appends the defs, then \
-      \re-validates the *whole target* in Agda. Returns a unified diff (the \
-      \bridge does not write the file) — or, if the spliced result doesn't \
-      \typecheck in the target's real scope (instance/scope/ordering facts \
-      \the scratch didn't capture), the localized error with nothing \
-      \changed. This is where the one expensive real-module recheck happens."
+      "Splice the def(s) built in a `stage` scratch into a real target module \
+      \(merging imports), then re-validate the WHOLE target — the one expensive \
+      \real-module recheck. Returns a diff, or the localized error if it doesn't \
+      \typecheck in the target's scope."
       (objSchema [ ("scratch", sp "The scratch file path returned by `stage`.")
                  , ("target", sp "The real module file to splice into.")
                  , ("write", writeArg)
@@ -216,38 +205,25 @@ interactTools =
       runPromote
 
   , Tool "discard"
-      "Drop a `stage` scratch buffer: close its session and delete the \
-      \scratch file. Use to abandon a dead-end construction."
+      "Drop a `stage` scratch: close its session and delete the scratch file."
       (objSchema [ ("scratch", sp "The scratch file path returned by `stage`.") ] ["scratch"])
       runDiscard
 
   , Tool "check"
-      "Type-check a module in the live session and report STRUCTURED \
-      \diagnostics: a ✓/✗ verdict, every error and warning (not just the \
-      \first), and the list of open goals with stable ids + (line:col). \
-      \This is the bridge analogue of running `agda <File>` in a shell, but \
-      \it reuses the warm session (and its .agdai cache) and hands the goals \
-      \straight back so you can pivot to `give`/`refine`/`auto`. Pass \
-      \`content` to DRY-RUN proposed full file text WITHOUT writing (it is \
-      \validated under a throwaway module name); omit it to check the file \
-      \as it is on disk. Read-only: never writes."
+      "Type-check a module in the live session → ✓/✗, every error and warning, \
+      \and open goals with stable ids + (line:col); when goals remain it probes \
+      \them with Mimer and reports ready-made solutions inline. Pass `content` \
+      \to dry-run proposed text without writing. Use instead of `agda <file>`."
       (objSchema [ ("file", sp "Path to the .agda / .lagda.md module (relative to the project root, or absolute).")
                  , ("content", sp "Proposed full file text to validate instead of the on-disk file (dry-run; nothing is written).")
                  ] ["file"])
       runCheck
 
   , Tool "give_file"
-      "Author a WHOLE definition or file through the bridge — the validated, \
-      \zero-axiom counterpart to a blind `Write`. Supply EXACTLY ONE of: \
-      \`content` (the full new text of `file`, also used to create a new \
-      \file) or `append` (a definition block to splice onto the end of an \
-      \existing module, after any imports it needs). The whole proposed text \
-      \is run through the no-postulate / no-escape-hatch guard, then \
-      \type-checked; on success you get a unified diff (and, with \
-      \`write:true`, it is applied and the module reloaded so you see the \
-      \remaining goals); on failure the localized errors with NOTHING \
-      \changed. Use this instead of `Write` when the file must honour the \
-      \--safe / 0-postulate contract."
+      "Author a WHOLE definition or file — the validated, zero-axiom counterpart \
+      \to a blind `Write`. Supply EXACTLY ONE of `content` (full file text; also \
+      \creates a new file) or `append` (a def block spliced onto the end). \
+      \Guarded + type-checked; returns a diff, or the localized errors unchanged."
       (objSchema [ ("file", sp "Target module file (created if it doesn't exist, in `content` mode).")
                  , ("content", sp "Full proposed file text. Mutually exclusive with `append`.")
                  , ("append", sp "A definition block to append to the existing file. Mutually exclusive with `content`.")
@@ -256,54 +232,37 @@ interactTools =
       runGiveFile
 
   , Tool "new_module"
-      "Scaffold a NEW, validated Agda module so a fresh file isn't a blank \
-      \page with no holes to drive. Give a `path` (the file to create); the \
-      \tool derives a correct `module … where` header matching the path, \
-      \emits literate ```agda fences for a .lagda.md path, and — uniquely — \
-      \resolves `imports` (a list of bare names you need, e.g. `Fin`, `_≤_`) \
-      \to `open import <Module>` lines by looking each up in the dependency \
-      \graph. Each `defs` entry {name,type} becomes a `name : type` / \
-      \`name = ?` hole. The scaffold is type-checked before it is returned. \
-      \With `write:true` the file is created and loaded (returning its \
-      \goals); otherwise the validated content is returned for you to write."
+      "Scaffold a NEW, validated Agda module: derives the `module … where` header \
+      \from `path`, literate fences for a .lagda.md path, resolves bare `imports` \
+      \names to `open import` lines off the graph, and turns each `defs` \
+      \{name,type} into a hole. Type-checked before it is returned."
       (objSchema [ ("path", sp "File to create, e.g. `Protocol/Jolteon/Foo.agda` or `Foo.lagda.md` (relative to the project root, or absolute).")
-                 , ("imports", arrOfStr "Bare names you need in scope; each is resolved to its defining module via the graph and emitted as an import. Unresolved names are reported, not invented.")
+                 , ("imports", arrOfStr "Bare names you need in scope; each is resolved to its defining module via the graph. Unresolved names are reported, not invented.")
                  , ("defs", defsSchema)
                  , ("open", bp "Emit `open import` (default true) vs bare `import`.")
-                 , ("write", bp "Create and load the file (default false → return the validated content to write yourself).")
+                 , ("write", bp "Create and load the file (default false → return the validated content).")
                  ] ["path"])
       runNewModule
 
   , Tool "construct"
-      "Run a SEQUENCE of hole-driven steps against one warm load — the \
-      \heterogeneous sibling of `give_many`, for when you have a plan for \
-      \several goals. `steps` is a list of {op, goal, …}: op = `give` \
-      \(+`term`), `refine` (+`expr`), `case_split` (+`var`), or `auto`. Each \
-      \step is validated and guarded; the edits are accumulated into ONE \
-      \combined diff (and applied + reloaded with `write:true`). Each step \
-      \targets a goal from the ORIGINAL load and the edits must not overlap, \
-      \so this does NOT fill holes that an earlier step introduced — run \
-      \`construct` again (or `load`) for those. Atomic: any rejected step \
-      \applies nothing and names the offender."
+      "Run a SEQUENCE of hole-driven steps against one warm load (heterogeneous \
+      \sibling of `give_many`): `steps` is a list of {op, goal, …} with op = \
+      \give/refine/case_split/auto. One combined diff; each step targets an \
+      \ORIGINAL-load goal (won't fill holes an earlier step introduced); a \
+      \rejected step aborts naming the offender."
       (objSchema [ ("steps", stepsSchema)
-                 , ("file", sp "Module file, if more than one is loaded (else inferred).")
+                 , fileProp
                  , ("write", writeArg)
                  ] ["steps"])
       runConstruct
 
   , Tool "lemmas"
-      "Goal-directed lemma search wired to a LIVE goal: takes the type of an \
-      \open goal (from `load`) and finds existing definitions whose \
-      \conclusion resembles it, so you can `give`/`refine` with a lemma \
-      \instead of re-deriving it. A convenience front-end to the read-side \
-      \`find_lemma` (free-text mode) that reads the goal's type for you. \
-      \Ranks by identifier-token overlap over canonicalised conclusions (a \
-      \name-overlap proxy, NOT WL); `kind`/`module_prefix` filter candidates. \
-      \Reads the current graph snapshot (does not trigger a rebuild)."
-      (objSchema [ ("goal", sp "Stable goal id whose type to search for, e.g. `g0`.")
-                 , ("file", sp "Module file, if more than one is loaded (else inferred).")
-                 , ("kind", sp "Restrict candidates to a structural kind: function|projection|datatype|record|constructor|postulate|primitive|other.")
-                 , ("module_prefix", sp "Only consider candidates whose module starts with this prefix.")
+      "Goal-directed lemma search for a LIVE goal: reads the goal's type and \
+      \finds definitions whose conclusion resembles it, to `give`/`refine` with \
+      \instead of re-deriving. The live-goal front-end to `find_lemma`."
+      (objSchema [ goalProp, fileProp
+                 , ("kind", sp "Restrict candidates to a kind: function|projection|datatype|record|constructor|postulate|primitive|other.")
+                 , ("module_prefix", sp "Only candidates whose module starts with this prefix.")
                  , ("limit", ip "Max results (default 10).")
                  , ("min_sim", np "Minimum similarity 0..1 (default 0.3).")
                  ] ["goal"])
@@ -315,6 +274,12 @@ writeArg :: Value
 writeArg = bp "Apply the edit to the file and reload, returning the refreshed \
               \goals — instead of only returning a diff for you to apply \
               \(default false; the bridge does not write unless asked)."
+
+-- | The @goal@ and @file@ properties shared by (almost) every interaction
+-- tool — defined once; the goal-id lifecycle lives in the skill.
+goalProp, fileProp :: (Text, Value)
+goalProp = ("goal", sp "Stable goal id from `load` (e.g. `g0`).")
+fileProp = ("file", sp "Loaded module file (needed only if several are loaded).")
 
 -- | A JSON-schema for an array-of-strings argument.
 arrOfStr :: Text -> Value
@@ -564,6 +529,81 @@ runAuto ss a = withGoal ss a $ \sess file e iid -> do
     noSolution = "auto/Mimer found no solution for this goal — guide it with \
                  \`refine`, or `give` an explicit term."
 
+-- | Mimer over every open goal of a module in one call: no goal ids, one
+-- combined diff for the solved goals (or apply + reload with @write:true@),
+-- the survivors listed. The one-shot shape for "just close what's easy";
+-- the per-goal @auto@ remains for targeted work.
+runAutoAll :: ToolRunner
+runAutoAll ss a = do
+  r0 <- case argText a "file" of
+    Just f  -> pure (Right (absFile ss f))
+    Nothing -> do
+      -- Mirror 'resolveLoaded's "sole loaded module" convenience.
+      m <- readMVar (ssSessions ss)
+      pure $ case M.keys m of
+        [k] -> Right k
+        []  -> Left "auto_all: no module loaded; pass `file=<path>`."
+        _   -> Left "auto_all: multiple modules are loaded; pass `file=<path>`."
+  case r0 of
+    Left err   -> pure (Left err)
+    Right file -> do
+      r <- doLoad ss file
+      case r of
+        Left err -> pure (Left err)
+        Right (sess, _, es, _)
+          | null es   -> pure (Right ("Loaded " <> T.pack file
+                                        <> " — no open goals; nothing for Mimer to try."))
+          | otherwise -> do
+              ef <- readFileSafe file
+              case ef of
+                Left e     -> pure (Left e)
+                Right orig -> do
+                  let secs = max 1 (argInt a "timeout" 5)
+                  (edits, solved, unsolved) <-
+                    autoAllLoop sess file (codeBlocksFor file orig) secs es
+                  -- The in-session gives diverge from disk (which stays
+                  -- untouched unless write:true) — reload on next use.
+                  markSessionDirty ss file
+                  let survivors
+                        | null unsolved = ""
+                        | otherwise =
+                            "\nMimer found nothing for: "
+                              <> T.intercalate ", " (map (renderStableId . geStable) unsolved)
+                              <> " — try `refine`, `lemmas goal=…`, or `give` an explicit term."
+                  if null edits
+                    then pure (Right ("Mimer solved none of the " <> showT (length es)
+                                        <> " open goal(s) in " <> T.pack file
+                                        <> " (per-goal budget " <> showT secs <> "s)."
+                                        <> survivors))
+                    else case spliceRanges orig edits of
+                      Left ov   -> pure (Left ov)
+                      Right new -> do
+                        let headline =
+                              "Mimer solved " <> showT (length edits) <> " of "
+                                <> showT (length es) <> " open goal(s): "
+                                <> T.intercalate ", " solved <> "." <> survivors <> "\n\n"
+                        fmap (headline <>) <$> applyOrDiff ss (writeFlag a) file orig new
+
+-- | Probe each goal with Mimer against the one live load, accumulating
+-- hole-range edits in ORIGINAL-text offsets (the in-session gives never
+-- move the on-disk text). Continue-on-failure — unlike @construct@, an
+-- unsolved goal is a /result/ here, not an abort.
+autoAllLoop :: Session -> FilePath -> CodeBlocks -> Int -> [GoalEntry]
+            -> IO ([(Int, Int, Text)], [Text], [GoalEntry])
+autoAllLoop sess file cb secs = go [] [] []
+  where
+    go eds ok bad []         = pure (reverse eds, reverse ok, reverse bad)
+    go eds ok bad (e : rest) = case (geIid e, geRange e) of
+      (Just iid, Just (GoalRange s en))
+        | isInsideCode cb (rpPos s) -> do
+            out <- runRaw sess (iotcmAutoOne file AsIs iid ("-t " ++ show secs))
+            case out of
+              Right rs | (GiveStr t : _) <- [gr | ReplyGiveAction _ gr <- rs] ->
+                go ((rpPos s, rpPos en, t) : eds)
+                   (renderStableId (geStable e) : ok) bad rest
+              _ -> go eds ok (e : bad) rest
+      _ -> go eds ok (e : bad) rest
+
 -- ---------------------------------------------------------------------
 -- Scratch / staging buffer (stage / promote / discard)
 -- ---------------------------------------------------------------------
@@ -731,13 +771,6 @@ insertBeforeLastFenceClose ls block =
       [] -> Nothing
       is -> Just (last is)
 
--- | Write the candidate to a temp copy under a FRESH top-level module name
--- and load it through a throwaway agda session. The rename matters: the real
--- target is reachable on the include path, so a temp keeping the target's
--- module name collides (`AmbiguousTopLevelModuleName`). A def's
--- well-typedness doesn't depend on its enclosing module's name, so renaming
--- validates the same thing without the clash. 'Right ()' iff it type-checks
--- (remaining holes are fine — they are not errors).
 -- | Load arbitrary candidate text under a FRESH top-level module name in a
 -- throwaway session, returning the raw reply burst. The rename matters
 -- (see 'validateCandidate'); the @suffix@ keeps the temp's extension so a
@@ -1154,6 +1187,22 @@ renderGoals file es
   | otherwise =
       "Loaded " <> T.pack file <> " — " <> showT (length es) <> " open goal(s):\n"
         <> T.unlines [ "  " <> renderStableId (geStable e) <> "  : " <> geType e <> posNote e | e <- es ]
+        <> goalsFooter es
+
+-- | The next-step routing footer appended wherever open goals are listed
+-- (load / check / a @write:true@ reload). Names the first goal concretely
+-- so the suggested calls are copy-pasteable. This fires at exactly the
+-- moment an agent decides what to do about a goal — the point where a
+-- catalogue description read once loses to habit.
+goalsFooter :: [GoalEntry] -> Text
+goalsFooter []      = ""
+goalsFooter (e : _) =
+  let g = renderStableId (geStable e)
+  in "→ next: `auto goal=" <> g <> " write:true` (Mimer proof search) · \
+     \`auto_all` (Mimer on every goal) · `goal_type goal=" <> g <> "` \
+     \(type + context) · `case_split goal=" <> g <> " var=<x>` · \
+     \`give goal=" <> g <> " term=<t>` · `lemmas goal=" <> g
+     <> "` (find a reusable lemma)."
 
 posNote :: GoalEntry -> Text
 posNote e = case geRange e of
@@ -1209,10 +1258,35 @@ runCheck ss a = case argText a "file" of
       Nothing -> do
         r <- loadAndSync ss file
         case r of
-          Left err              -> pure (Left err)
-          Right (_, _, es, out) -> do
+          Left err                 -> pure (Left err)
+          Right (sess, _, es, out) -> do
             emitGoals ss file es
-            pure (Right (renderCheckLive file (interpretCheck out) es))
+            hints <- autoHints ss sess file es
+            pure (Right (renderCheckLive file (interpretCheck out) es hints))
+
+-- | Speculative Mimer probe over the first few open goals after a live
+-- @check@: report ready-made solutions inline so the agent sees the payoff
+-- of proof search without having to remember @auto@ exists. Bounded by
+-- Mimer's own @-t <secs>@ per-goal timeout ('cfgAutoHintsSecs') and capped
+-- at 'cfgAutoHintsLimit' goals; @--no-auto-hints@ disables. A successful
+-- probe solves the meta in Agda's /session/ state (the file is untouched),
+-- so any success marks the session dirty — the next interaction reloads
+-- from unchanged disk.
+autoHints :: ServerState -> Session -> FilePath -> [GoalEntry] -> IO [(GoalEntry, Text)]
+autoHints ss sess file es
+  | not (cfgAutoHints c) || null cands = pure []
+  | otherwise = do
+      hints <- fmap catMaybes . forM cands $ \(e, iid) -> do
+        out <- sendIotcm sess (iotcmAutoOne file AsIs iid ("-t " ++ show secs))
+        pure $ case out of
+          SendOk rs | (GiveStr t : _) <- [gr | ReplyGiveAction _ gr <- rs] -> Just (e, t)
+          _ -> Nothing
+      when (not (null hints)) (markSessionDirty ss file)
+      pure hints
+  where
+    c     = ssConfig ss
+    secs  = max 1 (cfgAutoHintsSecs c)
+    cands = take (max 0 (cfgAutoHintsLimit c)) [ (e, iid) | e <- es, Just iid <- [geIid e] ]
 
 checkVerdict :: FilePath -> CheckOutcome -> Text
 checkVerdict file co =
@@ -1232,13 +1306,28 @@ renderDiagnostics co = errBlock <> warnBlock
                 else "\n\nWarnings:\n" <> T.unlines [ "  • " <> w | w <- coWarnings co ]
 
 -- | @check@ of the on-disk file: goals carry stable ids (from the live
--- session's reconciled map) and source positions.
-renderCheckLive :: FilePath -> CheckOutcome -> [GoalEntry] -> Text
-renderCheckLive file co es =
+-- session's reconciled map) and source positions. @hints@ are the
+-- speculative Mimer solutions from 'autoHints' — surfaced inline so the
+-- agent sees the payoff of proof search without having had to ask for it.
+renderCheckLive :: FilePath -> CheckOutcome -> [GoalEntry] -> [(GoalEntry, Text)] -> Text
+renderCheckLive file co es hints =
   checkVerdict file co <> renderDiagnostics co
     <> if null es then ""
        else "\n\nOpen goals:\n"
               <> T.unlines [ "  " <> renderStableId (geStable e) <> "  : " <> geType e <> posNote e | e <- es ]
+              <> mimerBlock
+              <> goalsFooter es
+  where
+    mimerBlock = case hints of
+      []       -> ""
+      [(e, t)] ->
+        "Mimer already finds a term for " <> renderStableId (geStable e)
+          <> ": `" <> t <> "` — accept with `auto goal="
+          <> renderStableId (geStable e) <> " write:true`.\n"
+      _        ->
+        "Mimer already finds terms for " <> showT (length hints) <> " of these:\n"
+          <> T.unlines [ "  " <> renderStableId (geStable e) <> " ← " <> t | (e, t) <- hints ]
+          <> "Accept them in one call with `auto_all write:true`.\n"
 
 -- | @check content=…@: a dry-run has no stable-goal map (the text isn't
 -- loaded as the real module), so goals are shown by raw index + position
@@ -1593,6 +1682,28 @@ runLemmas ss a = withGoal ss a $ \_sess _file e _iid -> do
                        <> "\n\n(Reuse a candidate with `give`/`refine`. This matches conclusion \
                           \tokens — a name-overlap proxy; for WL shape matching pass an `anchor` \
                           \to the read-side `find_lemma`.)"))
+
+-- | Orientation bundle for a live goal: its live type + context (as
+-- `goal_type`) then the top reusable lemmas (as `lemmas`) — the write-side
+-- analogue of `brief`. Resolves the session/goal once; read-only. The lemma
+-- search uses the goal's cached type ('geType'), matching `lemmas`.
+runGoalBrief :: ToolRunner
+runGoalBrief ss a = withGoal ss a $ \sess file e iid -> do
+  eInfo <- runCmd sess (iotcmGoalTypeContext file Simplified iid)
+                       (fmap renderGoalTypeFull . firstGoalInfo)
+  case eInfo of
+    Left err   -> pure (Left err)
+    Right info -> do
+      ef <- ensureFresh ss
+      let lemmaBlock = case ef of
+            Left err'     -> "(lemma search unavailable: " <> T.pack err' <> ")"
+            Right (ld, _) ->
+              queryFindLemma ld (argInt a "limit" 5) (argDouble a "min_sim" 0.3)
+                (argText a "kind") (argText a "module_prefix") (Just (geType e)) Nothing
+      pure (Right (T.stripEnd info
+                    <> "\n\n── candidate lemmas ──\n" <> T.stripEnd lemmaBlock
+                    <> "\n\n(Fill with `auto goal=" <> renderStableId (geStable e)
+                    <> " write:true`, or `give`/`refine` a candidate above.)"))
 
 showT :: Show a => a -> Text
 showT = T.pack . show

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "agda-graph-explorer",
+  "description": "Local marketplace for the agda-explore Claude Code plugin.",
+  "owner": {
+    "name": "agda-graph-explorer contributors"
+  },
+  "plugins": [
+    {
+      "name": "agda-explore",
+      "source": "./plugin"
+    }
+  ]
+}

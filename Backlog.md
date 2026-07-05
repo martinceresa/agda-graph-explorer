@@ -68,6 +68,15 @@ feature requests see [Deferred.md](Deferred.md).
   `entries:` union, unique-candidate auto-resolution, `find_lemma`, query
   telemetry; `agda-unused` never-silently-zero + inliner-gap tagging +
   aggregation output.
+- **Write-bridge adoption push (2026-07-05)** — the follow-up round after
+  transcript analysis (VerinaAgda + Jolteon) showed the write bridge went
+  unused: `check` next-step footer + speculative Mimer hints, `auto_all`
+  (Mimer over every goal in one call), plugin loop-closing hooks
+  (validate-on-edit + route-first-grep), the `--control-port` endpoint the
+  edit hook calls, and a tool-usage histogram in `status` for passive
+  adoption measurement. Still open (the higher-cost items from the same
+  analysis): stdlib graph federation ([TODO.md](TODO.md)) and orientation
+  bundles (`brief` / `goal_brief`).
 
 ## Deferred — producer-gated
 

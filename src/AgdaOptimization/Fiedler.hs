@@ -389,8 +389,6 @@ readHelperOutput p = do
             pure Nothing
           Right ho -> pure (Just ho)
 
--- | Emit an empty-but-valid report so downstream JSON consumers don't
--- crash. The @reason@ is surfaced in the stats block.
 -- | Emit the empty/failed report (human or JSON), then exit with a code
 -- that lets a caller distinguish WHY there is no output — every reason
 -- here is a failure, so the process must not exit 0 (a downstream script

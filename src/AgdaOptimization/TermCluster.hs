@@ -261,7 +261,7 @@ run ix gOpts opts@Options{..} = case idxSubtermHashes ix of
       "agda-optimization term-cluster: note: graph.json has no \
       \'definitionSubtermDepths' field — meanDepth defaults to 1.0 \
       \and the --sort=score ranking collapses to size×(1+diversity). \
-      \Re-run agda-deps for full P3-R1 ranking."
+      \Re-run agda-deps with depths for full depth-aware ranking."
     case gOutFormat gOpts of
       OutJson  -> emitJsonReport (gOutPath gOpts)
                     (reportJson ix opts totalHashes distinctHashes

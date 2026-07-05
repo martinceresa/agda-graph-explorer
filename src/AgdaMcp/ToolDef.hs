@@ -9,7 +9,7 @@ module AgdaMcp.ToolDef
   , Tool(..)
     -- * Schema builders
   , objSchema
-  , sp, ip, bp, np
+  , sp, ip, bp, np, ep
     -- * Argument accessors
   , argLookup
   , argText
@@ -56,6 +56,10 @@ sp d = object ["type" .= ("string" :: Text),  "description" .= d]
 ip d = object ["type" .= ("integer" :: Text), "description" .= d]
 bp d = object ["type" .= ("boolean" :: Text), "description" .= d]
 np d = object ["type" .= ("number" :: Text),  "description" .= d]
+
+-- | A string property constrained to an @enum@ (e.g. @format@: text|json).
+ep :: Text -> [Text] -> Value
+ep d vals = object ["type" .= ("string" :: Text), "enum" .= vals, "description" .= d]
 
 -- ---------------------------------------------------------------------
 -- Argument accessors

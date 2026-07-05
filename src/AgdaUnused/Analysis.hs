@@ -379,10 +379,8 @@ findingsForFile ctx fp body = case M.lookup fp (ctxModuleByFile ctx) of
 -- application, anonymous @module _ where@). Its members are not part
 -- of the user-facing API.
 --
--- As of producer @nodeKeyVersion@ 3 these @_@ segments are lifted away
--- (re-homed into the nearest named module), so this predicate is dead
--- for v3 input — retained only for any pre-v3 on-disk cache read before
--- the daemon rebuilds.
+-- Only pre-v3 producer output carries @_@ segments; v3+ re-homes them into
+-- the nearest named module.
 isAnonymousModule :: Text -> Bool
 isAnonymousModule m = "._" `T.isInfixOf` m || "._" `T.isSuffixOf` m
 

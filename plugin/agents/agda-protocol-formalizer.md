@@ -89,13 +89,15 @@ naturally would, just land it through the bridge:
   `write:true`). Prefer this over `Write` for anything that must stay
   postulate-free.
 - **After editing as text** → `check file=<f>` (not `agda <f>`): a ✓/✗ verdict
-  with every error, warning, and remaining open goal, over the warm session.
+  with every error, warning, and remaining open goal, over the warm session —
+  plus any goals Mimer can already solve, reported inline.
 - **Drive the holes** → `goal_type` / `goal_context` to read; `case_split` /
   `refine` / `give` to fill (`write:true` applies + reloads in one step,
-  returning fresh goals); `auto` for Mimer; `give_many` for several independent
-  holes in one load; `construct` for a planned batch. When unsure what term a
-  goal wants, `lemmas goal=g0` searches the project for a definition whose
-  conclusion matches — reuse beats re-deriving.
+  returning fresh goals); `auto` for Mimer on one goal, `auto_all` for Mimer
+  on every open goal in one call (the cheap first move); `give_many` for
+  several independent holes in one load; `construct` for a planned batch.
+  When unsure what term a goal wants, `lemmas goal=g0` searches the project
+  for a definition whose conclusion matches — reuse beats re-deriving.
 - `stage` → `promote` still builds a def in an isolated scratch module when you
   want each `load` to re-check only its tiny closure; `discard` drops a dead
   end. For most definitions `give_file` / `new_module` are more direct.

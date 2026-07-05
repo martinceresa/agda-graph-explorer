@@ -1,0 +1,29 @@
+{
+  "description": "agda-explore loop-closing hooks: validate Agda text edits through the warm bridge; route structural greps to the dependency graph.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/post-agda-edit.sh",
+            "timeout": 120
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pre-grep-route.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
