@@ -44,8 +44,11 @@ One shared library and four executables:
   interaction bridge** (`load` / `goal_brief` / `check` / `goal_type` / `goal_context` /
   `infer` / `normalize` / `case_split` / `refine` / `give` / `give_many` /
   `auto` / `auto_all` / `construct` / `give_file` / `new_module` / `lemmas` /
-  `stage` / `promote` / `discard`; `goal_brief` is the hole-side orientation
-  bundle) over a long-lived `agda --interaction-json`
+  `repair` / `stage` / `promote` / `discard`; `goal_brief` is the hole-side
+  orientation bundle, and `repair` interprets the compiler's diagnostics to add
+  missing imports and fix misspelled references — graph-backed, spec-preserving,
+  refusing semantic errors, see `FixLoop.md`) over a long-lived
+  `agda --interaction-json`
   subprocess: every mutator is Agda-validated and returns a unified diff (no
   write unless passed `write:true`, which applies + reloads), under a hard
   zero-axiom contract. Beyond hole-filling it authors files (`check`,
@@ -60,9 +63,10 @@ One shared library and four executables:
   HTTP+SSE, off by default, localhost-only, never touching the JSON-RPC
   stdout; probes upward from the start port so several daemons coexist.
   Under `--control-port N` (needs `--enable-interact`) it serves a second
-  localhost side channel (`AgdaMcp.Control`, `GET /check?file=…`) so the
-  plugin's PostToolUse hook can run the warm check from outside the MCP
-  transport. Needs `agda` on `$PATH` (or `--agda-bin`).
+  localhost side channel (`AgdaMcp.Control`, `GET /check?file=…` and
+  `GET /repair?file=…`, diff-only) so the plugin's PostToolUse hook can run the
+  warm check and suggest a repair from outside the MCP transport. Needs `agda`
+  on `$PATH` (or `--agda-bin`).
 
 A Claude Code plugin under `plugin/` bundles the `agda-explore` server with a
 skill, two Agda agents, and two hooks (PostToolUse: validate Agda text edits
@@ -201,9 +205,10 @@ src/
                                 without a cycle).
     Control.hs                  opt-in localhost control endpoint
                                 (--control-port, needs --enable-interact):
-                                GET /check?file=… runs the same runner as the
-                                `check` tool (MainMcp passes it as a plain
-                                callback — imports no project module, no
+                                GET /check?file=… and GET /repair?file=…
+                                (diff-only) run the same runners as the `check`
+                                / `repair` tools (MainMcp passes them as plain
+                                callbacks — imports no project module, no
                                 cycle); 503 while busy; writes the bound port
                                 to <out-dir>/control-port (removed on
                                 shutdown). Serves the plugin's PostToolUse
@@ -242,6 +247,27 @@ src/
                                 content; new_module scaffolds + resolves imports
                                 off the index; construct runs a step batch;
                                 lemmas runs queryFindLemma off a live goal type.
+                                Also hosts the `repair` loop driver (runRepair /
+                                repairLoop / firstWorking / accepts) so it can
+                                reuse loadRenamedTemp/applyOrDiff/interpretCheck
+                                without exporting them (no cycle).
+
+  AgdaRepair/                   Graph-backed, spec-preserving repair loop for
+                                the `repair` tool (see FixLoop.md). Pure logic;
+                                the IO driver lives in AgdaInteract.Tools.
+    Diagnostic.hs               PURE classifier: agda's rendered errors →
+                                [Diagnostic] (DScope/DParse/DIncomplete/DRefuse).
+                                Parses NotInScope / NoParseFor* / error tags;
+                                lenient (unknown → DRefuse); tested in test/Spec.hs.
+    Strategy.hs                 PURE candidate generation off a base-name index
+                                (Env) built once from ldRealDefs: imports via
+                                defModule (constructor → datatype-parent module;
+                                defOrigin flags external overlay defs); typos via
+                                edit distance over in-scope + graph names. No
+                                graph → typo-only.
+    Edit.hs                     PURE comment/string/signature-safe edits
+                                (EAddImport / ERename); `signatures` gives the
+                                spec-preservation invariant the loop asserts.
 
 src-agda-graph/AgdaGraph/       Shared library.
   Interaction/Protocol.hs       FromJSON mirror of the --interaction-json reply
@@ -361,6 +387,18 @@ plugin/                         Claude Code plugin: agda-explore MCP server +
   `Cmd_autoOne Rewrite InteractionId Range String` — the leading `Rewrite` is
   mandatory (omit it and Agda "cannot read"); the trailing string carries
   Mimer options (`-t <secs>` bounds the search, verified on Agda 2.9).
+
+- **`repair`'s three invariants are enforced structurally — don't relax them**
+  (see `FixLoop.md`). (1) *Spec preservation*: `AgdaRepair.Edit.renameInBody`
+  never edits a signature/import/module line or a comment/string, and
+  `firstWorking` rejects any candidate whose `signatures` set changed — so a
+  repair can't rewrite a theorem. (2) *Zero axioms*: every candidate goes through
+  `checkFileInput` first. (3) *Monotone termination*: `accepts` takes a candidate
+  only if it resolves the targeted name without raising the error count — imports
+  only grow scope, so it can't oscillate. Semantic errors and open goals are
+  refused/routed, never faked. And `AgdaRepair.Diagnostic.parseErrorNames` must
+  read the expression on the line(s) *after* `Could not parse …` — dropping an
+  operator import yields a `NoParseFor*`, not a `NotInScope`.
 
 - **A successful Mimer probe solves the meta in Agda's *session* state, so
   anything that runs `Cmd_autoOne` without writing must mark the session

@@ -33,7 +33,24 @@ if [[ -r "$port_file" ]]; then
   if result=$(curl -sf --max-time 90 --get \
                 "http://127.0.0.1:$port/check" \
                 --data-urlencode "file=$file" 2>/dev/null); then
-    jq -n --arg ctx "$result" \
+    ctx="$result"
+    # On a failing check, ask `repair` for a diff-only suggestion and append it
+    # if it produced one. `repair` decides what is mechanical — it refuses
+    # semantic errors — so classification lives in the tool, not in this hook.
+    # The graph can usually fix imports/typos without spending a model turn.
+    # Never writes (diff-only).
+    if grep -q '✗' <<<"$result"; then
+      if rep=$(curl -sf --max-time 90 --get \
+                 "http://127.0.0.1:$port/repair" \
+                 --data-urlencode "file=$file" 2>/dev/null) \
+           && grep -q 'Applied fixes' <<<"$rep"; then
+        ctx="$result
+
+── suggested repair (diff-only; NOT applied — review and apply, or call \`repair file=$file write:true\`) ──
+$rep"
+      fi
+    fi
+    jq -n --arg ctx "$ctx" \
       '{hookSpecificOutput:{hookEventName:"PostToolUse", additionalContext:$ctx}}'
     exit 0
   fi

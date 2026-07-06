@@ -29,6 +29,8 @@ import           AgdaInteract.Guard
 import           AgdaInteract.Literate
 import           AgdaInteract.GoalId
 import           AgdaInteract.Edit
+import qualified AgdaRepair.Diagnostic as RD
+import qualified AgdaRepair.Edit       as RE
 
 ----------------------------------------------------------------------
 -- Tiny harness.
@@ -59,6 +61,8 @@ main = do
   sequence_ (map ($ fails) iotcmTests)
   sequence_ (map ($ fails) goalIdTests)
   sequence_ (map ($ fails) editTests)
+  sequence_ (map ($ fails) diagnosticTests)
+  sequence_ (map ($ fails) repairEditTests)
   replayTests fails
   n <- readIORef fails
   if n == 0
@@ -314,6 +318,100 @@ editTests =
   , checkEq "lineSpanAt finds the line containing a pos"
       (7, 15)
       (lineSpanAt "f = 1\ng = {!!}\nh = 2\n" 10)
+  ]
+
+----------------------------------------------------------------------
+-- AgdaRepair.Diagnostic: classifier goldens. Messages are real
+-- --interaction-json Error text (byte-identical to agda's CLI rendering),
+-- so these pin the parsing against an Agda upgrade.
+
+notInScopeMsg :: Text
+notInScopeMsg = T.intercalate "\n"
+  [ "/tmp/x/Live.agda:4.7-8: error: [NotInScope]"
+  , "Not in scope:"
+  , "  \8484"                                     -- ℤ
+  , "  at /tmp/x/Live.agda:4.7-8"
+  , "when scope checking \8484" ]
+
+parseAppMsg :: Text
+parseAppMsg = T.intercalate "\n"
+  [ "error: [NoParseForApplication]"
+  , "Could not parse the application"
+  , "(result \8621 deduplicate _\8799_ arr) \215 AllPairs _\8804_ result"  -- ↭ ≟ × ≤
+  , "Operators used in the grammar:"
+  , "  \215 (infixr operator, level 2)" ]
+
+unequalMsg :: Text
+unequalMsg = T.intercalate "\n"
+  [ "/tmp/x/Bad.agda:5.8-12: error: [UnequalTypes]"
+  , "The type Bool is not a subtype of Nat" ]
+
+missingSigMsg :: Text
+missingSigMsg = T.intercalate "\n"
+  [ "/tmp/x/T.agda:32.1-17: error: [MissingTypeSignature]"
+  , "Missing type signature for left hand side fin nums []"
+  , "when scope checking the declaration"
+  , "  fin nums [] = 0" ]
+
+diagnosticTests :: [Check]
+diagnosticTests =
+  [ checkEq "notInScopeNames extracts the reported operator/name"
+      ["\8484"] (RD.notInScopeNames notInScopeMsg)
+  , check "notInScopeNames drops the stopword in 'when scope checking the declaration'"
+      ("the" `notElem` RD.notInScopeNames missingSigMsg)
+  , check "parseErrorNames pulls the dropped operator out of a NoParseForApplication"
+      ("_\8804_" `elem` RD.parseErrorNames parseAppMsg
+         && "\215" `elem` RD.parseErrorNames parseAppMsg)
+  , check "parseErrorNames excludes the alphabetic non-operator tokens"
+      ("AllPairs" `notElem` RD.parseErrorNames parseAppMsg
+         && "result"  `notElem` RD.parseErrorNames parseAppMsg)
+  , checkEq "errorTags reads the bracketed class"
+      ["NotInScope"] (RD.errorTags notInScopeMsg)
+  , checkEq "classify routes a not-in-scope error to DScope"
+      [RD.DScope "\8484"] (RD.classify [notInScopeMsg])
+  , check "classify refuses a semantic (UnequalTypes) error"
+      (case RD.classify [unequalMsg] of
+         [RD.DRefuse tag _] -> tag == "UnequalTypes"
+         _                  -> False)
+  , checkEq "nameKeys maps a bare operator onto its mixfix form"
+      True ("_\215_" `elem` RD.nameKeys "\215")            -- × ↦ _×_
+  , check "isRefusableTag flags termination but not scope"
+      (RD.isRefusableTag "TerminationIssue" && not (RD.isRefusableTag "NotInScope"))
+  ]
+
+----------------------------------------------------------------------
+-- AgdaRepair.Edit: the spec-preserving, comment/string-safe edits.
+
+repairEditTests :: [Check]
+repairEditTests =
+  [ checkEq "renameInBody rewrites a body reference"
+      "g : Nat\ng = refl\n"
+      (RE.renameInBody "g : Nat\ng = ref\n" "ref" "refl")
+  , checkEq "renameInBody never touches a signature line"
+      "ref : Nat\nx = refl\n"
+      (RE.renameInBody "ref : Nat\nx = ref\n" "ref" "refl")
+  , checkEq "renameInBody leaves a line comment alone"
+      "x = refl  -- ref here\n"
+      (RE.renameInBody "x = ref  -- ref here\n" "ref" "refl")
+  , checkEq "renameInBody leaves a string literal alone"
+      "x = g \"ref\"\n"
+      (RE.renameInBody "x = g \"ref\"\n" "ref" "refl")
+  , checkEq "renameInBody matches whole tokens only"
+      "y = prefix\n"
+      (RE.renameInBody "y = prefix\n" "ref" "refl")
+  , check "insertImport places the line after the last import"
+      ("open import A\nopen import B" `T.isInfixOf`
+         RE.insertImport "module M where\nopen import A\nf = x\n" "open import B")
+  , checkEq "insertImport is a no-op when the import is already present"
+      "open import A\nf = x\n"
+      (RE.insertImport "open import A\nf = x\n" "open import A")
+  , checkEq "applyEdits returns Nothing for a net no-op"
+      Nothing
+      (RE.applyEdits "open import A\nf = x\n" [RE.EAddImport "open import A"])
+  , check "isSigLine recognises a top-level signature but not a clause/indent"
+      (RE.isSigLine "foo : Nat"
+         && not (RE.isSigLine "foo x = y")
+         && not (RE.isSigLine "  nested : T"))
   ]
 
 ----------------------------------------------------------------------

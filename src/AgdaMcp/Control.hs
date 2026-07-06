@@ -2,22 +2,24 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 -- | A localhost control endpoint for the @agda-explore@ daemon (opt-in via
--- @--control-port@). It exists for one purpose: letting an external process
--- — in practice a Claude Code /PostToolUse hook/ — run the same warm
--- @check@ the MCP @check@ tool runs, so a text edit to an Agda file can be
--- validated (and its diagnostics injected back into the agent's context)
--- without going through the MCP stdio transport, which the agent harness
--- owns.
+-- @--control-port@). It lets an external process — in practice a Claude Code
+-- /PostToolUse hook/ — run the same warm @check@ / @repair@ the MCP tools run,
+-- so a text edit to an Agda file can be validated (and a fix suggested) without
+-- going through the MCP stdio transport, which the agent harness owns.
 --
 -- Like "AgdaMcp.Inspect" it is a /side channel/: a hand-rolled minimal
--- HTTP\/1.1 server over the existing @network@ dependency, and it imports
--- no project module — @Main@ hands it the check action as a plain
--- callback, so there is no import cycle and no second dispatch mechanism.
+-- HTTP\/1.1 server over the existing @network@ dependency, and it imports no
+-- project module — @Main@ hands it the tool callbacks as a plain route table,
+-- so there is no import cycle and no second dispatch mechanism.
 --
 -- Routes:
 --
---   * @GET \/check?file=PATH@ — run the callback; @200@ with its 'Right'
---     text (the ✓\/✗ verdict + diagnostics + goals), @500@ with its 'Left'.
+--   * @GET \/check?file=PATH@ — run the check callback; @200@ with its
+--     'Right' text (the ✓\/✗ verdict + diagnostics + goals), @500@ with its
+--     'Left'.
+--   * @GET \/repair?file=PATH@ — run the repair callback (diff-only, never
+--     writes); @200@ with the report + proposed diff. Serves the PostToolUse
+--     hook's "suggest a fix" step.
 --   * @GET \/ping@ — @200 ok@ (hook liveness probe).
 --   * anything else — @404@.
 --
@@ -42,6 +44,7 @@ import           Control.Monad           (forever, void)
 import qualified Data.ByteString         as BS
 import qualified Data.ByteString.Char8   as BC
 import           Data.Char               (chr)
+import           Data.Maybe              (listToMaybe)
 import           Data.Text               (Text)
 import qualified Data.Text.Encoding      as TE
 import           Network.Socket
@@ -54,8 +57,12 @@ import           System.FilePath         (takeDirectory)
 -- loop. Returns the bound port, or 'Nothing' if none in the probe range
 -- was free. @runCheck@ is the check action: file path in, verdict text
 -- (or an operational error) out.
-startControl :: Int -> FilePath -> (Text -> IO (Either Text Text)) -> IO (Maybe Int)
-startControl startPort portFile runCheck = do
+-- | One @file=…@ route: the path prefix (query marker included, e.g.
+-- @\"/check?\"@) and the callback to run with the decoded @file@.
+type Route = (BS.ByteString, Text -> IO (Either Text Text))
+
+startControl :: Int -> FilePath -> [Route] -> IO (Maybe Int)
+startControl startPort portFile routes = do
   mbound <- bindFirstAvailable startPort
   case mbound of
     Nothing           -> pure Nothing
@@ -64,7 +71,7 @@ startControl startPort portFile runCheck = do
                    writeFile portFile (show port))
              :: IO (Either SomeException ())
       gate <- newMVar ()
-      _ <- forkIO (acceptLoop sock gate runCheck `catchAny` const (close sock))
+      _ <- forkIO (acceptLoop sock gate routes `catchAny` const (close sock))
       pure (Just port)
 
 -- | Try @startPort@, @startPort+1@, … up to a small range; the first that
@@ -84,37 +91,41 @@ bindFirstAvailable start = go [start .. start + 49]
           >> pure sock )
         `onException` close sock
 
-acceptLoop :: Socket -> MVar () -> (Text -> IO (Either Text Text)) -> IO ()
-acceptLoop sock gate runCheck = forever $ do
+acceptLoop :: Socket -> MVar () -> [Route] -> IO ()
+acceptLoop sock gate routes = forever $ do
   (conn, _) <- accept sock
   void $ forkIO $
-    (serve conn gate runCheck `catchAny` const (pure ()))
+    (serve conn gate routes `catchAny` const (pure ()))
       `finally` (close conn `catchAny` const (pure ()))
 
--- | One request: read the head (requests are tiny; one recv suffices),
--- route, respond, close.
-serve :: Socket -> MVar () -> (Text -> IO (Either Text Text)) -> IO ()
-serve conn gate runCheck = do
+-- | One request: read the head (requests are tiny; one recv suffices), match it
+-- against the route table, respond, close. All @file=…@ routes share the busy
+-- gate.
+serve :: Socket -> MVar () -> [Route] -> IO ()
+serve conn gate routes = do
   raw <- NSB.recv conn 8192
   case parseRequestLine raw of
     Just ("GET", path)
-      | path == "/ping" -> respond conn 200 "ok"
-      | Just q <- BS.stripPrefix "/check?" path ->
-          case lookup "file" (parseQuery q) of
-            Nothing -> respond conn 400 "missing `file` query parameter"
-            Just f  -> do
-              mheld <- tryTakeMVar gate
-              case mheld of
-                Nothing -> respond conn 503
-                  "busy: another check is in flight (retry, or fall back)"
-                Just () -> do
-                  r <- runCheck (TE.decodeUtf8With (\_ _ -> Just '\xFFFD') f)
-                         `finally` putMVar gate ()
-                  case r of
-                    Right txt -> respond conn 200 (TE.encodeUtf8 txt)
-                    Left err  -> respond conn 500 (TE.encodeUtf8 err)
-    Just _  -> respond conn 404 "not found (routes: /check?file=…, /ping)"
+      | path == "/ping"             -> respond conn 200 "ok"
+      | Just (q, cb) <- match path  -> gated q cb
+    Just _  -> respond conn 404 notFound
     Nothing -> respond conn 400 "bad request"
+  where
+    match path = listToMaybe [ (q, cb) | (p, cb) <- routes, Just q <- [BS.stripPrefix p path] ]
+    notFound   = "not found (routes: "
+                   <> BC.intercalate ", " [ p <> "file=PATH" | (p, _) <- routes ]
+                   <> ", /ping)"
+    gated q cb = case lookup "file" (parseQuery q) of
+      Nothing -> respond conn 400 "missing `file` query parameter"
+      Just f  -> do
+        mheld <- tryTakeMVar gate
+        case mheld of
+          Nothing -> respond conn 503 "busy: another request is in flight (retry, or fall back)"
+          Just () -> do
+            r <- cb (TE.decodeUtf8With (\_ _ -> Just '\xFFFD') f) `finally` putMVar gate ()
+            case r of
+              Right txt -> respond conn 200 (TE.encodeUtf8 txt)
+              Left err  -> respond conn 500 (TE.encodeUtf8 err)
 
 -- | The method + path of the request line (query string kept in the path).
 parseRequestLine :: BS.ByteString -> Maybe (BS.ByteString, BS.ByteString)

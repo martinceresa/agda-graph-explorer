@@ -37,7 +37,8 @@ import           Data.Aeson.Types        (parseMaybe)
 import           Data.IORef              (newIORef, readIORef, writeIORef)
 import           Data.List               (isPrefixOf, nub, sortOn, stripPrefix)
 import qualified Data.Map.Strict         as M
-import           Data.Maybe              (catMaybes, fromMaybe, listToMaybe, mapMaybe)
+import           Data.Maybe              (catMaybes, fromMaybe, isJust, isNothing,
+                                          listToMaybe, mapMaybe)
 import           Data.Ord                (Down (..))
 import           Data.Text               (Text)
 import qualified Data.Text               as T
@@ -65,6 +66,9 @@ import           AgdaMcp.Inspect         (GoalLite (..), InspectEvent (..),
 import           AgdaMcp.Query           (queryFindLemma)
 import           AgdaMcp.State
 import           AgdaMcp.ToolDef
+import qualified AgdaRepair.Diagnostic   as RD
+import qualified AgdaRepair.Edit         as RE
+import qualified AgdaRepair.Strategy     as RS
 
 -- ---------------------------------------------------------------------
 -- Catalogue
@@ -267,6 +271,23 @@ interactTools =
                  , ("min_sim", np "Minimum similarity 0..1 (default 0.3).")
                  ] ["goal"])
       runLemmas
+
+  , Tool "repair"
+      "Repair an almost-correct Agda file by interpreting the compiler's \
+      \diagnostics: add missing imports (resolved off the dependency graph — \
+      \operators and constructors included) and fix misspelled references, \
+      \driving the file to a typechecking state. Every candidate is \
+      \Agda-validated by recompiling; signatures/theorem statements are never \
+      \edited and semantic errors (type mismatch, termination) are refused, not \
+      \faked (zero-axiom contract). Returns a report + unified diff; `write:true` \
+      \applies + reloads. Import repair needs a graph covering the file's \
+      \dependencies (e.g. `--overlay-graph` for stdlib)."
+      (objSchema [ ("file", sp "Path to the .agda / .lagda.md module to repair.")
+                 , ("content", sp "Optional: repair this proposed text instead of the on-disk file (dry-run; never written).")
+                 , ("write", writeArg)
+                 , ("max_iter", ip "Max repair iterations (default 8).")
+                 ] ["file"])
+      runRepair
   ]
 
 -- | The shared @write@ boolean argument schema for the mutating tools.
@@ -1346,6 +1367,199 @@ goalPosNote :: Goal -> Text
 goalPosNote g = case goalRange g of
   Just (GoalRange s _) -> "   (" <> showT (rpLine s) <> ":" <> showT (rpCol s) <> ")"
   Nothing              -> ""
+
+-- ---------------------------------------------------------------------
+-- repair  (graph-backed, spec-preserving repair loop)
+-- ---------------------------------------------------------------------
+
+-- | What the loop did, rendered into the tool result.
+data RepairReport = RepairReport
+  { rrApplied   :: ![Text]  -- ^ applied fixes, in order
+  , rrRefused   :: ![Text]  -- ^ diagnostics declined (semantic / unknown)
+  , rrRemaining :: ![Text]  -- ^ errors still present at the end
+  , rrGoals     :: ![Text]  -- ^ open goal types remaining
+  , rrIters     :: !Int
+  , rrCompiles  :: !Int
+  , rrDone      :: !Bool    -- ^ typechecks (no errors) at the end
+  }
+
+-- | Interpret a candidate text by recompiling it under a throwaway module.
+validateText :: ServerState -> FilePath -> Text -> IO (Either Text CheckOutcome)
+validateText ss file text = fmap (fmap interpretCheck) (loadRenamedTemp ss file text)
+
+runRepair :: ToolRunner
+runRepair ss a = case argText a "file" of
+  Nothing -> pure (Left "repair requires a `file` argument.")
+  Just f  -> do
+    let file     = absFile ss f
+        mContent = argText a "content"
+        -- `content` is a dry-run of proposed text: never write, always diff.
+        write    = argBool a "write" False && isNothing mContent
+        maxIter  = max 1 (argInt a "max_iter" 8)
+    eOrig <- case mContent of
+               Just c  -> pure (Right c)
+               Nothing -> readFileSafe file
+    case eOrig of
+      Left err   -> pure (Left err)
+      Right orig -> do
+        -- The graph is the scope oracle (read-only, like any read tool); the
+        -- file itself is validated through the live session. A missing graph
+        -- degrades to typo-only repair, not a failure.
+        eLd <- ensureFresh ss
+        let env = RS.buildEnv (either (const Nothing) (Just . fst) eLd)
+        (final, rep0) <- repairLoop ss file env maxIter orig
+        -- Remaining-error text comes from the throwaway validation module;
+        -- map its path/name back to the real file so the report reads cleanly.
+        let suffix   = dropWhile (/= '.') (takeFileName file)
+            tmpPath  = scratchSubdir ss </> ".validate" </> ("AgdaExploreValidate" ++ suffix)
+            -- full temp path first (it still contains the module name), then
+            -- any bare module-name token left in the prose.
+            sanitize = T.replace "AgdaExploreValidate" (T.pack (dropExtensions (takeFileName file)))
+                     . T.replace (T.pack tmpPath) (T.pack file)
+            rep      = rep0 { rrRemaining = map sanitize (rrRemaining rep0) }
+            banner = renderRepairReport rep
+        if final == orig
+          then pure (Right (banner <> "\n\n(no change applied — file left as-is)"))
+          else do
+            r <- applyOrDiff ss write file orig final
+            pure $ case r of
+              Left e  -> Left e
+              Right d -> Right (banner <> "\n\n" <> d)
+
+-- | The monotone repair driver. Each round: validate the current text,
+-- classify the diagnostics, try candidate edits (import / rename) against the
+-- first actionable diagnostic, accept the first that resolves it without
+-- raising the error count or touching a signature, and recurse. Terminates at
+-- a clean typecheck, when nothing is actionable (refuse), or at @max_iter@.
+repairLoop :: ServerState -> FilePath -> RS.Env -> Int -> Text
+           -> IO (Text, RepairReport)
+repairLoop ss file env maxIter orig = do
+  -- One compile of the original; thereafter each iteration reuses the outcome
+  -- 'firstWorking' already computed for the candidate it accepted (no re-check).
+  e0 <- validateText ss file orig
+  case e0 of
+    Left setupErr -> pure (orig, mkReport False 0 1 [] ["could not validate: " <> setupErr] Nothing)
+    Right co0     -> go 0 1 [] orig co0
+  where
+    go :: Int -> Int -> [Text] -> Text -> CheckOutcome -> IO (Text, RepairReport)
+    go iter compiles applied text co
+      | null (coErrors co) = pure (text, mkReport True iter compiles applied [] (Just co))
+      | iter >= maxIter    = pure (text, mkReport False iter compiles applied ["reached max_iter"] (Just co))
+      | otherwise =
+          let diags      = RD.classify (coErrors co)
+              actionable = filter isActionable diags
+          in if null actionable
+               then pure (text, mkReport False iter compiles applied (refusalMsgs diags) (Just co))
+               else do
+                 (mstep, dc) <- firstWorking ss file env co text actionable
+                 case mstep of
+                   Just (text', desc, co') ->
+                     go (iter + 1) (compiles + dc) (applied ++ [desc]) text' co'
+                   Nothing ->
+                     pure (text, mkReport False iter (compiles + dc) applied
+                             ["no candidate resolved: " <> T.intercalate ", " (map diagName actionable)]
+                             (Just co))
+
+    mkReport done iter compiles applied refused mco = RepairReport
+      { rrApplied   = applied
+      , rrRefused   = refused
+      , rrRemaining = maybe [] coErrors mco
+      , rrGoals     = maybe [] (map goalType . coGoals) mco
+      , rrIters     = iter
+      , rrCompiles  = compiles
+      , rrDone      = done
+      }
+
+-- | The not-in-scope name a scope/parse diagnostic targets ('Nothing' for the
+-- classes the loop only reports — incomplete/refuse). One source for both
+-- "is this actionable" and "name it in the report".
+scopeName :: RD.Diagnostic -> Maybe Text
+scopeName (RD.DScope n) = Just n
+scopeName (RD.DParse n) = Just n
+scopeName _             = Nothing
+
+isActionable :: RD.Diagnostic -> Bool
+isActionable = isJust . scopeName
+
+diagName :: RD.Diagnostic -> Text
+diagName = fromMaybe "?" . scopeName
+
+-- | Human-readable notes for the diagnostics we decline to touch.
+refusalMsgs :: [RD.Diagnostic] -> [Text]
+refusalMsgs diags =
+  [ "refused [" <> tag <> "] — semantic/unknown class, left untouched" | RD.DRefuse tag _ <- diags ]
+  ++ [ "incomplete pattern match — run `case_split` on the scrutinee" | RD.DIncomplete <- diags ]
+
+-- | Try each candidate for each actionable diagnostic; return the first that
+-- is accepted (its text, a description, and the 'CheckOutcome' the acceptance
+-- test already computed — so the caller need not re-validate it), plus the
+-- number of validation compiles spent (charged to the loop's budget regardless
+-- of success).
+firstWorking :: ServerState -> FilePath -> RS.Env -> CheckOutcome -> Text
+             -> [RD.Diagnostic] -> IO (Maybe (Text, Text, CheckOutcome), Int)
+firstWorking ss file env co text diags = go 0 flat
+  where
+    sigs0 = RE.signatures text
+    flat  = [ (d, cand) | d <- diags, cand <- RS.candidatesFor env text d ]
+    go dc [] = pure (Nothing, dc)
+    go dc ((d, cand) : rest) =
+      case RE.applyEdits text cand of
+        Nothing    -> go dc rest                            -- no-op edit
+        Just text'
+          | RE.signatures text' /= sigs0 -> go dc rest      -- would change a signature: refuse
+          | otherwise -> case checkFileInput text' of
+              Rejected _ -> go dc rest                      -- zero-axiom guard
+              Allowed    -> do
+                r <- validateText ss file text'
+                let dc' = dc + 1
+                case r of
+                  Left _                       -> go dc' rest
+                  Right co' | accepts co co' d -> pure (Just (text', describeEdits cand, co'), dc')
+                            | otherwise        -> go dc' rest
+
+-- | Accept a candidate iff it compiles clean, or it resolves the targeted
+-- name without raising the error count. Because imports only grow scope and a
+-- rename replaces an unresolved token with a resolved one, this is monotone —
+-- the loop cannot oscillate.
+accepts :: CheckOutcome -> CheckOutcome -> RD.Diagnostic -> Bool
+accepts co co' d
+  | null (coErrors co') = True
+  | otherwise           = targetResolved && length (coErrors co') <= length (coErrors co)
+  where
+    joined = T.intercalate "\n" (coErrors co')
+    stillMissing = RD.notInScopeNames joined ++ RD.parseErrorNames joined
+    targetResolved =
+      maybe True (\n -> not (any (`elem` stillMissing) (RD.nameKeys n))) (scopeName d)
+
+describeEdits :: [RE.Edit] -> Text
+describeEdits = T.intercalate " + " . map one
+  where
+    one (RE.EAddImport l) = "added `" <> l <> "`"
+    one (RE.ERename o n)  = "renamed `" <> o <> "` → `" <> n <> "`"
+
+renderRepairReport :: RepairReport -> Text
+renderRepairReport rr =
+  headline
+    <> section "Applied fixes"   (rrApplied rr)
+    <> section "Refused / notes" (rrRefused rr)
+    <> section "Errors remaining" (rrRemaining rr)
+    <> section "Open goals"      (rrGoals rr)
+    <> goalFooter
+    <> "\n(" <> showT (rrIters rr) <> " iteration(s), " <> showT (rrCompiles rr) <> " validation compile(s))"
+  where
+    headline
+      | rrDone rr = "✓ repaired — file now type-checks."
+      | null (rrApplied rr) = "✗ no repair applied."
+      | otherwise = "◑ partially repaired — " <> showT (length (rrApplied rr))
+                      <> " fix(es) applied, errors remain."
+    section _ []  = ""
+    section h xs  = "\n\n" <> h <> ":\n" <> T.unlines [ "  • " <> x | x <- xs ]
+    -- repair fills scope/parse errors; goal-filling is delegated (a repair
+    -- must not fabricate a proof) — route to the goal-driven tools.
+    goalFooter
+      | null (rrGoals rr) = ""
+      | otherwise = "→ open goal(s) remain: fill with `auto_all` (Mimer) / \
+                    \`lemmas goal=…` (reuse a lemma) / `case_split goal=…`."
 
 -- ---------------------------------------------------------------------
 -- give_file  (validated whole-file / append authoring)

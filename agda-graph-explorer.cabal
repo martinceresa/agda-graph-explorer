@@ -125,6 +125,9 @@ executable agda-explore
                        AgdaInteract.Literate
                        AgdaInteract.Edit
                        AgdaInteract.Tools
+                       AgdaRepair.Diagnostic
+                       AgdaRepair.Strategy
+                       AgdaRepair.Edit
   autogen-modules:     Paths_agda_graph_explorer
   build-depends:       base >= 4.10 && < 4.23,
                        agda-graph,
@@ -157,6 +160,8 @@ test-suite interaction-spec
                        AgdaInteract.Literate
                        AgdaInteract.GoalId
                        AgdaInteract.Edit
+                       AgdaRepair.Diagnostic
+                       AgdaRepair.Edit
   build-depends:       base >= 4.10 && < 4.23,
                        agda-graph,
                        aeson >= 2.0 && < 3,

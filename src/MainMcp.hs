@@ -529,10 +529,12 @@ startControlEndpoint ss cfg
       let outAbs   = let od = cfgOutDir cfg
                      in if isAbsolute od then od else cfgProjectRoot cfg </> od
           portFile = outAbs </> "control-port"
-          checkCb f = case [ t | t <- interactTools, tName t == "check" ] of
+          toolCb nm f = case [ t | t <- interactTools, tName t == nm ] of
             (t : _) -> tRun t ss (object ["file" .= f])
-            []      -> pure (Left "check tool unavailable")
-      mport <- startControl (cfgControlPort cfg) portFile checkCb
+            []      -> pure (Left (nm <> " tool unavailable"))
+          -- /repair passes no `write`, so it proposes a fix, never applies it.
+          routes = [ ("/check?", toolCb "check"), ("/repair?", toolCb "repair") ]
+      mport <- startControl (cfgControlPort cfg) portFile routes
       case mport of
         Just p  -> do
           hPutStrLn stderr ("agda-explore: control endpoint at http://127.0.0.1:"
