@@ -92,7 +92,7 @@ export AGDA_EXPLORE_GRAPH=/abs/path/to/deps.json
 | `type_of`        | What's the type of `X`? (elaborated; `source=true` for as-written) |
 | `similar_types`  | What else has a type like `X`'s? |
 | `similar_bodies` | What else is implemented like `X`? |
-| `find_lemma`     | Goal-directed lemma search: `anchor=<def>` (WL fingerprint) or `goal="<type>"` (free-text token overlap; needs signatures). Filter with `kind` / `module_prefix`. |
+| `find_lemma`     | Goal-directed lemma search: `anchor=<def>` (WL fingerprint) or `goal="<type>"` (name/shape match — combinator shape + def name + conclusion; needs signatures). Filter with `kind` / `module_prefix`. |
 | `search`         | Find by name substring, or list by `kind` / `state` / `module_prefix` (`top_level_only`). |
 | `unused`         | Unused imports / dead code (`scope` / `exclude`; FP caveats). |
 | `rebuild`        | Force-regenerate the graph now. |
@@ -120,8 +120,8 @@ Start with **`--enable-interact`** (or `enable-interact: true` in `.agda-explore
 | `give`         | Fill a goal with a complete term, Agda-validated → diff (or the localized type error). |
 | `give_many`    | Fill several goals in one load → one combined, atomic diff. |
 | `construct`    | Run a planned batch of `give`/`refine`/`case_split`/`auto` steps against one warm load → one combined diff. |
-| `auto`         | Mimer proof search → a fill diff, or a "no solution" note. |
-| `auto_all`     | Mimer over EVERY open goal in one call (per-goal `timeout`) → one combined diff for the solved ones + the survivors. No goal ids to manage. |
+| `auto`         | Mimer proof search → a fill diff, or a "no solution" note. On failure it retries seeded with the top `find_lemma` lemmas for the goal, so one-lemma goals close (`timeout` / `hints` tune). |
+| `auto_all`     | Mimer over EVERY open goal in one call (per-goal `timeout`), same lemma-hint retry as `auto` → one combined diff for the solved ones + the survivors. No goal ids to manage. |
 | `stage`        | Open an ephemeral scratch module (seeded with a target's imports) to build a new def in isolation. |
 | `promote`      | Splice a `stage` def into a real target: merge imports, re-validate the whole target → diff (or error, nothing changed). |
 | `discard`      | Drop a `stage` scratch buffer. |

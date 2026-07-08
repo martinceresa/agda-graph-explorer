@@ -33,10 +33,18 @@ module AgdaGraph.GoalCanon
   , conclusionOf
   , identTokens
   , tokenJaccard
+    -- * Match-oriented tokens (find_lemma retrieval)
+  , matchTokens
+  , nameTokens
+  , shapeTokens
+  , weightedCoverage
+  , isOpToken
+  , stripQualifiers
   ) where
 
 import           Control.DeepSeq  ( NFData(..) )
 import           Data.Char        ( isSpace, isAsciiLower, isUpper, isAlphaNum, isDigit )
+import           Data.List        ( nub, sort )
 import           Data.Set         ( Set )
 import qualified Data.Set         as Set
 import           Data.Text        ( Text )
@@ -156,6 +164,14 @@ identStart ch = isAlphaNum ch || ch == '_'
 identChar :: Char -> Bool
 identChar ch = isAlphaNum ch || ch == '\'' || ch == '_'
 
+-- | A symbol character: not whitespace, not a bracket, not the
+-- qualified-name dot, and not an identifier character.
+isOpChar :: Char -> Bool
+isOpChar ch =
+  not (isSpace ch)
+    && not (identStart ch)
+    && ch `notElem` ("()[]{}." :: String)
+
 ----------------------------------------------------------------------
 -- Conclusion / token extraction (find_lemma).
 
@@ -232,12 +248,6 @@ identTokens = Set.fromList . map T.pack . scan . T.unpack
       isUpper c
         || not (isAsciiLower c || isDigit c || c == '_')   -- non-ASCII letter
         || any isUpper tok                                   -- mixed-case name
-    -- A symbol character: anything that is not whitespace, a bracket, a
-    -- dot (qualified-name separator), or an identifier character.
-    isOpChar c =
-      not (isSpace c)
-        && not (identStart c)
-        && c `notElem` ("()[]{}." :: String)
 
 -- | Jaccard similarity of two token sets: @|A ∩ B| / |A ∪ B|@. Two empty
 -- sets are defined to be @0@ (no shared evidence ⇒ no match), so an
@@ -250,3 +260,233 @@ tokenJaccard a b
       let inter = Set.size (Set.intersection a b)
           uni   = Set.size (Set.union a b)
       in if uni == 0 then 0 else fromIntegral inter / fromIntegral uni
+
+----------------------------------------------------------------------
+-- Match-oriented tokens (find_lemma goal→lemma retrieval).
+--
+-- 'identTokens' above is tuned for goal /bucketing/; the helpers here
+-- are tuned for /retrieval/, where the query is a bare goal type and the
+-- candidates are fully-qualified stored signatures. Three differences
+-- decide whether the right lemma is rankable at all:
+--
+--   1. A qualified name is reduced to its final component before
+--      tokenising, so @Data.Nat._+_@ contributes @+@ and @Data.List.map@
+--      contributes @map@ — dropping the @Data@\/@Nat@\/@List@ noise that
+--      otherwise clusters lemmas by module instead of by content (the
+--      dominant confound: goal types are unqualified, stored sigs are
+--      fully qualified).
+--   2. A lowercase-ASCII run is kept only when a caller-supplied @keep@
+--      predicate accepts it — used to retain head symbols that /are/
+--      definitions (@map@\/@length@\/@reverse@) while still dropping
+--      bound variables (@xs@\/@n@\/@f@).
+--   3. The definition's own name ('nameTokens') and the goal's algebraic
+--      /shape/ ('shapeTokens') feed the same token bag, because stdlib
+--      states its most-reached-for lemmas via abstract combinators
+--      (@+-comm : Commutative _≡_ _+_@) whose conclusion shares nothing
+--      with the goal beyond the operator.
+
+-- | True when a token reads as an operator (its first character is a
+-- symbol, not a letter/digit/underscore) — @≡@, @+@, @++@ — as opposed
+-- to an identifier like @List@ or @Commutative@.
+isOpToken :: Text -> Bool
+isOpToken t = case T.uncons t of
+  Just (c, _) -> not (isAlphaNum c || c == '_')
+  Nothing     -> False
+
+-- | Final dotted component of a (possibly qualified) name
+-- (@Data.Nat._+_@ → @_+_@, @map@ → @map@).
+baseComponent :: Text -> Text
+baseComponent = snd . T.breakOnEnd "."
+
+-- | Match-oriented tokens of a type string (see the section note). The
+-- @keep@ predicate decides which bare-lowercase identifier runs survive
+-- (bound variables are dropped, known definition names are kept).
+matchTokens :: (Text -> Bool) -> Text -> Set Text
+matchTokens keep = Set.fromList . map T.pack . scan . T.unpack
+  where
+    scan [] = []
+    scan s@(c : _)
+      | identStart c =
+          let (tok, rest) = span identChar s
+          in case rest of
+               -- ".<ident>": @tok@ is a module qualifier — drop it and
+               -- continue from the next component.
+               ('.' : d : _) | identStart d ->
+                 scan (drop 1 rest)
+               -- ".<op>": a qualified operator (@…PropositionalEquality.≡@)
+               -- — drop the qualifier and emit the operator.
+               ('.' : d : _) | isOpChar d ->
+                 let (op, rest') = span isOpChar (drop 1 rest)
+                 in T.unpack (normOp op) : scan rest'
+               _ -> (if keepTok tok then (tok :) else id) (scan rest)
+      | isOpChar c =
+          let (tok, rest) = span isOpChar s
+          in T.unpack (normOp tok) : scan rest
+      | otherwise = scan (drop 1 s)
+    -- Keep uppercase / non-ASCII / mixed-case runs always; a bare
+    -- lowercase-ASCII run only when @keep@ accepts it.
+    keepTok []          = False
+    keepTok tok@(c : _)
+      | isUpper c                                        = True
+      | not (isAsciiLower c || isDigit c || c == '_')    = True
+      | any isUpper tok                                  = True
+      | otherwise                                        = keep (T.pack tok)
+
+-- | Strip mixfix placeholder underscores from an operator spelling
+-- (@_+_@ → @+@); leaves a genuine symbol run (@++@) untouched. Falls
+-- back to the original if stripping would empty it.
+normOp :: String -> Text
+normOp op = let s = filter (/= '_') op in T.pack (if null s then op else s)
+
+-- | Tokens contributed by a definition's own (possibly qualified) name.
+-- stdlib lemma names systematically encode operator + property
+-- (@+-comm@, @length-++@, @reverse-involutive@) — often a stronger match
+-- signal than the abstract combinator type. Split the base name on the
+-- @-@ component separator and tokenise each piece permissively (a
+-- curated name carries no bound variables to drop).
+nameTokens :: Text -> Set Text
+nameTokens qn =
+  Set.unions (map (matchTokens (const True)) (T.splitOn "-" (baseComponent qn)))
+
+-- | Strip module qualifiers from a rendered type string for display:
+-- reduce each dotted qualified name to its final component
+-- (@Data.Nat._+_@ → @_+_@, @Relation.Binary.PropositionalEquality._≡_@ →
+-- @_≡_@, @(Data.Integer.+ 0)@ → @(+ 0)@), leaving operators, brackets and
+-- spacing intact. Display-only (lossy) — do not use where the qualified
+-- name is semantically needed.
+stripQualifiers :: Text -> Text
+stripQualifiers = T.pack . go . T.unpack
+  where
+    go [] = []
+    go s@(c : _)
+      | identStart c =
+          let (run, rest) = span (\x -> identChar x || x == '.') s
+          in lastComponent run ++ go rest
+      | otherwise = c : go (drop 1 s)
+    -- the suffix after the final '.', or the whole run when unqualified.
+    lastComponent = reverse . takeWhile (/= '.') . reverse
+
+-- | Operator-weighted coverage of a goal token set by a candidate bag:
+-- the fraction of the goal's tokens the candidate contains, counting
+-- operators (@≡@\/@+@) double since a symbol is far more discriminating
+-- than an identifier. Asymmetric on purpose — @find_lemma@ is a
+-- recall-first suggestion engine, so we score "how much of the goal does
+-- this lemma cover", not symmetric similarity, and never penalise a
+-- lemma for having a large signature.
+weightedCoverage :: Set Text -> Set Text -> Double
+weightedCoverage goal bag
+  | den == 0  = 0
+  | otherwise = num / den
+  where
+    w t = if isOpToken t then 2 else 1 :: Double
+    den = sum [ w t | t <- Set.toList goal ]
+    num = sum [ w t | t <- Set.toList goal, t `Set.member` bag ]
+
+----------------------------------------------------------------------
+-- Structural shape recognition (find_lemma, operator-only goals).
+--
+-- Bag-of-tokens cannot separate @+-comm@ from @+-assoc@ from
+-- @+-identityʳ@: all three goals reduce to the tokens @{+, ≡}@. But the
+-- goal's /shape/ names the property — @a ⊕ b ≡ b ⊕ a@ is commutativity,
+-- @x ⊕ e ≡ x@ (with @e@ a literal) an identity — and the stored sigs
+-- carry exactly that combinator (@Commutative@, @RightIdentity@, …). So
+-- we recognise a handful of canonical equation shapes and inject the
+-- matching @Algebra.Definitions@\/@Relation.Binary@ combinator token
+-- into the goal bag. Heuristic and deliberately inexact — a suggestion,
+-- not a proof.
+
+-- | A bracket-aware, qualifier-stripped token of a goal conclusion, used
+-- only by 'shapeTokens'.
+data ShapeTok = TId !Text | TOp !Text | TLParen | TRParen
+  deriving (Eq, Show)
+
+-- | Flatten a conclusion into 'ShapeTok's: identifiers reduced to their
+-- final component, operators underscore-normalised, the empty-list /
+-- unit literal @[]@ captured as an identifier, brackets preserved for
+-- depth tracking.
+flattenShape :: Text -> [ShapeTok]
+flattenShape = go . T.unpack
+  where
+    go [] = []
+    go (c : cs)
+      | isSpace c = go cs
+      -- empty-list / unit literal  []  (or  [ ] )
+      | c == '[', (']' : rest') <- dropWhile isSpace cs = TId "[]" : go rest'
+      | c `elem` ("([{" :: String) = TLParen : go cs
+      | c `elem` (")]}" :: String) = TRParen : go cs
+      | identStart c =
+          let (tok, rest) = span identChar (c : cs) in resolveQual tok rest
+      | isOpChar c =
+          let (op, rest) = span isOpChar (c : cs) in TOp (normOp op) : go rest
+      | otherwise = go cs
+    -- Peel qualifier components off an identifier: ".<ident>" drops the
+    -- current component; ".<op>" makes it a qualified operator.
+    resolveQual tok rest = case rest of
+      ('.' : d : _) | identStart d ->
+        let (tok', rest') = span identChar (drop 1 rest) in resolveQual tok' rest'
+      ('.' : d : _) | isOpChar d ->
+        let (op, rest') = span isOpChar (drop 1 rest) in TOp (normOp op) : go rest'
+      _ -> TId (T.pack tok) : go rest
+
+-- | Indices of top-level (depth-0) relation operators in a shape-token
+-- sequence.
+relIndices :: [ShapeTok] -> [Int]
+relIndices = go (0 :: Int) (0 :: Int)
+  where
+    relSet = Set.fromList ["≡", "≈", "=", "∼", "~"]
+    go _ _ [] = []
+    go d i (t : ts) = case t of
+      TLParen                                 -> go (d + 1) (i + 1) ts
+      TRParen                                 -> go (d - 1) (i + 1) ts
+      TOp v | d == 0 && v `Set.member` relSet -> i : go d (i + 1) ts
+      _                                       -> go d (i + 1) ts
+
+-- | Recognise a goal conclusion's algebraic shape and return the
+-- combinator token(s) it implies (empty when no shape is recognised).
+shapeTokens :: Text -> Set Text
+shapeTokens concl =
+  case relIndices sq of
+    [i] ->
+      let lhs  = take i sq
+          rhs  = drop (i + 1) sq
+          lids = [ v | TId v <- lhs ]
+          rids = [ v | TId v <- rhs ]
+          lops = [ v | TOp v <- lhs ]
+          rops = [ v | TOp v <- rhs ]
+          -- one side a single term, the other that term combined with a
+          -- literal identity element (@x ⊕ 0 ≡ x@, @xs ++ [] ≡ xs@).
+          isIdent a b = length [ () | TId _ <- a ] == 1
+                          && any (`Set.member` litSet) [ v | TId v <- b ]
+          injIdent = isIdent lhs rhs || isIdent rhs lhs
+          -- @a ⊕ b ≡ b ⊕ a@: one operator each side, same operands, swapped.
+          injComm  = not (null lops) && lops == rops
+                       && sort lids == sort rids && lids /= rids
+                       && length (nub lops) == 1
+          -- @(a ⊕ b) ⊕ c ≡ a ⊕ (b ⊕ c)@: same operator/operands, re-parenthesised.
+          injAssoc = length (nub lops) == 1 && lops == rops
+                       && lids == rids && length lops >= 2
+          -- @f (f x) ≡ x@: rhs a single term, some head repeated on the lhs.
+          injInvol = length rids == 1
+                       && any (\h -> length (filter (== h) lids) >= 2) (nub lids)
+          -- two distinct operators on one side: a distributivity law.
+          injDist  = length (nub lops) >= 2 || length (nub rops) >= 2
+      in Set.unions
+           [ ifSet injIdent ["Identity", "RightIdentity", "LeftIdentity"]
+           , ifSet injComm  ["Commutative"]
+           , ifSet injAssoc ["Associative"]
+           , ifSet injInvol ["Involutive"]
+           , ifSet injDist  ["DistributesOver", "Distributive"] ]
+    [] ->
+      -- no relation operator: a bare relation applied, @R x x@ / @R x y z@.
+      let ids = [ v | TId v <- sq ]
+          ops = [ v | TOp v <- sq ]
+      in if length ids == 2 && listSame ids && length ops == 1 then Set.singleton "Reflexive"
+         else if length ids == 3 && length ops == 2           then Set.singleton "Transitive"
+         else Set.empty
+    _ -> Set.empty
+  where
+    sq       = flattenShape concl
+    litSet   = Set.fromList ["0", "1", "zero", "[]", "true", "false", "ε", "∅"]
+    ifSet b xs = if b then Set.fromList xs else Set.empty
+    listSame (x : y : _) = x == y
+    listSame _           = False

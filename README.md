@@ -137,10 +137,11 @@ Agda-validated and by default returns a unified diff **without writing**;
 pass `write:true` to apply, reload, and return the diff plus refreshed
 goals in one round-trip. A hard zero-axiom contract refuses any
 `postulate`, termination/coverage/unsafe-`OPTIONS` pragma, or escape
-hatch up front. `.lagda.md` literate sources are handled. `check` also
-probes any remaining goals with Mimer and reports ready-made solutions
-inline (`--no-auto-hints` to disable); `auto_all` runs Mimer over every
-open goal in one call. Full detail: [`plugin/`](plugin/README.md).
+hatch up front. `.lagda.md` literate sources are handled. On a no-solution
+`auto` / `auto_all` seed Mimer with the top `find_lemma` lemmas for the goal,
+closing one-lemma goals plain Mimer misses; `check` also probes remaining
+goals with Mimer inline (`--no-auto-hints` to disable). Full detail:
+[`plugin/`](plugin/README.md).
 
 ```sh
 agda-explore --project /path/to/agda/project --enable-interact

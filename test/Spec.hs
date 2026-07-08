@@ -23,8 +23,11 @@ import qualified Data.Text            as T
 import           System.Exit          ( exitFailure, exitSuccess )
 import           System.IO            ( hPutStrLn, stderr )
 
+import qualified Data.Set             as Set
 import           AgdaGraph.Interaction.Protocol
 import qualified AgdaGraph.Interaction.Iotcm as Iotcm
+import           AgdaGraph.GoalCanon   ( matchTokens, nameTokens, shapeTokens
+                                       , weightedCoverage, stripQualifiers )
 import           AgdaInteract.Guard
 import           AgdaInteract.Literate
 import           AgdaInteract.GoalId
@@ -63,6 +66,7 @@ main = do
   sequence_ (map ($ fails) editTests)
   sequence_ (map ($ fails) diagnosticTests)
   sequence_ (map ($ fails) repairEditTests)
+  sequence_ (map ($ fails) goalCanonTests)
   replayTests fails
   n <- readIORef fails
   if n == 0
@@ -120,6 +124,65 @@ fileGuardTests =
       (not (isRejected (checkFileInput "module M where\n-- postulate is discussed here\nfoo = 0\n")))
   , check "file guard rejects primTrustMe in a body"
       (isRejected (checkFileInput "module M where\nf = primTrustMe\n"))
+  ]
+
+----------------------------------------------------------------------
+-- GoalCanon: find_lemma match-oriented tokens + algebraic shape.
+
+goalCanonTests :: [Check]
+goalCanonTests =
+  -- matchTokens: qualifier-strip to last component; keep a lowercase head
+  -- symbol only when the vocab predicate accepts it; drop bound vars.
+  [ checkEq "matchTokens keeps in-vocab head symbols, drops bound vars + qualifiers"
+      (Set.fromList ["length", "map", "≡"])
+      (matchTokens (`elem` (["map", "length"] :: [Text]))
+        "Data.List.length (Data.List.map f xs) \
+        \Relation.Binary.PropositionalEquality.≡ Data.List.length xs")
+  , checkEq "matchTokens reduces combinator sig to {combinator, ≡, +}"
+      (Set.fromList ["RightIdentity", "≡", "+"])
+      (matchTokens (const False)
+        "Algebra.Definitions.RightIdentity \
+        \Relation.Binary.PropositionalEquality._≡_ 0 Data.Nat._+_")
+
+  -- nameTokens: split the base name on the stdlib '-' separator.
+  , checkEq "nameTokens +-comm"    (Set.fromList ["+", "comm"])
+      (nameTokens "Data.Nat.Properties.+-comm")
+  , checkEq "nameTokens length-map" (Set.fromList ["length", "map"])
+      (nameTokens "Data.List.Properties.length-map")
+
+  -- shapeTokens: recognise the algebraic property named by the goal shape.
+  , checkEq "shape: a+b ≡ b+a is Commutative" (Set.fromList ["Commutative"])
+      (shapeTokens "m + n ≡ n + m")
+  , checkEq "shape: (a+b)+c ≡ a+(b+c) is Associative" (Set.fromList ["Associative"])
+      (shapeTokens "(m + n) + p ≡ m + (n + p)")
+  , checkEq "shape: x+0 ≡ x is an Identity" (Set.fromList ["Identity", "RightIdentity", "LeftIdentity"])
+      (shapeTokens "n + 0 ≡ n")
+  , checkEq "shape: xs++[] ≡ xs is an Identity (empty-list literal)"
+      (Set.fromList ["Identity", "RightIdentity", "LeftIdentity"])
+      (shapeTokens "xs ++ [] ≡ xs")
+  , checkEq "shape: f (f x) ≡ x is Involutive" (Set.fromList ["Involutive"])
+      (shapeTokens "reverse (reverse xs) ≡ xs")
+  , checkEq "shape: R x x is Reflexive" (Set.fromList ["Reflexive"])
+      (shapeTokens "n ≤ n")
+  , checkEq "shape: no shape for a concrete congruence (length-++)" Set.empty
+      (shapeTokens "length (xs ++ ys) ≡ length xs + length ys")
+  , checkEq "shape: no shape for a concrete congruence (map-++)" Set.empty
+      (shapeTokens "map f (xs ++ ys) ≡ map f xs ++ map f ys")
+
+  -- stripQualifiers: display-only module-qualifier stripping.
+  , checkEq "stripQualifiers: combinator + qualified operators"
+      "RightIdentity _≡_ (+ 0) _+_"
+      (stripQualifiers "Algebra.Definitions.RightIdentity \
+                        \Relation.Binary.PropositionalEquality._≡_ \
+                        \(Data.Integer.+ 0) Data.Integer._+_")
+  , checkEq "stripQualifiers: unqualified passes through" "n + zero ≡ n"
+      (stripQualifiers "n + zero ≡ n")
+
+  -- weightedCoverage: fraction of goal tokens covered, operators doubled.
+  , checkEq "coverage: full cover = 1.0" (1.0 :: Double)
+      (weightedCoverage (Set.fromList ["+", "≡"]) (Set.fromList ["+", "≡", "RightIdentity"]))
+  , checkEq "coverage: one of two operators = 0.5" (0.5 :: Double)
+      (weightedCoverage (Set.fromList ["+", "≡"]) (Set.fromList ["+"]))
   ]
 
 ----------------------------------------------------------------------

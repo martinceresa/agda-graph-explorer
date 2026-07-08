@@ -47,7 +47,7 @@ module) and `AGDA_EXPLORE_INCLUDE` (include dir), or pass `--graph`.
 | What's the type of `X`?                              | `type_of`      |
 | What else has a type like `X`'s?                     | `similar_types` |
 | What else is *implemented* like `X`?                 | `similar_bodies` |
-| Is there a lemma whose conclusion matches my goal?   | `find_lemma`   |
+| Is there a library lemma that matches my goal?       | `find_lemma`   |
 | What's the exact name? List all postulates/holes?    | `search`       |
 | Which imports are unused / what's dead?              | `unused`       |
 | Graph size / freshness / config                     | `status`       |
@@ -82,12 +82,15 @@ module) and `AGDA_EXPLORE_INCLUDE` (include dir), or pass `--graph`.
   elaborated-subterm hashes (true structural). For whole-project clustering
   use `agda-optimization`'s `silhouette` / `term-cluster`.
 
-`find_lemma` — does a lemma's **conclusion** already match my goal? Pass
-exactly one mode:
+`find_lemma` — does a library lemma already match my goal? Pass exactly one
+mode:
 - `anchor=<def>` — WL structural match (needs a graph node with edges).
-- `goal="<type>"` — free-text: ranks signatures by token overlap (Jaccard)
-  over their conclusions; needs a signatures-enabled graph (daemon default).
-  Filter with `kind` / `module_prefix`; tune `min_sim` (default 0.3).
+- `goal="<type>"` — free-text: ranks by operator-weighted coverage of the
+  goal's tokens against each lemma's **name + conclusion + algebraic shape**
+  (`a⊕b ≡ b⊕a` matches `Commutative`, `x⊕e ≡ x` an identity, …), so a
+  combinator-stated lemma like `+-comm` is found. Needs a signatures-enabled
+  graph (daemon default). Filter with `kind` / `module_prefix`; tune
+  `min_sim` (default 0.3).
 
 ## Interpreting `unused` (caveats)
 
@@ -122,7 +125,7 @@ hatches), and returns a diff plus remaining goals.
 | Type-check a file → errors + warnings + open goals     | `check`        |
 | Read a goal's type + in-scope context                  | `goal_type` / `goal_context` |
 | Infer / normalise an expression in a goal's context    | `infer` / `normalize` |
-| Find an existing lemma whose conclusion matches a goal | `lemmas`       |
+| Find an existing lemma matching a goal                 | `lemmas`       |
 | Scaffold a NEW validated module (header, imports, holes) | `new_module` |
 | Author a whole file / a new definition (validated)     | `give_file`    |
 | Case-split a goal on a variable                        | `case_split`   |
@@ -161,9 +164,10 @@ hatches), and returns a diff plus remaining goals.
 - `auto` runs Mimer on one goal; `auto_all` tries EVERY open goal in one
   call (per-goal `timeout`, default 5s) and returns one combined diff for
   the solved ones plus the survivors — the cheapest first move whenever a
-  `check`/`load` leaves goals open. If Mimer finds nothing, guide it with
-  `refine`/`give`.
-- Stuck? `lemmas goal=g0` finds a def whose conclusion matches the goal, then
+  `check`/`load` leaves goals open. On a no-solution both retry seeded with
+  the top `find_lemma` lemmas for the goal (so one-lemma goals close); if it
+  still fails, guide it with `case_split`/`refine`/`give`.
+- Stuck? `lemmas goal=g0` finds a lemma matching the goal, then
   `give`/`refine` with it.
 - `.lagda.md` works; edits stay inside the code fence.
 - `stage` → `promote` builds a def in an isolated scratch module (faster

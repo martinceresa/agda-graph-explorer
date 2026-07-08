@@ -63,7 +63,7 @@ import           AgdaInteract.Registry
 import           AgdaInteract.Session
 import           AgdaMcp.Inspect         (GoalLite (..), InspectEvent (..),
                                           emitInspect)
-import           AgdaMcp.Query           (queryFindLemma)
+import           AgdaMcp.Query           (queryFindLemma, goalHintNames)
 import           AgdaMcp.State
 import           AgdaMcp.ToolDef
 import qualified AgdaRepair.Diagnostic   as RD
@@ -171,20 +171,27 @@ interactTools =
 
   , Tool "auto"
       "Mimer proof search for one goal; returns a diff filling the hole, or a \
-      \'no solution' note (guide it with `refine`/`give`). For every goal at \
-      \once use `auto_all`."
+      \'no solution' note (guide it with `refine`/`give`). Plain Mimer often \
+      \misses a one-lemma goal, so on failure this seeds Mimer with the top \
+      \graph-ranked lemmas for the goal type (the `find_lemma` machinery) and \
+      \retries — closing goals like `n + 0 ≡ n` via `+-identityʳ`. For every \
+      \goal at once use `auto_all`."
       (objSchema [ goalProp
                  , fileProp
+                 , ("timeout", ip "Mimer budget in seconds (default 5).")
+                 , ("hints", ip "Max lemma hints to try on failure (default 6; 0 = plain Mimer).")
                  , ("write", writeArg)
                  ] ["goal"])
       runAuto
 
   , Tool "auto_all"
       "Run Mimer over EVERY open goal in one call (no goal ids to manage) → one \
-      \combined diff for the solved goals plus the survivors. Cheap to try \
-      \whenever a `check` leaves goals open."
+      \combined diff for the solved goals plus the survivors. Each goal gets the \
+      \same lemma-hint-guided retry as `auto`. Cheap to try whenever a `check` \
+      \leaves goals open."
       (objSchema [ fileProp
                  , ("timeout", ip "Mimer budget per goal in seconds (default 5).")
+                 , ("hints", ip "Max lemma hints to try per goal (default 6; 0 = plain Mimer).")
                  , ("write", writeArg)
                  ] [])
       runAutoAll
@@ -532,23 +539,73 @@ giveLoop sess file gm cb (GiveSpec g t : rest) acc =
 
 batchMsg :: Int -> String -> Text
 batchMsg n diff =
-  "Filled " <> showT n <> " goal(s) against a single session load. Apply this \
-  \combined diff, then `load` to refresh — the bridge does not write the file:\n\n"
-    <> T.pack diff
+  "Filled " <> showT n <> " goal(s) in one session load (diff only — "
+    <> "`write:true` to apply + reload):\n\n" <> T.pack diff
 
 runAuto :: ToolRunner
 runAuto ss a = withGoal ss a $ \sess file e iid -> do
-  out <- runRaw sess (iotcmAutoOne file AsIs iid "")
-  case out of
-    Left err -> pure (Left err)
-    Right rs -> case [gr | ReplyGiveAction _ gr <- rs] of
-      (GiveStr s : _) -> applyHoleEdit ss (writeFlag a) file e s
-      -- No give-action: surface Agda's error if it sent one, else Mimer
-      -- simply found no solution.
-      _ -> pure (Left (fromMaybe noSolution (firstError rs)))
+  let secs = max 1 (argInt a "timeout" 5)
+      k    = max 0 (argInt a "hints" 6)
+  hints <- if k == 0 then pure [] else collectHints ss k (geType e)
+  res <- autoSolve sess file iid secs hints
+  case res of
+    AutoGive mh s -> fmap (headline mh <>) <$> applyHoleEdit ss (writeFlag a) file e s
+    -- No solution: surface Agda's error if the plain probe sent one, else
+    -- the no-solution note (listing the hints we tried).
+    AutoNone mErr -> pure (Left (fromMaybe (noSolution hints) mErr))
   where
-    noSolution = "auto/Mimer found no solution for this goal — guide it with \
-                 \`refine`, or `give` an explicit term."
+    headline Nothing  = "Mimer filled the goal:\n\n"
+    headline (Just h) = "Mimer filled the goal via lemma `" <> h <> "`:\n\n"
+    noSolution hs =
+      "auto/Mimer found no solution for this goal"
+        <> (if null hs then ""
+            else " (tried lemma hints: "
+                   <> T.intercalate ", " [ "`" <> h <> "`" | h <- hs ] <> ")")
+        <> " — guide it with `case_split goal=…`, `refine`, `lemmas goal=…`, \
+           \or `give` an explicit term."
+
+-- | Outcome of a (possibly hint-guided) Mimer search at one goal.
+data AutoResult
+  = AutoGive (Maybe Text) Text  -- ^ term found; @Just h@ = via lemma hint @h@, @Nothing@ = unhinted
+  | AutoNone (Maybe Text)       -- ^ nothing found; @Just@ = an Agda error from the plain probe
+
+-- | Mimer at one goal: plain first (closes trivial holes fast), then each
+-- lemma hint on its own. An unknown/out-of-scope hint aborts the entire
+-- Mimer call on Agda 2.9 (verified), so hints must NOT be batched — but
+-- scope resolution happens before search, so a bad hint fails ~instantly.
+-- Stops at the first 'GiveAction'; hint probes use a smaller budget (a real
+-- hint solves near-instantly).
+autoSolve :: Session -> FilePath -> Int -> Int -> [Text] -> IO AutoResult
+autoSolve sess file iid secs hints = do
+    (m0, mErr) <- probe ("-t " ++ show secs)
+    case m0 of
+      Just t  -> pure (AutoGive Nothing t)
+      Nothing -> tryHints hints mErr
+  where
+    hintSecs = max 1 (min 3 secs)
+    tryHints []       mErr = pure (AutoNone mErr)
+    tryHints (h : hs) mErr = do
+      (m, _) <- probe ("-t " ++ show hintSecs ++ " " ++ T.unpack h)
+      case m of
+        Just t  -> pure (AutoGive (Just h) t)
+        Nothing -> tryHints hs mErr
+    probe opts = do
+      out <- runRaw sess (iotcmAutoOne file AsIs iid opts)
+      pure $ case out of
+        Left e   -> (Nothing, Just e)
+        Right rs -> case [gr | ReplyGiveAction _ gr <- rs] of
+          (GiveStr t : _) -> (Just t, Nothing)
+          _               -> (Nothing, firstError rs)
+
+-- | Up to @n@ Mimer hint names for a goal type, off the current graph
+-- snapshot (empty if the graph is unavailable — hint search then degrades
+-- to plain Mimer). Reads 'ssLoaded' via 'ensureFresh', like `lemmas`.
+collectHints :: ServerState -> Int -> Text -> IO [Text]
+collectHints ss n goalTy = do
+  ef <- ensureFresh ss
+  pure $ case ef of
+    Right (ld, _) -> goalHintNames ld n goalTy
+    Left _        -> []
 
 -- | Mimer over every open goal of a module in one call: no goal ids, one
 -- combined diff for the solved goals (or apply + reload with @write:true@),
@@ -580,8 +637,15 @@ runAutoAll ss a = do
                 Left e     -> pure (Left e)
                 Right orig -> do
                   let secs = max 1 (argInt a "timeout" 5)
+                      k    = max 0 (argInt a "hints" 6)
+                  -- One graph snapshot; per-goal Mimer hints off each type.
+                  mLd <- either (const Nothing) (Just . fst) <$> ensureFresh ss
+                  let hintsFor e
+                        | k == 0    = []
+                        | otherwise = maybe [] (\ld -> goalHintNames ld k (geType e)) mLd
+                      esWithHints = [ (e, hintsFor e) | e <- es ]
                   (edits, solved, unsolved) <-
-                    autoAllLoop sess file (codeBlocksFor file orig) secs es
+                    autoAllLoop sess file (codeBlocksFor file orig) secs esWithHints
                   -- The in-session gives diverge from disk (which stays
                   -- untouched unless write:true) — reload on next use.
                   markSessionDirty ss file
@@ -609,20 +673,20 @@ runAutoAll ss a = do
 -- hole-range edits in ORIGINAL-text offsets (the in-session gives never
 -- move the on-disk text). Continue-on-failure — unlike @construct@, an
 -- unsolved goal is a /result/ here, not an abort.
-autoAllLoop :: Session -> FilePath -> CodeBlocks -> Int -> [GoalEntry]
+autoAllLoop :: Session -> FilePath -> CodeBlocks -> Int -> [(GoalEntry, [Text])]
             -> IO ([(Int, Int, Text)], [Text], [GoalEntry])
 autoAllLoop sess file cb secs = go [] [] []
   where
-    go eds ok bad []         = pure (reverse eds, reverse ok, reverse bad)
-    go eds ok bad (e : rest) = case (geIid e, geRange e) of
+    go eds ok bad []               = pure (reverse eds, reverse ok, reverse bad)
+    go eds ok bad ((e, hints) : rest) = case (geIid e, geRange e) of
       (Just iid, Just (GoalRange s en))
         | isInsideCode cb (rpPos s) -> do
-            out <- runRaw sess (iotcmAutoOne file AsIs iid ("-t " ++ show secs))
-            case out of
-              Right rs | (GiveStr t : _) <- [gr | ReplyGiveAction _ gr <- rs] ->
+            res <- autoSolve sess file iid secs hints
+            case res of
+              AutoGive _ t ->
                 go ((rpPos s, rpPos en, t) : eds)
                    (renderStableId (geStable e) : ok) bad rest
-              _ -> go eds ok (e : bad) rest
+              AutoNone _ -> go eds ok (e : bad) rest
       _ -> go eds ok (e : bad) rest
 
 -- ---------------------------------------------------------------------
@@ -929,8 +993,7 @@ withSourceGuarded file pos act = do
 diffMsg :: String -> Text
 diffMsg diff
   | null diff = "No change (agda's result matched the source already)."
-  | otherwise = "Apply this diff and then call `load` to refresh the goals — the bridge \
-                \does not write the file:\n\n" <> T.pack diff
+  | otherwise = "(diff only — `write:true` to apply + reload):\n\n" <> T.pack diff
 
 markSessionDirty :: ServerState -> FilePath -> IO ()
 markSessionDirty ss file =
@@ -1893,9 +1956,9 @@ runLemmas ss a = withGoal ss a $ \_sess _file e _iid -> do
           out    = queryFindLemma ld (argInt a "limit" 10) (argDouble a "min_sim" 0.3)
                      (argText a "kind") (argText a "module_prefix") (Just goalTy) Nothing
       in pure (Right ("Goal " <> renderStableId (geStable e) <> "  : " <> goalTy <> "\n\n" <> out
-                       <> "\n\n(Reuse a candidate with `give`/`refine`. This matches conclusion \
-                          \tokens — a name-overlap proxy; for WL shape matching pass an `anchor` \
-                          \to the read-side `find_lemma`.)"))
+                       <> "\n\n(Reuse a candidate with `give`/`refine`. Recall-first name/shape \
+                          \overlap — a suggestion, not a proof it applies; for WL type-shape \
+                          \matching pass an `anchor` to the read-side `find_lemma`.)"))
 
 -- | Orientation bundle for a live goal: its live type + context (as
 -- `goal_type`) then the top reusable lemmas (as `lemmas`) — the write-side

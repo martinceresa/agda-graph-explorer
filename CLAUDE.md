@@ -279,7 +279,10 @@ src-agda-graph/AgdaGraph/       Shared library.
                                 fwd/rev IntMap IntSet, topoSort, descendants,
                                 ancestors, longestPathDP, idxEdgeProvenance.
   GoalCanon.hs                  goal-type canonicaliser + vendored-Murmur64
-                                hashString + find_lemma token helpers.
+                                hashString + find_lemma retrieval tokens
+                                (matchTokens qualifier-strip/vocab-keep,
+                                nameTokens, algebraic shapeTokens,
+                                weightedCoverage).
   WL.hs                         Weisfeiler–Leman refinement / hashing /
                                 fingerprints / weighted Jaccard.
   Similarity.hs                 shared structural-similarity cores so
@@ -386,7 +389,13 @@ plugin/                         Claude Code plugin: agda-explore MCP server +
   refreshed goals in one round-trip. `auto` runs Mimer via
   `Cmd_autoOne Rewrite InteractionId Range String` — the leading `Rewrite` is
   mandatory (omit it and Agda "cannot read"); the trailing string carries
-  Mimer options (`-t <secs>` bounds the search, verified on Agda 2.9).
+  Mimer options (`-t <secs>` bounds the search, verified on Agda 2.9) **and
+  lemma hints** as space-separated identifiers. Plain Mimer won't try an
+  in-scope lemma at any budget, so `auto`/`auto_all` seed the top
+  `find_lemma` candidates (`Query.goalHintNames`) as hints. An
+  unknown/out-of-scope or *qualified* hint aborts the whole call (Agda 2.9),
+  so hints must be in-scope short names tried ONE AT A TIME — scope
+  resolution is instant, so a bad hint fails before searching. Don't batch.
 
 - **`repair`'s three invariants are enforced structurally — don't relax them**
   (see `FixLoop.md`). (1) *Spec preservation*: `AgdaRepair.Edit.renameInBody`

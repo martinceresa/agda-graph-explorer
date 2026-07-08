@@ -24,6 +24,7 @@ module AgdaMcp.Query
   , querySimilarTypes
   , querySimilarBodies
   , queryFindLemma
+  , goalHintNames
   , querySearch
   , queryStats
   , readSignature
@@ -38,7 +39,6 @@ import           Data.Aeson         (Value, object, (.=))
 import           Data.Aeson.Text    (encodeToLazyText)
 import           Data.Char          (isDigit, isSpace)
 import           Data.Maybe         (isJust)
-import           Data.Set           (Set)
 import qualified Data.Set           as Set
 import qualified Data.IntMap.Strict as IM
 import qualified Data.IntSet        as IS
@@ -59,8 +59,9 @@ import           AgdaGraph.Schema   (Access (..), Definition (..),
                                      Provenance (..), State (..))
 import           AgdaGraph.Similarity (SigBodyFingerprints (..), fingerprintSize)
 import           AgdaGraph.WL       (weightedJaccard)
-import           AgdaGraph.GoalCanon (canonicalizeGoal, conclusionOf, identTokens,
-                                     tokenJaccard, unCanonical)
+import           AgdaGraph.GoalCanon (conclusionOf, matchTokens, nameTokens,
+                                     shapeTokens, tokenJaccard, weightedCoverage,
+                                     stripQualifiers)
 
 import           AgdaMcp.State      (Loaded (..))
 
@@ -135,9 +136,17 @@ renderAccess :: Access -> Text
 renderAccess Public  = "public"
 renderAccess Private = "private"
 
--- | @Module:line@ (line omitted when unknown).
+-- | @L<line>@ locator (empty when unknown). The module is deliberately
+-- omitted — it is already the prefix of the qualified name printed on the
+-- same row, so repeating it wastes tokens on every list line.
 loc :: Definition -> Text
-loc d = defModule d <> maybe "" ((":" <>) . tshow) (defLine d)
+loc d = maybe "" (("L" <>) . tshow) (defLine d)
+
+-- | @/State@ suffix, empty for the common 'Defined' case — the signal is
+-- the exception (Postulate / Hole / Failed), not the norm.
+stateSuffix :: State -> Text
+stateSuffix Defined = ""
+stateSuffix s       = "/" <> renderState s
 
 -- | @[external: <label>]@ tag for a def federated in from an overlay graph
 -- (its 'defOrigin'); empty for a project def. Signals it needs an @open
@@ -147,8 +156,8 @@ originSuffix d = maybe "" (\o -> "  [external: " <> o <> "]") (defOrigin d)
 
 oneLine :: Definition -> Text
 oneLine d =
-  "- `" <> defName d <> "`  [" <> renderKind (defKind d) <> "/"
-        <> renderState (defState d) <> "]  " <> loc d <> originSuffix d
+  "- `" <> defName d <> "` [" <> renderKind (defKind d)
+        <> stateSuffix (defState d) <> "] " <> loc d <> originSuffix d
 
 -- | Bullet list of definitions, each annotated with its enclosing owner
 -- when it's a @where@-/anonymous helper, truncated to @lim@ with a
@@ -353,7 +362,7 @@ ownerOf ld d
 -- definition is visible without opening the file.
 ownerNote :: Loaded -> Definition -> Text
 ownerNote ld d = case ownerOf ld d of
-  Just o  -> "  (in `" <> defName o <> "`)"
+  Just o  -> " (in `" <> defName o <> "`)"
   Nothing -> ""
 
 -- ** Filter-value parsers (Text -> enum), for the tool layer
@@ -451,7 +460,6 @@ queryLocate ld name = case resolveDefNote ld name of
         transDown = IS.size (descendants ix (IS.singleton i))
     in T.unlines $
          [ "`" <> defName d <> "`"
-         , "  module:   " <> defModule d
          , "  location: " <> maybe (defModule d <> " (line unknown)")
                                    (\f -> T.pack f <> maybe "" ((":" <>) . tshow) (defLine d))
                                    file
@@ -599,7 +607,7 @@ provBulletList ld lim xs =
   let shown = take lim xs
       extra = length xs - length shown
       line (d, mp) = oneLine d <> ownerNote ld d
-                       <> maybe "" (\p -> "  {" <> renderProv p <> "}") mp
+                       <> maybe "" (\p -> " {" <> renderProv p <> "}") mp
   in T.intercalate "\n" (map line shown)
        <> (if extra > 0 then "\n  …and " <> tshow extra <> " more" else "")
 
@@ -983,16 +991,19 @@ pctOf s = T.pack (show (fromIntegral (round (s * 1000) :: Int) / 10 :: Double)) 
 --     with edges, which a free-text string is not, so only this path is
 --     WL-based.
 --
---   * __Free-text mode__ (token overlap) canonicalises the goal with
---     'canonicalizeGoal', takes its 'conclusionOf', extracts its name
---     'identTokens', and ranks every real def carrying a 'defSig' by
---     'tokenJaccard' of those tokens against the candidate's own
---     canonicalised-conclusion tokens (keeping hits @>= minSim@). This
---     is a name-set overlap proxy — strictly weaker than WL, but the
---     honest mechanism available for an out-of-graph string. If /every/
---     def's 'defSig' is 'Nothing' (graph built without
---     @--with-signatures@) it returns an explicit rebuild note, not a
---     silent empty list.
+--   * __Free-text mode__ (goal→lemma retrieval) tokenises the goal's
+--     'conclusionOf' with 'matchTokens' (qualifier-stripped, keeping
+--     lowercase head symbols that are known definition names), augments
+--     it with the goal's algebraic 'shapeTokens' (so @a+b ≡ b+a@ carries
+--     @Commutative@), and ranks every real def carrying a 'defSig' by
+--     operator-'weightedCoverage' of the goal tokens against the
+--     candidate's conclusion tokens ∪ its 'nameTokens' (the def's own
+--     name — often the stronger signal for stdlib's combinator-stated
+--     lemmas). Ties break on 'tokenJaccard' then tighter signature. This
+--     is a recall-first name/shape overlap proxy — NOT a proof a lemma
+--     applies (use @anchor@ for WL type-shape). If /every/ def's 'defSig'
+--     is 'Nothing' (graph built without @--with-signatures@) it returns
+--     an explicit rebuild note, not a silent empty list.
 --
 -- All ranking sorts are total orders (similarity then name) so output is
 -- reproducible.
@@ -1021,11 +1032,12 @@ queryFindLemma ld lim minSim mKindTxt mModPrefix mGoal mAnchor =
     filterNote = T.concat
       [ maybe "" (\k -> " kind=" <> k) mKindTxt
       , maybe "" (\p -> " module_prefix=" <> p) mModPrefix ]
-    -- conclusion text annotation for a candidate (blank when no sig).
+    -- conclusion text annotation for a candidate (blank when no sig);
+    -- module-qualifier-stripped for display (the shape is what matters).
     concSuffix d = case defSig d of
-      Just sig | not (T.null (T.strip (conclusionOf sig))) ->
-        "  ⊢ " <> T.strip (conclusionOf sig)
-      _ -> ""
+      Just sig -> let c = T.strip (stripQualifiers (conclusionOf sig))
+                  in if T.null c then "" else " ⊢ " <> c
+      _        -> ""
 
     -- ----------------------------------------------------------------
     -- Anchor mode: WL signature fingerprints (querySimilarTypes core).
@@ -1048,43 +1060,48 @@ queryFindLemma ld lim minSim mKindTxt mModPrefix mGoal mAnchor =
                         <> lemmaList ranked <> provNote
 
     -- ----------------------------------------------------------------
-    -- Free-text mode: canonicalise + conclusion token Jaccard.
+    -- Free-text mode: qualifier-stripped name/shape tokens + operator-
+    -- weighted coverage (see 'rankGoalCandidates'). Ranking lives in the
+    -- shared top-level 'rankGoalCandidates' so `auto`'s Mimer-hint seeding
+    -- ('goalHintNames') scores identically; this only renders it.
     freeTextMode goal =
-      let withSigs = [ (d, ts)
-                     | d <- realDefs ld
-                     , candKeep d
-                     , Just sig <- [defSig d]
-                     , let ts = sigConclTokens sig ]
-          gtoks    = sigConclTokens (unCanonical (canonicalizeGoal goal))
+      let vocab    = Set.fromList [ baseName (defName d) | d <- realDefs ld ]
+          keep t   = t `Set.member` vocab
+          concl    = conclusionOf goal
+          gbase    = matchTokens keep concl        -- for the note only
+          gshape   = shapeTokens concl             -- for the note only
           -- does ANY real def carry a signature at all? (ignores filters,
           -- so the "rebuild" note fires only on a truly sig-less graph.)
           anySig   = any (isJust . defSig) (realDefs ld)
-          cands    = [ (s, d)
-                     | (d, ts) <- withSigs
-                     , let s = tokenJaccard gtoks ts
-                     , s >= minSim ]
-          ranked   = take lim
-                       (sortBy (comparing (\(s, d) -> (Down s, defName d))) cands)
+          ranked   = take lim (rankGoalCandidates ld candKeep minSim goal)
+          shapeNote
+            | Set.null gshape = ""
+            | otherwise       = "; shape: " <> renderTokens gshape
+          weakNote = case ranked of
+            ((sc, _) : _) | jac3 sc < 0.12 ->
+              "\n(Weak lexical overlap — if none fit, try `search <name>` or "
+                <> "ripgrep the goal fragment over the sources.)"
+            _ -> ""
       in if not anySig
            then "This graph carries no type signatures, so free-text lemma "
                   <> "search is unavailable.\nRebuild with signatures enabled "
                   <> "(the daemon does this by default; if you loaded a fixed "
                   <> "--graph, regenerate it with `agda-deps --with-signatures`)."
            else if null ranked
-             then "No lemmas with conclusion-token overlap ≥ " <> tshow minSim
-                    <> " for goal `" <> goal <> "`" <> filterNote
-                    <> ".\n(goal conclusion tokens: " <> renderTokens gtoks <> ")"
-             else "Candidate lemmas whose conclusion resembles the goal `" <> goal
-                    <> "`" <> filterNote
-                    <> " (identifier-token Jaccard over canonicalised "
-                    <> "conclusions — NOT WL; use `anchor` for WL shape matching):\n"
-                    <> lemmaList ranked
-                    <> "\n(goal conclusion tokens: " <> renderTokens gtoks <> ")"
+             then "No lemma's conclusion or name resembles goal `" <> goal <> "`"
+                    <> filterNote <> ".\nTry `search <name>` for a name substring, or "
+                    <> "ripgrep the goal fragment over the sources.\n"
+                    <> "(goal tokens: " <> renderTokens gbase <> shapeNote <> ")"
+             else "Candidate lemmas for `" <> goal <> "`" <> filterNote
+                    <> " (name/shape/coverage rank — a suggestion, not a proof; "
+                    <> "`anchor` for WL type-shape):\n"
+                    <> lemmaList [ (prim3 sc, d) | (sc, d) <- ranked ]
+                    <> "\n(goal tokens: " <> renderTokens gbase <> shapeNote <> ")"
+                    <> weakNote
 
-    -- canonicalise a signature, take its conclusion, extract name tokens.
-    sigConclTokens :: Text -> Set Text
-    sigConclTokens sig =
-      identTokens (conclusionOf (unCanonical (canonicalizeGoal sig)))
+    -- score-tuple accessors: (weighted coverage, jaccard, -bagsize).
+    prim3 (a, _, _) = a
+    jac3  (_, b, _) = b
 
     renderTokens ts
       | Set.null ts = "(none)"
@@ -1092,10 +1109,57 @@ queryFindLemma ld lim minSim mKindTxt mModPrefix mGoal mAnchor =
 
     -- one ranked bullet, with the matched conclusion annotation.
     lemmaList ranked = T.intercalate "\n"
-      [ "- " <> pctOf s <> "  `" <> defName d <> "`  ["
-              <> renderKind (defKind d) <> "/" <> renderState (defState d)
-              <> "]  " <> loc d <> concSuffix d <> originSuffix d
+      [ "- " <> pctOf s <> " `" <> defName d <> "` ["
+              <> renderKind (defKind d) <> stateSuffix (defState d)
+              <> "] " <> loc d <> concSuffix d <> originSuffix d
       | (s, d) <- ranked ]
+
+-- | Ranked free-text goal candidates — the shared ranking core behind
+-- free-text `find_lemma` (rendering, in 'queryFindLemma') and `auto`'s
+-- Mimer-hint seeding ('goalHintNames'), so the two never diverge.
+-- Tokenises the goal (qualifier-stripped 'matchTokens' + algebraic
+-- 'shapeTokens') and scores every signature-carrying def kept by
+-- @candKeep@ by operator-'weightedCoverage', then 'tokenJaccard', then
+-- tighter signature; keeps hits with coverage @>= minSim@, most-relevant
+-- first. Empty when the graph carries no signatures.
+rankGoalCandidates
+  :: Loaded -> (Definition -> Bool) -> Double -> Text
+  -> [((Double, Double, Int), Definition)]
+rankGoalCandidates ld candKeep minSim goal =
+  sortBy (comparing (\(sc, d) -> (Down sc, defName d)))
+    [ (sc, d)
+    | d <- realDefs ld, candKeep d
+    , Just sig <- [defSig d]
+    , let bag = matchTokens keep (conclusionOf sig) `Set.union` nameTokens (defName d)
+          sc  = ( weightedCoverage gtoks bag, tokenJaccard gtoks bag, negate (Set.size bag) )
+    , (\(a, _, _) -> a) sc >= minSim ]
+  where
+    vocab  = Set.fromList [ baseName (defName d) | d <- realDefs ld ]
+    keep t = t `Set.member` vocab
+    gtoks  = matchTokens keep concl `Set.union` shapeTokens concl
+    concl  = conclusionOf goal
+
+-- | Up to @n@ in-scope short names to seed Mimer hints for a goal, most
+-- relevant first: the base component of each ranked candidate's FQN
+-- (Mimer 2.9 rejects a qualified hint name, and an out-of-scope hint
+-- aborts the whole search — so `auto` tries them one at a time), deduped
+-- in rank order. A modest coverage floor keeps out junk hints. Empty when
+-- the graph has no signatures.
+goalHintNames :: Loaded -> Int -> Text -> [Text]
+goalHintNames ld n goal =
+  take n (ordNub [ baseName (defName d)
+                 | (_, d) <- rankGoalCandidates ld (const True) 0.4 goal ])
+  where
+    ordNub = go Set.empty
+    go _    []       = []
+    go seen (x : xs)
+      | x `Set.member` seen = go seen xs
+      | otherwise           = x : go (Set.insert x seen) xs
+
+-- | Base (final dotted component) of a qualified name
+-- (@Data.Nat.Properties.+-comm@ → @+-comm@).
+baseName :: Text -> Text
+baseName = snd . T.breakOnEnd "."
 
 -- ---------------------------------------------------------------------
 -- search / stats
@@ -1220,16 +1284,13 @@ readSignature ld entries preferSource normalised showImplicit name = case resolv
     -- disclaimer reflects the daemon's signature settings.
     Just t0 ->
       let t       = desugarLiterals t0
-          locTxt  = defModule d <> maybe "" ((":" <>) . tshow) (defLine d)
-          normTxt = if normalised then "normalised (semantic form)"
-                                  else "not normalised, shown as-written"
-          impTxt  = if showImplicit then "implicit arguments shown"
-                                    else "implicit arguments hidden (Agda default)"
-          litTxt  = if t /= t0 then ", numeric literals de-sugared" else ""
-      in pure (Right $ "`" <> defName d <> "`  (" <> locTxt <> ")\n\n" <> t
-                        <> "\n\n(elaborated type: reified from the type-checker, "
-                        <> normTxt <> ", " <> impTxt <> litTxt
-                        <> "; pass `source=true` for the as-written signature)")
+          locTxt  = maybe "" (\l -> "  (L" <> tshow l <> ")") (defLine d)
+          normTxt = if normalised then "normalised" else "not normalised"
+          impTxt  = if showImplicit then ", implicits shown" else ""
+          litTxt  = if t /= t0 then ", literals de-sugared" else ""
+      in pure (Right $ "`" <> defName d <> "`" <> locTxt <> "\n\n" <> t
+                        <> "\n\n(elaborated, " <> normTxt <> impTxt <> litTxt
+                        <> "; `source=true` for surface syntax)")
     -- Source path: forced by @preferSource@, or the fallback when no
     -- reified type was recorded. The disclaimer distinguishes the two.
     Nothing -> case M.lookup (defModule d) (ldModFiles ld) of
@@ -1244,9 +1305,8 @@ readSignature ld entries preferSource normalised showImplicit name = case resolv
                 hdr   = "`" <> defName d <> "`  (" <> T.pack fp
                           <> maybe "" ((":" <>) . tshow) (defLine d) <> ")"
                 note  = if preferSource
-                          then "\n\n(as-written from source; omit `source` for the "
-                                 <> "elaborated type)"
-                          else "\n\n(source-derived, best-effort; rebuild the graph with "
+                          then "\n\n(from source; omit `source` for the elaborated type)"
+                          else "\n\n(source-derived, best-effort; rebuild "
                                  <> "--with-signatures for the elaborated type)"
             in case extractSignature ls (defLine d) baseS of
                  Just sig -> pure (Right (hdr <> "\n\n" <> sig <> note))

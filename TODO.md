@@ -39,6 +39,11 @@ Forward-looking work on the graph consumers. For runnable examples see
 
 ## Shipped — see Changelog
 
+- [x] `agda-explore`: goal→lemma retrieval overhaul + hint-guided `auto`
+  (2026-07-08) — `find_lemma`/`lemmas` rank by name + algebraic shape +
+  operator-weighted coverage (qualifier-stripped, graph-vocab keep):
+  2/10→10/10 on the stdlib micro-bench. `auto`/`auto_all` seed Mimer with the
+  top `find_lemma` lemmas on a no-solution (fixes I1/I2).
 - [x] `agda-explore`: orientation bundles + federation + JSON + coverage + CLI
   (2026-07-05) — `brief`/`goal_brief` one-call orientation, `--overlay-graph`
   stdlib federation (`[external: …]` tags, project-wins), `format: json` on

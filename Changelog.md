@@ -2,6 +2,64 @@
 
 ## Unreleased
 
+### `agda-explore`: trim tool response bytes (2026-07-08)
+
+Tool *outputs* (not descriptions) are re-read by the agent on every call, so
+response size is a running token cost. Measured on the agda-stdlib sig graph:
+sum-of-medians across the read catalogue **−43%**, with no correctness change
+(`find_lemma` still 10/10, every hit rate held).
+
+- **Shared list line (`oneLine` / `loc`, every list tool).** Location is now
+  `L<line>` — the module was already the FQN prefix printed on the same row,
+  i.e. twice; the `/Defined` state is dropped (shown only for the exceptions
+  Postulate/Hole/Failed); single-space separators. ~40% shorter
+  caller/callee/search/impact/roots lines.
+- **`find_lemma` / `lemmas` −56%.** Each candidate's `⊢` conclusion is
+  module-qualifier-stripped for display (`⊢ RightIdentity _≡_ (+ 0) _+_`
+  instead of the fully-qualified form, `AgdaGraph.GoalCanon.stripQualifiers`);
+  header sentence trimmed to a tag.
+- **`type_of`.** The ~230 B "elaborated type: reified from the type-checker…"
+  footer → `(elaborated, not normalised; source=true for surface syntax)`.
+  (The type body stays fully qualified — it's the precision tool.)
+- **`brief` −34%.** Drops the redundant `module:` line and inherits the
+  shorter list lines.
+- **Interactive mutators (`give`/`refine`/`auto`/`give_many`/…).** The
+  "Apply this diff and then call `load` — the bridge does not write the file:"
+  preamble → `(diff only — write:true to apply + reload)`.
+- `stripQualifiers` unit-tested in `test/Spec.hs`.
+
+### `agda-explore`: goal→lemma retrieval overhaul + hint-guided `auto` (2026-07-08)
+
+Fixes I1/I2 (VerinaAgda A/B benchmark): free-text `find_lemma` found the
+right lemma in only 2/10 textbook cases, and `auto` couldn't close a
+one-lemma goal.
+
+- **`find_lemma` / `lemmas` (goal mode).** Reworked the ranking
+  (`AgdaGraph.GoalCanon` + `Query.rankGoalCandidates`): reduce a qualified
+  name to its last component (`Data.Nat._+_` → `+`, dropping the
+  module-qualifier noise that clustered lemmas by module, not math); keep a
+  lowercase head symbol only when it is a known definition name (graph
+  vocabulary — `map`/`length`/`reverse` survive, bound vars drop); fold the
+  candidate's own name (`+-comm`, `length-++`) into the match bag; score by
+  operator-weighted **coverage** (Jaccard tiebreak) instead of symmetric
+  Jaccard; and inject the goal's algebraic **shape** as a combinator token
+  (`a⊕b ≡ b⊕a` → `Commutative`, `x⊕e ≡ x` → `Identity`, `f (f x) ≡ x` →
+  `Involutive`, `R x x` → `Reflexive`), which the stored sigs already carry.
+  On the real agda-stdlib sig graph: **2/10 → 10/10** in-top-25, median rank
+  1. Below `min_sim` the message points at `search`/ripgrep. `lemmas`
+  inherits it (same `queryFindLemma`).
+- **`auto` / `auto_all` are hint-guided.** Plain Mimer 2.9 won't try an
+  in-scope lemma at *any* budget, but solves instantly when the lemma is
+  named as a hint. On a no-solution, `auto`/`auto_all` now seed the top
+  graph-ranked lemma base-names (`Query.goalHintNames`, sharing the
+  `find_lemma` core) as Mimer hints — tried **one at a time** (an
+  unknown/out-of-scope hint aborts the whole `Cmd_autoOne` call; scope
+  resolution is instant, so bad hints cost ~nothing), first `GiveAction`
+  wins, and the fill reports which lemma closed it. New `timeout` / `hints`
+  args expose the budget. Live: `auto goal=…` closes `n + zero ≡ n` via
+  `+-identityʳ`; `auto_all` closes both `Holes.agda` goals in one diff.
+- Unit tests in `test/Spec.hs` (`goalCanonTests`, token + shape cases).
+
 ### `agda-explore`: trim the always-on tool catalogue (FableAna §4) (2026-07-05)
 
 The `tools/list` payload is loaded into every session where the plugin is

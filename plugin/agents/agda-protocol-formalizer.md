@@ -97,7 +97,7 @@ naturally would, just land it through the bridge:
   on every open goal in one call (the cheap first move); `give_many` for
   several independent holes in one load; `construct` for a planned batch.
   When unsure what term a goal wants, `lemmas goal=g0` searches the project
-  for a definition whose conclusion matches — reuse beats re-deriving.
+  for a lemma matching the goal — reuse beats re-deriving.
 - `stage` → `promote` still builds a def in an isolated scratch module when you
   want each `load` to re-check only its tiny closure; `discard` drops a dead
   end. For most definitions `give_file` / `new_module` are more direct.
