@@ -30,22 +30,23 @@ open items below (designs, files, verification gates) is in
   the I1/I2 retrieval + hint fixes landed and the ergonomics tags shipped —
   re-run the A/B with the sig graph + availability hint and record *per-rung*
   uptake-when-stuck (the powered-P1 gap). See [ToFix.md](ToFix.md) §7.
+
 - [ ] Stdlib federation follow-ups (base landed 2026-07-05 — see Changelog:
   `--overlay-graph` / `overlay-graphs:` + `scripts/build-stdlib-graph.sh`).
   Remaining: auto-build + auto-register a stdlib overlay on first run (warm
   compilation), and a producer flag keeping cross-boundary external edges as
   dangling refs (would let `callers`/`impact` cross into the overlay — belongs
   in the `agda-deps` repo). Consumer-side design in [ToFix.md](ToFix.md) §8.
+
 - [ ] **Per-answer closure-coverage beyond the cone tools** (arena R2, final
   slice): `search`/`callers`/`callees`/`impact`/`roots` now carry the count;
   extend to `brief`/`path` if measurement shows it helps.
 
-- [ ] **Transitive soundness taint** (R12 follow-on): `search unsafe=…` now
-  flags a def's *direct* escape; layer a reachability query (via the dep
-  graph) so `roots`/`impact` can report a theorem tainted by a
-  `non-terminating`/`trustme` dependency. Also pending: file-level option
-  escapes (`--no-positivity-check`, `--type-in-type`) once agda-deps Phase 2
-  emits them as a separate top-level field.
+- [ ] **File-level option escapes** (soundness-escape, second half): surface
+  `--no-positivity-check` / `--type-in-type` / `--no-termination-check` once
+  `agda-deps` Phase 2 emits them as a top-level `moduleOptionEscapes` field
+  (still open in the producer's TODO). The per-def `unsafe` half and its
+  transitive taint (below) already cover the measured audit misses.
 
 - [ ] **Round-6 P5 follow-up: structural goal canonicalisation.** `agda-goals`
   canonicalises goal types textually (whitespace + alpha-rename) because
@@ -67,6 +68,12 @@ open items below (designs, files, verification gates) is in
 
 ## Shipped — see Changelog
 
+- [x] Transitive soundness taint (R12 follow-on) (2026-07-09) — a reachability
+  query over the adopted `unsafe` field: `AgdaGraph.Index.unsafeDeps` +
+  `roots … unsafe=any` (transitive audit, witnessed) + passive
+  `⚠ soundness taint` banners on `roots`/`impact`. No new producer field.
+  Tests in `test/Spec.hs`. File-level option escapes remain open above (blocked
+  on producer Phase 2).
 - [x] Producer-follow-ups R12 + R14 (2026-07-09) — now that `agda-deps` emits
   the wire fields: `Schema.Definition.defUnsafe` + a `search unsafe=` audit
   filter and an `[unsafe: …]` tag in `locate`/lists (R12); and

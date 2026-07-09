@@ -37,6 +37,7 @@ import qualified AgdaRepair.Edit       as RE
 import           Data.Aeson            ( eitherDecode )
 import qualified Data.Map.Strict       as Map
 import           AgdaGraph.Schema      ( ExpandedGraph(..), Definition(..), ReExport(..) )
+import           AgdaGraph.Index       ( buildIndex, lookupId, unsafeDeps, defAt )
 import           AgdaUnused.Analysis   ( Finding(..), FindingKind(..), analyse )
 
 ----------------------------------------------------------------------
@@ -73,6 +74,7 @@ main = do
   sequence_ (map ($ fails) goalCanonTests)
   sequence_ (map ($ fails) unusedDeadTests)
   sequence_ (map ($ fails) schemaFieldTests)
+  sequence_ (map ($ fails) taintTests)
   replayTests fails
   n <- readIORef fails
   if n == 0
@@ -440,6 +442,49 @@ schemaFieldTests = case eitherDecode schemaGraphJson :: Either String ExpandedGr
         (renamesOf "Core.Base.merge")
     , checkEq "R14: absent renames → empty map"
         [Map.empty] (renamesOf "Core.Base.plain")
+    ]
+
+----------------------------------------------------------------------
+-- Transitive soundness taint (R12 follow-on): 'unsafeDeps' reports the
+-- directly-`unsafe` defs in a node's forward (dependency) closure — the
+-- escapes a theorem transitively rests on. Chain: thm → step → loops
+-- (non-terminating); `cheat` (trustme) is present but unreachable from
+-- thm; `clean` depends on nothing.
+
+taintGraphJson :: BL.ByteString
+taintGraphJson = BLC.pack $ unlines
+  [ "{ \"v\": 2, \"mode\": \"expanded\", \"schemaVersion\": 2"
+  , ", \"modules\": [\"Proof\", \"Danger\"]"
+  , ", \"moduleFiles\": {}"
+  , ", \"definitions\":"
+  , "  [ { \"name\": \"Proof.thm\",    \"module\": \"Proof\",  \"kind\": \"function\" }"
+  , "  , { \"name\": \"Proof.step\",   \"module\": \"Proof\",  \"kind\": \"function\" }"
+  , "  , { \"name\": \"Proof.clean\",  \"module\": \"Proof\",  \"kind\": \"function\" }"
+  , "  , { \"name\": \"Danger.loops\", \"module\": \"Danger\", \"kind\": \"function\", \"unsafe\": [\"non-terminating\"] }"
+  , "  , { \"name\": \"Danger.cheat\", \"module\": \"Danger\", \"kind\": \"function\", \"unsafe\": [\"trustme\"] }"
+  , "  ]"
+  , ", \"definitionEdges\": [ [\"Proof.thm\", \"Proof.step\"], [\"Proof.step\", \"Danger.loops\"] ]"
+  , "}"
+  ]
+
+taintTests :: [Check]
+taintTests = case eitherDecode taintGraphJson :: Either String ExpandedGraph of
+  Left err -> [ check ("taint fixture decodes: " ++ err) False ]
+  Right g ->
+    let ix = buildIndex g
+        -- unsafe dependency names for a node, or Nothing if the name is absent.
+        depNames n = fmap (\i -> map (defName . defAt ix) (unsafeDeps ix i)) (lookupId ix n)
+    in
+    [ checkEq "taint: thm transitively rests on loops (via step)"
+        (Just ["Danger.loops"]) (depNames "Proof.thm")
+    , checkEq "taint: step directly rests on loops"
+        (Just ["Danger.loops"]) (depNames "Proof.step")
+    , checkEq "taint: clean cone has no escapes"
+        (Just []) (depNames "Proof.clean")
+    , checkEq "taint: subject's own escape is excluded (not a self-dependency)"
+        (Just []) (depNames "Danger.loops")
+    , checkEq "taint: unreachable escape (cheat) does not taint thm"
+        False (fmap (elem "Danger.cheat") (depNames "Proof.thm") == Just True)
     ]
 
 ----------------------------------------------------------------------

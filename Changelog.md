@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Transitive soundness taint on `roots` / `impact` (R12 follow-on) (2026-07-09)
+
+`search unsafe=` flagged only a def's *direct* escape. A theorem can carry no
+escape itself yet transitively reach a `{-# NON_TERMINATING #-}` helper or a
+`primTrustMe` body through its dependencies — invisible to a per-def audit.
+This layers a reachability query over the already-adopted `unsafe` field (R12).
+No new producer field; pure consumer-side. Tests in `test/Spec.hs`.
+
+- **`AgdaGraph.Index.unsafeDeps`** — the directly-`unsafe` defs in a node's
+  forward (uses) closure, excluding the node itself: the escapes it
+  transitively *rests on*. O(V+E) via `descendants`; deterministic ascending
+  order.
+- **`roots … unsafe=any|non-terminating|trustme`** — a transitive soundness
+  audit rooted at one theorem: the reachable escapes, each with the same
+  witness chain `roots` already renders (`T → … → loops`). Overrides the
+  postulate/primitive default; `kind`/`state` still narrow it; a bad value is
+  rejected (`unsafeFilterError`). If the subject itself carries an escape, a
+  self-note flags it (a def is not its own transitive dependency).
+- **Passive `⚠ soundness taint` banners.** With no `unsafe=` filter, `roots`
+  prepends a one-line banner naming the escapes the subject rests on (so it is
+  never silent), and `impact` prepends one when the subject carries *or* rests
+  on an escape — every dependent it lists transitively inherits it.
+
 ### Producer follow-ups: `unsafe` audit (R12) + `renaming` alias resolution (R14) (2026-07-09)
 
 Consumer-side wiring for two graph fields `agda-deps` shipped 2026-07-09.

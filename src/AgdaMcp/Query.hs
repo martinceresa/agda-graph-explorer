@@ -174,6 +174,50 @@ oneLine d =
         <> stateSuffix (defState d) <> "] " <> loc d
         <> unsafeSuffix d <> originSuffix d
 
+-- | The distinct soundness-escape kinds ('defUnsafe') carried by a set of
+-- node ids, sorted. Backs the transitive-taint banners.
+escapeKinds :: Index -> [Int] -> [Text]
+escapeKinds ix = Set.toAscList . Set.fromList . concatMap (defUnsafe . defAt ix)
+
+-- | Render escape kinds for a banner: @non-terminating@ or
+-- @non-terminating / trustme@.
+renderKinds :: [Text] -> Text
+renderKinds = T.intercalate " / "
+
+-- | ⚠ transitive soundness-taint banner for @roots@: names the escapes a
+-- definition rests on through its /dependency/ cone ('unsafeDeps'). A def's
+-- own direct escape is deliberately left out — it already shows on the
+-- @locate@ line and the 'unsafeSuffix' tag; the new, non-obvious signal is
+-- a clean-looking theorem that reaches a @non-terminating@ / @trustme@ def
+-- transitively. Empty when the cone is clean. Trailing blank line so it
+-- sits above the answer body.
+rootsTaintBanner :: Index -> Definition -> Text
+rootsTaintBanner ix d = case unsafeDeps ix (defId d) of
+  []           -> ""
+  ids@(i0 : _) -> "⚠ soundness taint: `" <> defName d <> "` transitively rests on "
+           <> tshow (length ids) <> " definition(s) using "
+           <> renderKinds (escapeKinds ix ids)
+           <> " (e.g. `" <> defName (defAt ix i0) <> "`), so it is not "
+           <> "`agda --safe`. Run `roots " <> defName d
+           <> " unsafe=any` for the witnessed chain(s).\n\n"
+
+-- | ⚠ soundness-taint banner for @impact@: if the subject carries a direct
+-- escape /or/ rests on one transitively, every definition that depends on
+-- it inherits that unsoundness. Folds in the subject's own 'defUnsafe' (a
+-- @NON_TERMINATING@ subject spreads even with a clean dependency cone),
+-- unlike 'rootsTaintBanner'. Empty when the whole cone is clean.
+impactTaintBanner :: Index -> Definition -> Text
+impactTaintBanner ix d
+  | not tainted = ""
+  | otherwise   =
+      "⚠ soundness taint: `" <> defName d <> "` "
+        <> (if null (defUnsafe d) then "rests on a " else "carries a ")
+        <> renderKinds (escapeKinds ix (defId d : depIds)) <> " escape — every "
+        <> "dependent listed below transitively inherits it (not `agda --safe`).\n\n"
+  where
+    depIds  = unsafeDeps ix (defId d)
+    tainted = not (null (defUnsafe d)) || not (null depIds)
+
 -- | Bullet list of definitions, each annotated with its enclosing owner
 -- when it's a @where@-/anonymous helper, truncated to @lim@ with a
 -- trailing "…and N more". A provenance-free view of 'provBulletList'.
@@ -477,6 +521,17 @@ filterError mKindTxt mStateTxt =
                        <> "` — use one of defined / postulate / hole / failed."
     _             -> Nothing
 
+-- | Validate the optional @unsafe@ escape-kind filter shared by @search@
+-- and @roots@: the enumerate-all aliases (@any@ / @true@ / empty) or a
+-- concrete tag. 'Just' a user-facing error, or 'Nothing' when it parses
+-- (or is absent).
+unsafeFilterError :: Maybe Text -> Maybe Text
+unsafeFilterError Nothing  = Nothing
+unsafeFilterError (Just u)
+  | u `elem` ["any", "true", "", "non-terminating", "trustme"] = Nothing
+  | otherwise = Just $ "Unknown unsafe filter `" <> u
+      <> "` — use `any` (every escape) or a kind: non-terminating / trustme."
+
 -- | Module-subtree predicate: keep a definition when no prefix is given,
 -- or its module starts with it. Shared by @search@ / @callers@ /
 -- @callees@ / @roots@ / @path@.
@@ -671,7 +726,7 @@ queryImpact ld lim name = case resolveDefNote ld name of
         topMods = take 12 (sortBy (comparing (Down . snd)) byMod)
     in if IS.null trans
          then "Changing `" <> name <> "` is safe: nothing depends on it."
-         else (<> coverageFootnote ld) $ T.unlines $
+         else (impactTaintBanner ix d <>) $ (<> coverageFootnote ld) $ T.unlines $
            [ "Changing `" <> name <> "` (its type/signature) could affect:"
            , "  " <> tshow (IS.size trans) <> " definition(s) transitively, "
                   <> tshow (IS.size direct) <> " directly."
@@ -829,11 +884,19 @@ kShortestPathsVia ix allow src dst k =
 -- chain. Turns "which axioms does theorem T depend
 -- on?" into one call instead of hand-filtering @callees --transitive@
 -- against the postulate list.
-queryRoots :: Loaded -> Int -> Bool -> Bool -> Maybe Text -> Maybe Text -> Maybe Text -> Text -> Text
-queryRoots ld lim byMod chains mModPrefix mKindTxt mStateTxt name =
+--
+-- With @unsafe=@ it becomes a transitive soundness audit: the escapes the
+-- subject rests on through its dependency cone ('unsafeDeps', R12) — an
+-- @agda --safe@-style check rooted at one theorem, each escape witnessed
+-- by the chain that reaches it. Without a filter, a passive
+-- 'rootsTaintBanner' still flags the taint so it is never silent.
+queryRoots :: Loaded -> Int -> Bool -> Bool -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe Text -> Text -> Text
+queryRoots ld lim byMod chains mModPrefix mKindTxt mStateTxt mUnsafe name =
   case filterError mKindTxt mStateTxt of
     Just err -> err
-    Nothing  -> case resolveDefNote ld name of
+    Nothing  -> case unsafeFilterError mUnsafe of
+     Just err -> err
+     Nothing  -> case resolveDefNote ld name of
       Nothing -> notFound ld name
       Just (note, d) -> (note <>) $
         let ix    = ldIndex ld
@@ -846,6 +909,9 @@ queryRoots ld lim byMod chains mModPrefix mKindTxt mStateTxt name =
                            , modulePrefixPred mModPrefix dx ]
             n     = length roots
             descr = filterDescr mKindTxt mStateTxt mModPrefix
+            -- No explicit filter ⇒ surface the transitive escape taint
+            -- passively; with `unsafe=` the body already enumerates it.
+            banner = if isJust mUnsafe then "" else rootsTaintBanner ix d
             -- One forward BFS from the subject builds the shortest-path
             -- tree; every root's witness chain is then a cheap backtrace
             -- through it, instead of a fresh BFS per root.
@@ -880,29 +946,49 @@ queryRoots ld lim byMod chains mModPrefix mKindTxt mStateTxt name =
                               <> (if byMod || not chains then ":"
                                                          else ", each with a witnessing chain:")
                               <> "\n" <> body <> coverageFootnote ld
-        in selfNote d <> tail'
+        in banner <> selfNote d <> tail'
   where
     mKind  = mKindTxt  >>= parseKind
     mState = mStateTxt >>= parseState
-    -- default predicate (no filters): paper-level assumptions.
-    isRoot dx = case (mKind, mState) of
-      (Nothing, Nothing) ->
-        defState dx == Postulate || defKind dx `elem` [KPostulate, KPrimitive]
-      _ -> maybe True (== defKind dx) mKind && maybe True (== defState dx) mState
+    -- `unsafe=` (transitive soundness audit) takes precedence over the
+    -- kind/state assumption predicate; kind/state still narrow it if both
+    -- are given. No filter at all ⇒ paper-level assumptions.
+    isRoot dx = case mUnsafe of
+      Just u  -> unsafeMatch u dx
+                   && maybe True (== defKind dx) mKind
+                   && maybe True (== defState dx) mState
+      Nothing -> case (mKind, mState) of
+        (Nothing, Nothing) ->
+          defState dx == Postulate || defKind dx `elem` [KPostulate, KPrimitive]
+        _ -> maybe True (== defKind dx) mKind && maybe True (== defState dx) mState
+    -- unsafe=any|true|"" ⇒ any escape; unsafe=<kind> ⇒ that one (mirrors
+    -- `search`'s unsafePred).
+    unsafeMatch u dx
+      | u `elem` ["any", "true", ""] = not (null (defUnsafe dx))
+      | otherwise                    = u `elem` defUnsafe dx
     filterDescr mk ms mp =
-      let core = case (mk, ms) of
-            (Nothing, Nothing) -> "assumption(s) (postulate/primitive)"
-            _ -> T.intercalate " " $ filter (not . T.null)
-                   [ maybe "" ("kind=" <>) mk, maybe "" ("state=" <>) ms, "definition(s)" ]
+      let core = case mUnsafe of
+            Just u
+              | u `elem` ["any", "true", ""] -> "soundness escape(s)"
+              | otherwise                    -> u <> " escape(s)"
+            Nothing -> case (mk, ms) of
+              (Nothing, Nothing) -> "assumption(s) (postulate/primitive)"
+              _ -> T.intercalate " " $ filter (not . T.null)
+                     [ maybe "" ("kind=" <>) mk, maybe "" ("state=" <>) ms, "definition(s)" ]
       in core <> maybe "" (\p -> " in `" <> p <> "`") mp
     -- Flag when the queried node itself matches the assumption
     -- predicate — it won't appear among its own roots (a node is not its
     -- own transitive dependency), which would otherwise read oddly.
     selfNote d
-      | isRoot d  = "(note: `" <> defName d <> "` is itself ["
-                      <> renderKind (defKind d) <> "/" <> renderState (defState d)
-                      <> "]; a definition is not its own transitive dependency.)\n"
-      | otherwise = ""
+      | not (isRoot d) = ""
+      | Just _ <- mUnsafe =
+          "(note: `" <> defName d <> "` itself carries [unsafe: "
+            <> T.intercalate ", " (defUnsafe d)
+            <> "]; a definition is not its own transitive dependency.)\n"
+      | otherwise =
+          "(note: `" <> defName d <> "` is itself ["
+            <> renderKind (defKind d) <> "/" <> renderState (defState d)
+            <> "]; a definition is not its own transitive dependency.)\n"
 
 -- ---------------------------------------------------------------------
 -- similar_types / similar_bodies

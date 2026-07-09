@@ -108,7 +108,9 @@ graphTools =
 
   , Tool "impact"
       "[trace] Blast radius of changing a definition's type: everything that \
-      \transitively depends on it, by module. Answers \"what breaks if I change X?\"."
+      \transitively depends on it, by module. Answers \"what breaks if I change X?\". \
+      \Leads with a ⚠ soundness-taint line when the subject carries or rests on a \
+      \non-terminating/trustme escape (every dependent inherits it)."
       (objSchema [ ("name", sp "Definition you intend to change.")
                  , ("limit", ip "Max affected definitions (default 60).")
                  ] ["name"])
@@ -131,10 +133,13 @@ graphTools =
   , Tool "roots"
       "[trace] Which assumptions a definition rests on: its transitive postulate/primitive \
       \(or a given kind/state) dependencies, each with a witness chain. Answers \
-      \\"what axioms does theorem T depend on?\" (see the skill for record-field axioms)."
+      \\"what axioms does theorem T depend on?\" (see the skill for record-field axioms). \
+      \With `unsafe=any` it is a transitive soundness audit — the non-terminating/trustme \
+      \escapes reachable through its dependency cone, each witnessed."
       (objSchema [ ("name", sp "Definition (e.g. a theorem) to audit.")
                  , ("kind", sp "Restrict roots to this kind (function|projection|datatype|record|constructor|postulate|primitive|other). Default: postulate + primitive.")
                  , ("state", sp "Restrict roots to this state (defined|postulate|hole|failed).")
+                 , ("unsafe", sp "Soundness audit: `any` lists every transitive soundness escape the subject rests on, or a kind — `non-terminating` | `trustme`. Overrides the postulate/primitive default; each escape is witnessed by its chain.")
                  , ("module_prefix", sp "Only roots whose module starts with this prefix.")
                  , ("by_module", bp "Per-module count summary instead of a list (default false).")
                  , ("chains", bp "Show a witness chain per root (default true).")
@@ -144,7 +149,7 @@ graphTools =
           withFresh ss (\ld -> queryRoots ld (argInt a "limit" 20)
                                  (argBool a "by_module" False) (argBool a "chains" True)
                                  (argText a "module_prefix")
-                                 (argText a "kind") (argText a "state") n))
+                                 (argText a "kind") (argText a "state") (argText a "unsafe") n))
 
   , Tool "type_of"
       "[find] The type signature of a definition — the elaborated (type-checker) form \

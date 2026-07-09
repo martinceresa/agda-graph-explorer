@@ -28,6 +28,7 @@ module AgdaGraph.Index
   , topoSort
   , descendants
   , ancestors
+  , unsafeDeps
   , longestPathDP
   ) where
 
@@ -329,6 +330,19 @@ descendants ix seeds = traverseClosure (idxForward ix) seeds
 -- | Reverse transitive closure of a seed set.
 ancestors :: Index -> IS.IntSet -> IS.IntSet
 ancestors ix seeds = traverseClosure (idxReverse ix) seeds
+
+-- | Ids of directly-@unsafe@ definitions in a node's transitive
+-- dependency closure (forward\/uses edges), excluding the node itself.
+-- These are the soundness escapes the node transitively /rests on/ — the
+-- graph-level taint the producer's per-def @unsafe@ tags (R12) enable:
+-- a theorem can carry no direct escape yet reach a
+-- @{-# NON_TERMINATING #-}@ helper or a @primTrustMe@ body through its
+-- dependencies. Ascending id order, so callers get a deterministic
+-- witness example. O(V + E) via 'descendants'.
+unsafeDeps :: Index -> Int -> [Int]
+unsafeDeps ix i =
+  filter (not . null . defUnsafe . defAt ix)
+         (IS.toAscList (descendants ix (IS.singleton i)))
 
 -- | Shared closure walker. Returns the set of /reachable/ nodes from
 -- @seeds@ excluding the seeds themselves.
