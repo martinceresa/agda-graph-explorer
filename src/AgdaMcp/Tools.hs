@@ -12,7 +12,9 @@ module AgdaMcp.Tools
   ) where
 
 import           Data.Aeson         (Value (..), object, (.=))
+import           Data.Aeson.Text    (encodeToLazyText)
 import qualified Data.Aeson.KeyMap  as KM
+import qualified Data.Text.Lazy     as TL
 import           Data.IORef         (modifyIORef', readIORef, writeIORef)
 import           Data.List          (isPrefixOf, sortOn)
 import qualified Data.Map.Strict    as M
@@ -23,6 +25,7 @@ import qualified Data.Text          as T
 import           Data.Time.Clock    (diffUTCTime, getCurrentTime)
 import           Data.Time.Format.ISO8601 (iso8601Show)
 import           System.Directory   (doesPathExist)
+import           System.Exit        (ExitCode (..))
 import           System.FilePath    (isAbsolute, normalise, (</>))
 import           System.Process     (CreateProcess (..), proc,
                                      readCreateProcessWithExitCode)
@@ -53,7 +56,7 @@ fmtProp = ("format", ep "`text` (default) or `json` (structured envelope)." ["te
 graphTools :: [Tool]
 graphTools =
   [ Tool "brief"
-      "One-call orientation on a definition: location + blast radius, type, \
+      "[orient] One-call orientation on a definition: location + blast radius, type, \
       \direct callers/callees (capped), and closest body-twins. Lead with this; \
       \use the individual tools to go deeper on a section."
       (objSchema [ ("name", sp "FQN or unique dotted-suffix (resolved as `locate`).")
@@ -62,7 +65,7 @@ graphTools =
       (\ss a -> needName a $ \n -> withFresh ss (\ld -> queryBrief ld (argInt a "limit" 10) n))
 
   , Tool "locate"
-      "Where a definition lives: module, file:line, kind, state, visibility, \
+      "[find] Where a definition lives: module, file:line, kind, state, visibility, \
       \caller/dependency counts, blast radius, and enclosing owner for a \
       \where-helper. Use instead of grepping for a definition site. Needs a \
       \resolvable name — if a short or operator name misses, run `search` \
@@ -71,7 +74,7 @@ graphTools =
       (\ss a -> needName a $ \n -> withFresh ss (\ld -> queryLocate ld n))
 
   , Tool "callers"
-      "Who uses a definition (reverse dependency edges); `transitive` walks the \
+      "[trace] Who uses a definition (reverse dependency edges); `transitive` walks the \
       \whole upstream cone. Replaces `grep -rn '\\bname\\b'`."
       (objSchema [ ("name", sp "Definition to find callers of.")
                  , ("transitive", bp "Walk all transitive callers (default false).")
@@ -88,7 +91,7 @@ graphTools =
                                  (parseFmt (argText a "format")) n))
 
   , Tool "callees"
-      "What a definition depends on (forward dependency edges); `transitive` \
+      "[trace] What a definition depends on (forward dependency edges); `transitive` \
       \walks the whole downstream cone."
       (objSchema [ ("name", sp "Definition to find dependencies of.")
                  , ("transitive", bp "Walk all transitive dependencies (default false).")
@@ -105,7 +108,7 @@ graphTools =
                                  (parseFmt (argText a "format")) n))
 
   , Tool "impact"
-      "Blast radius of changing a definition's type: everything that \
+      "[trace] Blast radius of changing a definition's type: everything that \
       \transitively depends on it, by module. Answers \"what breaks if I change X?\"."
       (objSchema [ ("name", sp "Definition you intend to change.")
                  , ("limit", ip "Max affected definitions (default 60).")
@@ -113,7 +116,7 @@ graphTools =
       (\ss a -> needName a $ \n -> withFresh ss (\ld -> queryImpact ld (argInt a "limit" 60) n))
 
   , Tool "path"
-      "Shortest dependency chain `from → … → to` along uses-edges, each hop \
+      "[trace] Shortest dependency chain `from → … → to` along uses-edges, each hop \
       \tagged with its provenance — why `from` transitively needs `to`. `k>1` \
       \returns several distinct paths."
       (objSchema [ ("from", sp "Start definition (the dependent).")
@@ -127,7 +130,7 @@ graphTools =
           _                -> pure (Left "path requires both `from` and `to` arguments."))
 
   , Tool "roots"
-      "Which assumptions a definition rests on: its transitive postulate/primitive \
+      "[trace] Which assumptions a definition rests on: its transitive postulate/primitive \
       \(or a given kind/state) dependencies, each with a witness chain. Answers \
       \\"what axioms does theorem T depend on?\" (see the skill for record-field axioms)."
       (objSchema [ ("name", sp "Definition (e.g. a theorem) to audit.")
@@ -145,7 +148,7 @@ graphTools =
                                  (argText a "kind") (argText a "state") n))
 
   , Tool "type_of"
-      "The type signature of a definition — the elaborated (type-checker) form \
+      "[find] The type signature of a definition — the elaborated (type-checker) form \
       \by default, or the as-written source with `source=true`. Needs a \
       \resolvable name — if a short or operator name misses, run `search` \
       \first to get the fully-qualified name."
@@ -157,7 +160,7 @@ graphTools =
             (cfgNormaliseSigs (ssConfig ss)) (cfgShowImplicit (ssConfig ss)) n))
 
   , Tool "similar_types"
-      "Definitions whose type-signature shape resembles X's (Weisfeiler-Leman \
+      "[reuse] Definitions whose type-signature shape resembles X's (Weisfeiler-Leman \
       \fingerprint Jaccard; same core as the `silhouette` analysis). Answers \
       \\"what else has a type shaped like X's?\"."
       (objSchema [ ("name", sp "Reference definition.")
@@ -168,7 +171,7 @@ graphTools =
           withFresh ss (\ld -> querySimilarTypes ld (argInt a "limit" 10) (argDouble a "min_sim" 0.5) n))
 
   , Tool "similar_bodies"
-      "Definitions whose elaborated bodies share canonical AST subterms (same \
+      "[reuse] Definitions whose elaborated bodies share canonical AST subterms (same \
       \core as the `term-cluster` analysis). Answers \"what else is implemented \
       \like X?\"."
       (objSchema [ ("name", sp "Reference definition.")
@@ -179,7 +182,7 @@ graphTools =
           withFresh ss (\ld -> querySimilarBodies ld (argInt a "limit" 10) (argDouble a "min_sim" 0.3) n))
 
   , Tool "find_lemma"
-      "Goal-directed lemma search: find definitions whose conclusion resembles a \
+      "[reuse] Goal-directed lemma search: find definitions whose conclusion resembles a \
       \goal, to reuse instead of re-deriving. Supply EXACTLY ONE of `anchor` (an \
       \existing def; WL shape match) or `goal` (free-text type; conclusion-token \
       \match) — see the skill for the mode contract."
@@ -199,20 +202,26 @@ graphTools =
                    (argText a "goal") (argText a "anchor")))
 
   , Tool "search"
-      "Find definitions whose qualified name contains a substring, ranked by \
+      "[find] Find definitions whose qualified name contains a substring, ranked by \
       \match tightness; `kind`/`state`/`module_prefix` filter (an empty `query` \
       \plus a filter *lists* all of a kind/state). Start here when you only \
       \know part of a name (or a mixfix operator like `_++_`), then feed the \
-      \fully-qualified result to `type_of`/`locate`/`callers`."
-      (objSchema [ ("query", sp "Case-insensitive substring; may be empty when a kind/state/module_prefix filter is given.")
-                 , ("kind", sp "Filter by kind: function|projection|datatype|record|constructor|postulate|primitive|other.")
-                 , ("state", sp "Filter by state: defined|postulate|hole|failed.")
-                 , ("module_prefix", sp "Only definitions whose module starts with this prefix.")
+      \fully-qualified result to `type_of`/`locate`/`callers`. `mode=text` \
+      \instead greps the source bytes with ripgrep (pragmas, comments, \
+      \`using`-lists, regex — anything the graph doesn't index); those hits \
+      \are always current, independent of the graph snapshot."
+      (objSchema [ ("query", sp "In name mode: case-insensitive substring (may be empty with a kind/state/module_prefix filter). In text mode: a ripgrep pattern (regex).")
+                 , ("mode", sp "name (default; searches definition names via the graph) | text (ripgreps source bytes — use for pragmas/comments/regex the graph doesn't index).")
+                 , ("kind", sp "Filter by kind: function|projection|datatype|record|constructor|postulate|primitive|other. (name mode only)")
+                 , ("state", sp "Filter by state: defined|postulate|hole|failed. (name mode only)")
+                 , ("module_prefix", sp "Only definitions whose module starts with this prefix. (name mode only)")
                  , ("limit", ip "Max results (default 30).")
-                 , ("top_level_only", bp "Drop where-block / anonymous-module locals (default false).")
+                 , ("top_level_only", bp "Drop where-block / anonymous-module locals (default false). (name mode only)")
                  , fmtProp
                  ] [])
-      (\ss a -> withFresh ss (\ld ->
+      (\ss a -> case argText a "mode" of
+          Just "text" -> runSearchText ss a
+          _           -> withFresh ss (\ld ->
                   querySearch ld (argBool a "top_level_only" False)
                     (argText a "module_prefix")
                     (argText a "kind") (argText a "state") (argInt a "limit" 30)
@@ -220,7 +229,7 @@ graphTools =
                     (fromMaybe "" (argText a "query"))))
 
   , Tool "unused"
-      "Run agda-unused over the graph: unused imports, duplicate opens, and \
+      "[audit] Run agda-unused over the graph: unused imports, duplicate opens, and \
       \(opt-in) dead definitions, confidence-tagged. See the skill for the \
       \false-positive caveats."
       (objSchema [ ("scope", sp "Restrict to a directory, file, or module name (e.g. `Prelude.Init`); relative to project root. Default: project root.")
@@ -228,6 +237,7 @@ graphTools =
                  , ("exclude", sp "Comma-separated globs matched against each finding's file path and module name (`**` spans dirs, `*` stops at `/`); a match drops the finding.")
                  , ("group_by", sp "Per-group counts instead of per-finding lines: `dir`, `file`, or `kind`.")
                  , ("count_only", bp "Print only the grand total (default false; wins over group_by).")
+                 , fmtProp
                  ] [])
       runUnused
 
@@ -264,6 +274,60 @@ staleFooter ld =
   "\n# stale: graph is rebuilding in the background; results reflect the snapshot built at "
     <> T.pack (show (ldBuiltAt ld))
 
+-- | Appended whenever the served snapshot came from a build that reported
+-- failed/unparseable modules ('ldFailed' non-empty). A parse error under
+-- the default @--keep-going@ producer drops the offending module's
+-- definitions from the graph while the build still "succeeds" (agda-deps
+-- exits 0), so an unqualified "no match" would otherwise read as
+-- authoritative — a confident false negative (I6). This flags it. Louder
+-- when the graph is empty (a whole-file parse error can drop every def).
+-- Fires independently of the rebuilding-stale flag and in every mode.
+healthFooter :: Loaded -> Text
+healthFooter ld = case ldFailed ld of
+  []     -> ""
+  failed ->
+    "\n# partial: the last build reported " <> T.pack (show (length failed))
+      <> " failed/unparseable module(s) (e.g. "
+      <> T.intercalate ", " (take 3 failed)
+      <> "); some definitions may be missing — a \"no match\" here is not "
+      <> "authoritative. Fix the source and re-query."
+
+-- | Appended when the backing graph predates a source edit
+-- ('ldStaleVsSource'). Unlike 'staleFooter' (a live rebuild is in flight),
+-- this fires from the snapshot's own precomputed flag, so it also surfaces
+-- in preloaded mode — which 'ensureFresh' otherwise reports as never-stale
+-- (R1). Silent when there is nothing to compare (bare @--graph@, in-memory
+-- union).
+sourceStaleFooter :: Loaded -> Text
+sourceStaleFooter ld
+  | ldStaleVsSource ld =
+      "\n# stale: the graph file is older than a source file under the "
+        <> "include roots — it predates an edit; results may not reflect "
+        <> "the current sources (rebuild, or restart with a fresh --graph)."
+  | otherwise = ""
+
+-- | The health + source-staleness footers a served snapshot always carries,
+-- regardless of the rebuilding-stale flag. Threaded into every read answer.
+snapshotFooters :: Loaded -> Text
+snapshotFooters ld = sourceStaleFooter ld <> healthFooter ld
+
+-- | Plain-text footers ('staleFooter' / 'snapshotFooters') corrupt a
+-- @format:json@ answer (they append prose after the envelope), so append
+-- them only when the payload is human-readable text. A JSON answer is
+-- recognised by its first non-space byte (@{@ or @[@) — every structured
+-- envelope here is a JSON object; the staleness/coverage signal is carried
+-- in-band there instead (e.g. @unsearched_files@) or via @status@.
+appendTextFooters :: Text -> Text -> Text
+appendTextFooters footers txt
+  | T.null footers          = txt
+  | isJsonPayload txt       = txt
+  | otherwise               = txt <> footers
+  where
+    isJsonPayload t = case T.uncons (T.dropWhile isSpacec t) of
+      Just (c, _) -> c == '{' || c == '['
+      Nothing     -> False
+    isSpacec c = c == ' ' || c == '\n' || c == '\r' || c == '\t'
+
 -- | Record the @stale@ telemetry column for the request currently in
 -- flight. Every tool runner that calls 'ensureFresh' threads the
 -- @(Loaded, Bool)@ stale flag through here; 'handleCall' reads + resets it
@@ -285,7 +349,9 @@ withFreshIO ss f = do
       r <- f ld
       pure $ case r of
         Left err  -> Left err
-        Right txt -> Right (txt <> if stale then staleFooter ld else "")
+        Right txt -> Right (appendTextFooters
+                              ((if stale then staleFooter ld else "") <> snapshotFooters ld)
+                              txt)
 
 -- | The fail-fast wrapper used by @type_of@. Before paying the
 -- 'ensureFresh' barrier (which may schedule a background
@@ -335,12 +401,17 @@ runUnused ss a = do
                   excls    = maybe [] (filter (not . T.null) . T.splitOn ",") (argText a "exclude")
                   mgroupBy  = argText a "group_by"
                   countOnly = argBool a "count_only" False
+                  jsonOut   = parseFmt (argText a "format") == FmtJson
                   uargs = [ "--json=" ++ cfgGraphPath c
                           , "--rel-to=" ++ cfgProjectRoot c ]
                        ++ maybe [] (\k -> ["--kinds=" ++ T.unpack k]) mkinds
                        ++ [ "--exclude=" ++ T.unpack g | g <- excls ]
                        ++ maybe [] (\v -> ["--group-by=" ++ T.unpack v]) mgroupBy
                        ++ [ "--count-only" | countOnly ]
+                       -- agda-unused's --json-out already emits the array to
+                       -- stdout (and suppresses its stderr breadcrumb), so
+                       -- format:json just captures it verbatim below.
+                       ++ [ "--json-out" | jsonOut ]
                        ++ [scope]
               (_ec, out, err) <-
                 readCreateProcessWithExitCode (proc bin uargs) { cwd = Just (cfgProjectRoot c) } ""
@@ -356,8 +427,15 @@ runUnused ss a = do
                         <> maybe "" (\v -> "group_by: " <> v <> "\n") mgroupBy
                         <> (if countOnly then "count_only: true\n" else "")
                         <> "\n"
-              pure (Right (header <> caveat <> T.pack body
-                             <> if stale then staleFooter ld else ""))
+              -- JSON mode returns the agda-unused array verbatim (the text
+              -- header/caveat/footers would corrupt it, like `search`
+              -- format:json); text mode keeps the self-describing wrapping.
+              pure . Right $
+                if jsonOut
+                  then T.pack body
+                  else header <> caveat <> T.pack body
+                         <> (if stale then staleFooter ld else "")
+                         <> snapshotFooters ld
   where
     caveat =
       "Note: `using` and `duplicate` findings are high-signal. `blanket`, \
@@ -367,6 +445,76 @@ runUnused ss a = do
       \high-confidence deletion candidates are safe, but verify the \
       \low-confidence ones (`low confidence: trivial body, possibly inlined`) \
       \before removing — the elaborator may have inlined the callee.\n\n"
+
+-- | @search mode=text@: ripgrep over the project's source bytes. The graph
+-- indexes definitions + edges only, so textual queries (pragmas, comments,
+-- @using@-lists, regex, numeric literals) are invisible to name-mode search;
+-- this shell-out makes @search@ a superset of grep rather than a
+-- different-shaped subset (arena R3). It reads the current bytes on disk, so
+-- it is independent of the graph snapshot — no @ensureFresh@, no staleness
+-- caveat. Mirrors 'runUnused''s shell-out (findBin + the same process call).
+runSearchText :: ToolRunner
+runSearchText ss a = do
+  let c     = ssConfig ss
+      q     = fromMaybe "" (argText a "query")
+      lim   = max 1 (argInt a "limit" 30)
+      fmt   = parseFmt (argText a "format")
+      roots = if null (cfgIncludes c) then [cfgProjectRoot c] else cfgIncludes c
+  if T.null q
+    then pure (Left "search mode=text needs a non-empty `query` (a ripgrep pattern).")
+    else if all null roots
+      then pure (Left "search mode=text needs a project root or include dirs; none are \
+                      \configured (run with --project / -i, not a bare --graph).")
+      else do
+        mbin <- findBin "rg" (cfgRgBin c) "AGDA_EXPLORE_RG"
+        case mbin of
+          Nothing  -> pure (Left "could not locate ripgrep (`rg`) for text mode — install \
+                                 \it, set AGDA_EXPLORE_RG, or pass --rg-bin.")
+          Just bin -> do
+            let rgArgs = [ "-n", "--no-heading", "--color=never", "-S"
+                         , "--glob", "*.agda", "--glob", "*.lagda*"
+                         , "--", T.unpack q ] ++ roots
+            (ec, out, err) <- readCreateProcessWithExitCode
+                                (proc bin rgArgs) { cwd = Just (cfgProjectRoot c) } ""
+            case ec of
+              -- rg: 0 = matches, 1 = no matches, >=2 = real error.
+              ExitFailure n | n >= 2 ->
+                pure (Left ("ripgrep failed (exit " <> T.pack (show n) <> "):\n"
+                              <> T.pack (unlines (lastN 15 (lines err)))))
+              _ ->
+                let hits  = filter (not . null) (lines out)
+                    shown = take lim hits
+                    more  = length hits - length shown
+                in pure . Right $ case fmt of
+                     FmtJson -> TL.toStrict . encodeToLazyText $ object
+                       [ "tool"  .= ("search" :: Text)
+                       , "mode"  .= ("text" :: Text)
+                       , "query" .= q
+                       , "total" .= length hits
+                       , "shown" .= length shown
+                       , "items" .= map rgRow shown ]
+                     _ | null hits ->
+                           "text mode (ripgrep): no matches for `" <> q <> "` under "
+                             <> T.intercalate ", " (map T.pack roots) <> "."
+                       | otherwise ->
+                           "text mode (ripgrep over source bytes — always current, not the \
+                           \graph): " <> T.pack (show (length hits)) <> " line(s) for `"
+                             <> q <> "`:\n" <> T.unlines (map T.pack shown)
+                             <> (if more > 0
+                                   then "…and " <> T.pack (show more) <> " more line(s).\n"
+                                   else "")
+  where
+    lastN k xs = drop (max 0 (length xs - k)) xs
+    -- rg --no-heading line: "path:line:text". Split on the first two colons;
+    -- fall back to a bare text row if the shape is unexpected.
+    rgRow ln = case break (== ':') ln of
+      (file, ':' : rest) -> case break (== ':') rest of
+        (num, ':' : txt) -> object [ "file" .= file
+                                   , "line" .= (readMaybeInt num :: Maybe Int)
+                                   , "text" .= txt ]
+        _ -> object [ "text" .= ln ]
+      _ -> object [ "text" .= ln ]
+    readMaybeInt s = case reads s of [(n, "")] -> Just n; _ -> Nothing
 
 -- | Resolve the @scope@ argument to an absolute path for @agda-unused@,
 -- which keys its module table by /absolute/ path — a relative @scope@
@@ -466,6 +614,18 @@ statusText ss = do
                               <> T.pack (show currentNodeKeyVersion)
                               <> "; rebuild to refresh)"
                        else " (current)")
+                 <> "\n  graph id:       config=" <> ldConfigHash ld
+                       <> " content=" <> ldContentHash ld
+                 <> "\n    (config = producer flags + node-key/schema version + "
+                       <> "build-date-stripped producer; content = sorted def "
+                       <> "name/kind/state — a change flags added/dropped defs)"
+                 <> (if null (ldFailed ld) then ""
+                       else "\n  failed modules: " <> T.pack (show (length (ldFailed ld)))
+                              <> " (e.g. " <> T.intercalate ", " (take 3 (ldFailed ld))
+                              <> ") — graph is PARTIAL; some definitions are missing")
+                 <> (if ldStaleVsSource ld
+                       then "\n  source vs graph: STALE — graph file predates a source edit"
+                       else "")
                  <> "\n\n" <> queryStats ld
                  <> (case orphanWarning (ldOrphanFiles ld) of
                        "" -> ""

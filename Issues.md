@@ -435,9 +435,9 @@ signatures are uncapped (nothing to compare). Verified on the arena case:
 - **Reported:** 2026-07-09 (MCPBenchArena R13, from the A3 dead-code sweep:
   `Deadwood.deadC` — `deadC (suc n) = deadC n`, no other references — missed;
   tool recall 4/5 vs grep 5/5).
-- **Resolved:** 2026-07-09 for **self**-recursion — see
-  [Resolution](#resolution-2026-07-09-1). Mutually-recursive cycles with no
-  external entry remain open (below).
+- **Resolved:** 2026-07-09 — self-recursion first, then the mutual-recursion
+  cycle half (see [Resolution](#resolution-2026-07-09-1) and
+  [Cycle resolution](#cycle-resolution-2026-07-09)). Fully closed.
 - **Component:** `src/AgdaUnused/Analysis.hs` → `ingestEdge` /
   `definedButUnused`.
 - **Severity:** medium — dead-code sweeps under-report exactly the defs most
@@ -472,14 +472,25 @@ intra-module caller stays internal-only. Unit-tested both ways in
 fixture (`deadC` flagged, `deadA`/`deadB` unchanged) and `-N1`/`-N4`
 byte-identity holds.
 
-#### Open half: mutual-recursion cycles
+#### Cycle resolution (2026-07-09)
 
-A cycle (`A ↔ B`) with no external entry still reads as internal-only —
-each member is the other's "caller". Fix sketch: an SCC pass over the
-intra-module qname edges flagging SCCs with no incoming edge from outside
-(`Data.Graph.stronglyConnComp` over the `(module, short-name)` pairs;
-agda-unused works on the JSON view and never builds the `Index`, so the
-Index-side `AgdaOptimization.Condense` machinery is not reusable as-is).
+The mutual-recursion half is now fixed too. `ingestEdge` additionally
+accumulates a per-module directed intra-edge list (the `ctxIntraModUsedQ`
+map loses the source structure a graph needs). `computeDeadCycles` runs
+`Data.Graph.stronglyConnComp` per module (nodes/adjacency sorted, so it is
+deterministic) over the short-name graph; a `CyclicSCC` of size ≥ 2 is dead
+as a unit iff every member has an empty `usersClosure` (no cross-module /
+re-export user) **and** no intra-module caller from outside the SCC. Members
+land in a new `ctxDeadCycles` map (member → peer short-names), and
+`definedButUnused` reports each as `DefinedDead` with note
+`deletion candidate (dead cycle with B, C)`, skipping the in-file
+token-count fallback (peers' calls explain the occurrences) but keeping the
+cross-file suppression. agda-unused works on the JSON view and never builds
+the `Index`, so the Index-side `AgdaOptimization.Condense` was not reusable —
+this is a self-contained pass. Unit-tested in `test/Spec.hs`
+(`unusedDeadTests`): `A ↔ B` with no external caller → both dead with the
+cycle note; add one external caller of `A` → neither flagged dead. `-N1`/`-N4`
+byte-identity re-checked (with a real source root, `--kinds=all`).
 
 ---
 
@@ -493,7 +504,10 @@ Index-side `AgdaOptimization.Condense` machinery is not reusable as-is).
   match" for definitions that still textually exist, with no error and no
   staleness flag, on a transient state (a half-typed edit) every editing
   agent passes through.
-- **Status:** open.
+- **Resolved (mitigated):** 2026-07-09 — every affected answer is now
+  *flagged* rather than silently wrong (see
+  [Resolution](#resolution-2026-07-09-2)). The complete producer-side fix
+  (I6c) stays open in `agda-deps`.
 
 #### Measured (arena A2)
 
@@ -510,12 +524,16 @@ parse error is fixed. grep reads current bytes and is unaffected.
 2. `runOneEntry` decides success by `doesFileExist graphPath` **only** — the
    producer exit code is interpolated into the error message but never
    consulted. A partial graph is a "successful" build.
-3. A *parse* failure never reaches the type-checker, so the module doesn't
-   land in `failedModules` → `ldFailed` is empty → `commitOrKeep`'s
-   `--require-well-typed` guard never trips.
+3. `commitOrKeep`'s `--require-well-typed` guard is off by default, so the
+   partial graph is promoted. (Correction to the original filing: a live
+   probe of `agda-deps` 1.1 showed the unparseable module **does** land in
+   `failedModules` — `--keep-going` still exits 0, and with
+   `--require-well-typed` off the guard is not consulted. So `ldFailed` is
+   populated; it just wasn't surfaced anywhere.)
 4. The partial graph is promoted, `ssDirty` clears, and every downstream
    staleness signal (all inferred from *build scheduling*, never from *graph
-   content*) reports fresh.
+   content*) reports fresh — and `ldFailed`, though populated, was surfaced
+   only by the `--require-well-typed` gate, never on the answer itself.
 
 Mitigation today: `--strict-producer` drops `--keep-going`; the producer then
 writes no graph on error, `runOneEntry` returns `Left`, and the failed-build
@@ -538,3 +556,41 @@ already answered from the old snapshot **with** the stale footer when
 auto-rebuild is on (`ensureFresh` returns `stale=True` before scheduling the
 background rebuild) — the arena's 25% poisoning measurement likely includes
 post-commit reads, which this issue covers.
+
+#### Resolution (2026-07-09)
+
+Since `ldFailed` is in fact populated on a parse error (root cause #3), the
+mitigation is to *surface* it — and to add the content signal that catches
+the rarer case where a partial build drops defs without flagging a failed
+module. All consumer-side; the withhold behaviour is intentionally left to
+the opt-in `--require-well-typed` (withholding by default would discard the
+partial progress of modules that *did* rebuild — the reason it is opt-in).
+
+1. **`healthFooter` (`Tools.hs`)** — every read answer (and `runUnused`)
+   whose snapshot has a non-empty `ldFailed` now carries
+   `# partial: the last build reported N failed/unparseable module(s) …; a
+   "no match" here is not authoritative`. Threaded through `withFreshIO`
+   (`snapshotFooters`), so it fires in every mode, independent of the
+   rebuilding-stale flag. This converts the confident false negative into a
+   flagged one — the R11 ask.
+2. **`sourceStaleFooter` (`Tools.hs`, R1)** — a snapshot whose backing graph
+   file predates a source edit (`ldStaleVsSource`, computed once at load)
+   now flags `# stale: the graph file is older than a source file …`. This
+   also fires in **preloaded** mode, which `ensureFresh` otherwise reports as
+   never-stale.
+3. **Content identity hash (`ldContentHash`, I3/R9)** — `status` shows a
+   digest over the sorted def set, so a silent def drop is visible even when
+   nothing else looks stale, and `status` lists the failed modules + the
+   source-vs-graph flag.
+
+Footers are plain text, so they would corrupt a `format:json` answer;
+`appendTextFooters` suppresses them when the payload is JSON-shaped (the
+staleness/coverage signal is carried in-band there, e.g. `unsearched_files`,
+or via `status`) — this also fixed a latent pre-existing bug where
+`staleFooter` could append prose after a JSON envelope. Verified on a
+crafted `failedModules` graph (footer fires) and a clean one (silent);
+`format:json` answers parse cleanly.
+
+**Still open (cross-repo, I6c):** the producer should distinguish a
+parse-dropped def set from a trustworthy partial so the consumer needn't
+infer from `ldFailed` + content hash. Filed for `agda-deps`.

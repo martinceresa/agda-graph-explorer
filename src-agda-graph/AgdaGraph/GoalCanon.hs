@@ -28,6 +28,7 @@ module AgdaGraph.GoalCanon
 
     -- * Hash
   , hashCanonical
+  , hashString
 
     -- * Conclusion / token extraction (find_lemma)
   , conclusionOf

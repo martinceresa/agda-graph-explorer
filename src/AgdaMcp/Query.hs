@@ -215,17 +215,18 @@ coverageNote ld = case orphanWarning (ldOrphanFiles ld) of
   "" -> ""
   w  -> "\n\n" <> w
 
--- | Compact one-line closure-coverage footer for /non-empty/ list answers
--- ('querySearch'): hits over a partial closure are still a partial answer,
--- but repeating the full 'orphanWarning' on every hit list would drown the
--- results. Count-only; @status@ carries the detail. Empty when nothing is
--- orphaned (the common case), like 'coverageNote'.
+-- | Compact one-line closure-coverage footer for /non-empty/ answers of the
+-- enumeration / cone tools (@search@ / @callers@ / @callees@ / @impact@ /
+-- @roots@): results over a partial closure are still a partial answer, but
+-- repeating the full 'orphanWarning' on every result would drown them.
+-- Count-only; @status@ carries the detail. Empty when nothing is orphaned
+-- (the common case), like 'coverageNote'.
 coverageFootnote :: Loaded -> Text
 coverageFootnote ld = case ldOrphanFiles ld of
   [] -> ""
   fs -> "\n(⚠ " <> tshow (length fs)
           <> " source file(s) outside the entry closure are invisible to "
-          <> "this search — see `status`)"
+          <> "this query — see `status`)"
 
 -- | Does @name@ resolve to a definition in this snapshot? Uses the full
 -- 'resolveDefNote' resolver (not bare 'lookupDef'), so a legitimately
@@ -607,14 +608,18 @@ edgesQuery wantReverse ld transitive mPrefix mProvTxt byMod lim fmt name =
            FmtText ->
              note <> (if n == 0
                         then "`" <> name <> "` has no " <> what <> scopeNote <> provNote <> "."
-                        else tshow n <> " " <> what <> scopeNote <> provNote <> " of `" <> name <> "`:\n" <> body)
+                        else tshow n <> " " <> what <> scopeNote <> provNote <> " of `" <> name <> "`:\n" <> body
+                                 <> coverageFootnote ld)
            FmtJson ->
              -- provenance is a direct-edge notion (matches 'provBulletList'
              -- being used only on the direct, non-by_module branch).
              let wantProv = not transitive && not byMod
                  items = [ defItem dx (if wantProv then provOf (defId dx) else Nothing)
                          | dx <- take lim ds ]
-             in listEnvelope tool queryObj (Just (defName d)) n [] items
+             in listEnvelope tool queryObj (Just (defName d)) n
+                  [ "unsearched_files" .= length (ldOrphanFiles ld)
+                  | not (null (ldOrphanFiles ld)) ]
+                  items
 
 -- | Like 'bulletList' but annotates each line with its edge provenance
 -- (when the graph carries tags). Used for direct callers/callees.
@@ -640,7 +645,7 @@ queryImpact ld lim name = case resolveDefNote ld name of
         topMods = take 12 (sortBy (comparing (Down . snd)) byMod)
     in if IS.null trans
          then "Changing `" <> name <> "` is safe: nothing depends on it."
-         else T.unlines $
+         else (<> coverageFootnote ld) $ T.unlines $
            [ "Changing `" <> name <> "` (its type/signature) could affect:"
            , "  " <> tshow (IS.size trans) <> " definition(s) transitively, "
                   <> tshow (IS.size direct) <> " directly."
@@ -848,7 +853,7 @@ queryRoots ld lim byMod chains mModPrefix mKindTxt mStateTxt name =
                               <> "` (transitive)"
                               <> (if byMod || not chains then ":"
                                                          else ", each with a witnessing chain:")
-                              <> "\n" <> body
+                              <> "\n" <> body <> coverageFootnote ld
         in selfNote d <> tail'
   where
     mKind  = mKindTxt  >>= parseKind

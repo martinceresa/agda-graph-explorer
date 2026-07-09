@@ -221,10 +221,13 @@ interactTools =
       runDiscard
 
   , Tool "check"
-      "Type-check a module in the live session → ✓/✗, every error and warning, \
+      "[prove] Type-check a module in the live session → ✓/✗, every error and warning, \
       \and open goals with stable ids + (line:col); when goals remain it probes \
       \them with Mimer and reports ready-made solutions inline. Pass `content` \
-      \to dry-run proposed text without writing. Use instead of `agda <file>`."
+      \to dry-run proposed text without writing. Use instead of `agda <file>`. \
+      \When a goal is stuck, reach for `lemmas` (find a reusable lemma), `auto` \
+      \(Mimer with graph-ranked hints), or `case_split` BEFORE writing the term \
+      \by hand — that is exactly when these tools pay off."
       (objSchema [ ("file", sp "Path to the .agda / .lagda.md module (relative to the project root, or absolute).")
                  , ("content", sp "Proposed full file text to validate instead of the on-disk file (dry-run; nothing is written).")
                  ] ["file"])

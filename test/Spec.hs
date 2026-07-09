@@ -233,8 +233,10 @@ iotcmTests =
 
 ----------------------------------------------------------------------
 -- agda-unused: the dead-definition check must not count a def's own
--- recursive call as a caller (I5), while a real intra-module caller
--- still demotes dead → internal-only.
+-- recursive call as a caller (I5 self-recursion), nor treat a
+-- mutual-recursion cycle whose only callers are its own members as
+-- live (I5 dead-cycle half), while a real *external* intra-module or
+-- cross-module caller still keeps the defs off the dead list.
 
 unusedGraphJson :: BL.ByteString
 unusedGraphJson = BLC.pack $ unlines
@@ -279,25 +281,123 @@ unusedSrc = T.unlines
   , "caller = helper + busy zero"
   ]
 
+-- | A ↔ B mutual recursion with NO external entry: both are dead as a
+-- unit, but each is the other's intra-module caller — the case the
+-- self-recursion fix does not cover.
+cycleDeadJson :: BL.ByteString
+cycleDeadJson = BLC.pack $ unlines
+  [ "{ \"v\": 2, \"mode\": \"expanded\", \"schemaVersion\": 2"
+  , ", \"modules\": [\"Cyc\"]"
+  , ", \"moduleFiles\": { \"Cyc\": \"/t/Cyc.agda\" }"
+  , ", \"definitions\":"
+  , "  [ { \"name\": \"Cyc.cycA\", \"module\": \"Cyc\", \"kind\": \"function\", \"state\": \"D\" }"
+  , "  , { \"name\": \"Cyc.cycB\", \"module\": \"Cyc\", \"kind\": \"function\", \"state\": \"D\" }"
+  , "  ]"
+  , ", \"definitionEdges\":"
+  , "  [ [\"Cyc.cycA\", \"Cyc.cycB\"]"
+  , "  , [\"Cyc.cycB\", \"Cyc.cycA\"]"
+  , "  ]"
+  , "}"
+  ]
+
+cycleSrc :: Text
+cycleSrc = T.unlines
+  [ "module Cyc where"
+  , ""
+  , "cycA : Nat -> Nat"
+  , "cycA zero = zero"
+  , "cycA (suc n) = cycB n"
+  , ""
+  , "cycB : Nat -> Nat"
+  , "cycB zero = zero"
+  , "cycB (suc n) = cycA n"
+  ]
+
+-- | The same A ↔ B cycle PLUS a cross-module caller of A. Now the cycle
+-- is reachable from outside, so neither member is dead: A has a real
+-- user, B stays internal-only (reachable only via A).
+cycleLiveJson :: BL.ByteString
+cycleLiveJson = BLC.pack $ unlines
+  [ "{ \"v\": 2, \"mode\": \"expanded\", \"schemaVersion\": 2"
+  , ", \"modules\": [\"Cyc\", \"Client\"]"
+  , ", \"moduleFiles\": { \"Cyc\": \"/t/Cyc.agda\", \"Client\": \"/t/Client.agda\" }"
+  , ", \"definitions\":"
+  , "  [ { \"name\": \"Cyc.cycA\",     \"module\": \"Cyc\",    \"kind\": \"function\", \"state\": \"D\" }"
+  , "  , { \"name\": \"Cyc.cycB\",     \"module\": \"Cyc\",    \"kind\": \"function\", \"state\": \"D\" }"
+  , "  , { \"name\": \"Client.use\",   \"module\": \"Client\", \"kind\": \"function\", \"state\": \"D\" }"
+  , "  ]"
+  , ", \"definitionEdges\":"
+  , "  [ [\"Cyc.cycA\",   \"Cyc.cycB\"]"
+  , "  , [\"Cyc.cycB\",   \"Cyc.cycA\"]"
+  , "  , [\"Client.use\", \"Cyc.cycA\"]"
+  , "  ]"
+  , "}"
+  ]
+
+cycleClientSrc :: Text
+cycleClientSrc = T.unlines
+  [ "module Client where"
+  , ""
+  , "open import Cyc"
+  , ""
+  , "use : Nat -> Nat"
+  , "use n = cycA n"
+  ]
+
+-- | Decode a fixture graph and hand the resulting findings to the
+-- assertion builder; a decode failure surfaces as a single failing
+-- check.
+fixtureChecks
+  :: BL.ByteString -> [(FilePath, Text)] -> ([Finding] -> [Check]) -> [Check]
+fixtureChecks json files asserts =
+  case eitherDecode json :: Either String ExpandedGraph of
+    Left err -> [ check ("unused fixture graph decodes: " ++ err) False ]
+    Right g  -> asserts (analyse g files)
+
 unusedDeadTests :: [Check]
-unusedDeadTests = case eitherDecode unusedGraphJson :: Either String ExpandedGraph of
-  Left err -> [ check ("unused fixture graph decodes: " ++ err) False ]
-  Right g ->
-    let findings = analyse g [("/t/Deadwood.agda", unusedSrc)]
-        kindOf sh = [ kindFinding f | f <- findings, symbolFinding f == Just sh ]
-        noteOf sh = [ n | f <- findings, symbolFinding f == Just sh
-                        , Just n <- [noteFinding f] ]
-    in
-    [ checkEq "self-recursive def with no other callers is dead"
-        [DefinedDead] (kindOf "deadC")
-    , check "dead recursive note says so"
-        (any ("recursive" `T.isInfixOf`) (noteOf "deadC"))
-    , checkEq "plain dead def still dead" [DefinedDead] (kindOf "deadA")
-    , checkEq "self-recursion plus a real intra caller stays internal-only"
-        [DefinedInternalOnly] (kindOf "busy")
-    , checkEq "intra-module-called def stays internal-only"
-        [DefinedInternalOnly] (kindOf "helper")
-    ]
+unusedDeadTests = concat
+  [ fixtureChecks unusedGraphJson [("/t/Deadwood.agda", unusedSrc)] $ \findings ->
+      let kindOf sh = [ kindFinding f | f <- findings, symbolFinding f == Just sh ]
+          noteOf sh = [ n | f <- findings, symbolFinding f == Just sh
+                          , Just n <- [noteFinding f] ]
+      in
+      [ checkEq "self-recursive def with no other callers is dead"
+          [DefinedDead] (kindOf "deadC")
+      , check "dead recursive note says so"
+          (any ("recursive" `T.isInfixOf`) (noteOf "deadC"))
+      , checkEq "plain dead def still dead" [DefinedDead] (kindOf "deadA")
+      , checkEq "self-recursion plus a real intra caller stays internal-only"
+          [DefinedInternalOnly] (kindOf "busy")
+      , checkEq "intra-module-called def stays internal-only"
+          [DefinedInternalOnly] (kindOf "helper")
+      ]
+
+  , fixtureChecks cycleDeadJson [("/t/Cyc.agda", cycleSrc)] $ \findings ->
+      let kindOf sh = [ kindFinding f | f <- findings, symbolFinding f == Just sh ]
+          noteOf sh = [ n | f <- findings, symbolFinding f == Just sh
+                          , Just n <- [noteFinding f] ]
+      in
+      [ checkEq "dead mutual cycle: cycA is dead" [DefinedDead] (kindOf "cycA")
+      , checkEq "dead mutual cycle: cycB is dead" [DefinedDead] (kindOf "cycB")
+      , check "dead-cycle note says so and names the peer"
+          (any (\n -> "dead cycle" `T.isInfixOf` n && "cycB" `T.isInfixOf` n)
+               (noteOf "cycA"))
+      , check "dead-cycle note names the peer for cycB too"
+          (any ("cycA" `T.isInfixOf`) (noteOf "cycB"))
+      ]
+
+  , fixtureChecks cycleLiveJson
+      [("/t/Cyc.agda", cycleSrc), ("/t/Client.agda", cycleClientSrc)] $ \findings ->
+      let kindOf sh = [ kindFinding f | f <- findings, symbolFinding f == Just sh ]
+      in
+      [ check "reachable cycle: cycA is NOT dead"
+          (DefinedDead `notElem` kindOf "cycA")
+      , check "reachable cycle: cycB is NOT dead"
+          (DefinedDead `notElem` kindOf "cycB")
+      , checkEq "reachable cycle: cycB stays internal-only (via cycA)"
+          [DefinedInternalOnly] (kindOf "cycB")
+      ]
+  ]
 
 ----------------------------------------------------------------------
 -- Fixture replay — the protocol-skew tripwire.

@@ -84,6 +84,8 @@ import           System.Mem           (performMajorGC)
 import           System.Process       (CreateProcess (..), proc,
                                        readCreateProcessWithExitCode)
 
+import           Numeric              (showHex)
+import           AgdaGraph.GoalCanon   (hashString)
 import           AgdaGraph.Glob       (globMatch)
 import           AgdaGraph.Index      (Index, buildIndexLean, idxDefs, idxRealCount)
 import           AgdaGraph.Schema     (Definition (..), ExpandedGraph (..))
@@ -111,6 +113,7 @@ data Config = Config
   , cfgPreloaded    :: !Bool             -- ^ True: user supplied a fixed graph; never rebuild.
   , cfgDepsBin      :: !(Maybe FilePath) -- ^ explicit @agda-deps@ path.
   , cfgUnusedBin    :: !(Maybe FilePath) -- ^ explicit @agda-unused@ path.
+  , cfgRgBin        :: !(Maybe FilePath) -- ^ explicit @rg@ (ripgrep) path for @search mode=text@; else @$AGDA_EXPLORE_RG@ / @$PATH@.
   , cfgWithHashes   :: !Bool             -- ^ pass @--with-term-hashes@ on rebuild.
   , cfgWithSigs     :: !Bool             -- ^ pass @--with-signatures@ on rebuild.
   , cfgNormaliseSigs :: !Bool            -- ^ pass @--normalise-signatures@ on rebuild.
@@ -149,6 +152,7 @@ defaultConfig = Config
   , cfgPreloaded    = False
   , cfgDepsBin      = Nothing
   , cfgUnusedBin    = Nothing
+  , cfgRgBin        = Nothing
   , cfgWithHashes   = True
   , cfgWithSigs     = True
   , cfgNormaliseSigs = False
@@ -238,6 +242,26 @@ data Loaded = Loaded
     -- (already @coverage-ignore@-filtered), so invisible to queries.
     -- Surfaced by @status@ and by the empty-result coverage note. Empty in
     -- preloaded mode.
+  , ldStaleVsSource :: !Bool
+    -- ^ At snapshot-construction time, the backing graph file was older
+    -- than the newest source under the include roots — i.e. the graph
+    -- predates an edit. Computed once (zero query-hot-path cost); 'False'
+    -- when the graph has no single backing file (in-memory union) or no
+    -- include roots are known (bare @--graph@, nothing to compare). Drives
+    -- a source-staleness footer that also fires in preloaded mode, which
+    -- 'ensureFresh' otherwise reports as never-stale (R1).
+  , ldConfigHash  :: !Text
+    -- ^ Canonical identity digest of the graph's /configuration/: the
+    -- build-date-stripped producer fingerprint, node-key + schema version,
+    -- and the producer flag set (live mode). Stable across machines/dates
+    -- for the same build recipe, so a consumer can key regressions on it
+    -- (arena R9). See 'graphIdentity'.
+  , ldContentHash :: !Text
+    -- ^ Digest of the graph's /content/: a fold over the sorted real-def
+    -- set (name + kind + state). Changes when definitions are added or
+    -- silently dropped, so it is the tripwire that makes a partial-build
+    -- def drop (I6) visible in @status@ even when everything else looks
+    -- fresh. See 'graphIdentity'.
   }
 
 -- | Is this snapshot's node-key format current? When 'False' in live
@@ -630,7 +654,20 @@ loadedFromGraph cfg mGraphFile egProject = do
   -- graph's closure, not the overlay-merged one (overlay files live outside
   -- the project include roots anyway).
   orphans <- computeOrphanFiles (cfgIncludes cfg) (cfgCoverageIgnore cfg) egProject
+  -- Source-vs-graph staleness, computed once here (see 'ldStaleVsSource'):
+  -- the newest source mtime (from the scan just done) strictly newer than
+  -- the backing graph file's mtime means the graph predates an edit. Only
+  -- meaningful with a single backing file and known include roots.
+  staleVsSrc <- case mGraphFile of
+    Just gp | not (null (cfgIncludes cfg)) -> do
+      mg <- safeMtime gp
+      let ScanSig _ mNewest = sig
+      pure $ case (mNewest, mg) of
+        (Just newest, Just gmt) -> newest > gmt
+        _                       -> False
+    _ -> pure False
   let nkv = egNodeKeyVersion eg
+      (configHash, contentHash) = graphIdentity cfg eg rds
   if nkv < currentNodeKeyVersion
     then hPutStrLn stderr
            ("agda-explore: " ++ maybe "graph" id mGraphFile
@@ -654,7 +691,63 @@ loadedFromGraph cfg mGraphFile egProject = do
     , ldSubtermFp = subtermMultisetsVec ix
     , ldAutoResolveUnique = cfgAutoResolveUnique cfg
     , ldOrphanFiles = orphans
+    , ldStaleVsSource = staleVsSrc
+    , ldConfigHash  = configHash
+    , ldContentHash = contentHash
     }
+
+-- | Canonical @(config, content)@ identity digests for a snapshot (arena
+-- R9; the content half also tripwires I6's silent def drops). Both are the
+-- vendored Murmur64 ('AgdaGraph.GoalCanon.hashString', 16-hex-digit) over a
+-- canonical rendering — no new dependency, and 64 bits is ample for an
+-- identity tripwire.
+--
+--   * /config/ — the build recipe: the build-date-stripped producer
+--     fingerprint (so it is stable across machines and rebuild dates),
+--     node-key + schema version, and the producer flag set
+--     ('buildBaseArgs'; empty in preloaded mode, which does not rebuild).
+--     Not byte-compatible with the arena's own hash (theirs folds in an
+--     arena-side seed sha), so @status@ prints the ingredients too and the
+--     arena composes its own.
+--   * /content/ — one line per real def (@name TAB kind TAB state@), sorted,
+--     so it is order-independent and changes iff the def set changes.
+graphIdentity :: Config -> ExpandedGraph -> [Definition] -> (Text, Text)
+graphIdentity cfg eg rds = (hex configMaterial, hex contentMaterial)
+  where
+    hex = T.pack . pad . flip showHex "" . hashString
+    pad h = replicate (16 - length h) '0' ++ h
+    configMaterial = unlines $
+      [ "producer=" ++ maybe "" (T.unpack . stripBuilt) (egProducer eg)
+      , "nodeKeyVersion=" ++ show (egNodeKeyVersion eg)
+      , "schemaVersion=2"
+      ] ++ [ "flag=" ++ f | f <- buildFlagsFor cfg ]
+    contentMaterial = unlines $ sort
+      [ T.unpack (defName d) ++ "\t" ++ show (defKind d) ++ "\t" ++ show (defState d)
+      | d <- rds ]
+
+-- | The producer flag set that identifies a graph's build recipe. Empty in
+-- preloaded mode (the user supplied a fixed graph; no rebuild flags apply),
+-- else the shared 'buildBaseArgs' minus the volatile include-dir paths
+-- (machine-specific; excluded so the hash is portable).
+buildFlagsFor :: Config -> [String]
+buildFlagsFor cfg
+  | cfgPreloaded cfg = []
+  | otherwise        = filter (/= "-i") (dropIncludes (buildBaseArgs cfg))
+  where
+    -- @-i DIR@ come in pairs at the end of 'buildBaseArgs'; drop both.
+    dropIncludes ("-i" : _ : rest) = dropIncludes rest
+    dropIncludes (x : rest)        = x : dropIncludes rest
+    dropIncludes []                = []
+
+-- | Strip a @, built <date>,@ segment from a producer fingerprint so the
+-- config identity hash is stable across rebuild dates (mirrors the arena's
+-- @,\\s*built[^,]*,@ → @,@ rule). No-op when there is no such segment.
+stripBuilt :: Text -> Text
+stripBuilt t = case T.breakOn ", built" t of
+  (_, "")     -> t
+  (pre, rest) -> case T.breakOn "," (T.drop (T.length ", built") rest) of
+    (_, "")        -> pre                       -- no closing comma: drop the tail
+    (_, afterComma) -> pre <> afterComma        -- rejoin at the next comma
 
 -- | Precompute the @where@-/anonymous-module owner lookup consumed by
 -- 'AgdaMcp.Query.ownerOf'. For every /local/ def with a known line, find

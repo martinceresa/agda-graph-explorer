@@ -9,48 +9,36 @@ open items below (designs, files, verification gates) is in
 
 ---
 ## Ideas
-- [ ] Reduce MCP tools: group the most used tools so agents know what to call.
+- [x] Reduce MCP tools: group the most used tools so agents know what to call.
+  (2026-07-09: category tags `[orient]`/`[find]`/`[trace]`/`[reuse]`/`[audit]`
+  on the read tools + `[prove]` and a when-stuck routing note on `check`.
+  Full catalogue *reduction* still open, gated on the uptake-when-stuck
+  measurement — see the VerinaAgda re-run below.)
 
 ## Open
 
-- [ ] **Per-answer staleness signal** (arena R1; relates I6). Enrich
-  `staleFooter` (Tools.hs) with graph-mtime vs source-mtime, and extend
-  beyond live mode — preloaded snapshots are hardcoded never-stale
-  (`ensureFresh`), so a `--graph` behind the working tree answers with full
-  confidence.
-- [ ] **`search mode=text` ripgrep fallback** (arena R3). When the query
-  looks textual (pragmas, comments, regex), shell out to `rg` so the MCP is
-  a superset of grep instead of a different-shaped subset. Model on
-  `runUnused`'s shell-out (`findBin` + `readCreateProcessWithExitCode`).
 - [ ] **Adopt the arena CI regression gate** (arena R8; deliverable in
   `MCPBenchArena/ci/` — workflow + `ci_gate.py` asserting G1–G4:
   find_lemma 10/10, misleading-* ties, live lemmas/auto). Friction: our CI
   is deliberately Agda-free; the gate needs agda 2.9 + agda-deps +
   registered agda-stdlib 2.4 + the arena repo pinned + in-CI stdlib graph
-  builds. Budget as a new Agda-in-CI job, not an extra step.
-- [ ] **Canonical graph identity hash in `status`** (arena R9). Their recipe
-  (`arenalib.graph_config_hash`): sha256[:12] of sorted-JSON {producer
-  flags, seed sha, build-date-stripped `producer`, `nodeKeyVersion`,
-  `schemaVersion`}. A def-set-covering variant would also make I6's silent
-  def drops visible.
-- [ ] **Per-answer closure-coverage count beyond `search`** (arena R2
-  follow-up; `search` got the compact footer + `unsearched_files` JSON field
-  2026-07-09).
-- [ ] **Dead mutual-recursion cycles** (I5 open half). SCC pass over the
-  intra-module qname edges in `AgdaUnused.Analysis` flagging cycles with no
-  external entry (`Data.Graph.stronglyConnComp`; the Index-side `Condense`
-  isn't reusable there).
+  builds. Budget as a new Agda-in-CI job, not an extra step. Staging plan in
+  [ToFix.md](ToFix.md) §6 (offline G1+G2 first via cached graphs, live
+  G3+G4 second).
 
-- [ ] Check VerinaAgda benchmark and try to close the gap.
+- [ ] Check VerinaAgda benchmark and try to close the gap. Now unblocked:
+  the I1/I2 retrieval + hint fixes landed and the ergonomics tags shipped —
+  re-run the A/B with the sig graph + availability hint and record *per-rung*
+  uptake-when-stuck (the powered-P1 gap). See [ToFix.md](ToFix.md) §7.
 - [ ] Stdlib federation follow-ups (base landed 2026-07-05 — see Changelog:
   `--overlay-graph` / `overlay-graphs:` + `scripts/build-stdlib-graph.sh`).
   Remaining: auto-build + auto-register a stdlib overlay on first run (warm
   compilation), and a producer flag keeping cross-boundary external edges as
   dangling refs (would let `callers`/`impact` cross into the overlay — belongs
-  in the `agda-deps` repo).
-- [ ] `format: json` for `unused` (deferred): it shells out to `agda-unused`,
-  so JSON means threading a stdout-JSON flag through the subprocess, not the
-  in-process row split the other list tools got. Low priority.
+  in the `agda-deps` repo). Consumer-side design in [ToFix.md](ToFix.md) §8.
+- [ ] **Per-answer closure-coverage beyond the cone tools** (arena R2, final
+  slice): `search`/`callers`/`callees`/`impact`/`roots` now carry the count;
+  extend to `brief`/`path` if measurement shows it helps.
 
 - [ ] **Round-6 P5 follow-up: structural goal canonicalisation.** `agda-goals`
   canonicalises goal types textually (whitespace + alpha-rename) because
@@ -72,6 +60,12 @@ open items below (designs, files, verification gates) is in
 
 ## Shipped — see Changelog
 
+- [x] Arena-feedback round 2 (2026-07-09) — the ToFix.md batch: I6 partial-graph
+  flagging + R1 source-staleness footer (incl. preloaded mode), R9 graph
+  identity hashes in `status`, I5 dead mutual-recursion cycles, R2 coverage
+  counts on `callers`/`callees`/`impact`/`roots`, R3 `search mode=text`
+  (ripgrep), R7 tool-catalogue tags + when-stuck nudge, `format:json` for
+  `unused`. Arena gate G1–G4 re-verified green.
 - [x] Arena-feedback quick wins (2026-07-09) — `similar_types` false-100 cap
   (I4), recursive dead code flagged by `unused` (I5 self-recursion half),
   `search` per-answer closure-coverage count, advisor blurbs on

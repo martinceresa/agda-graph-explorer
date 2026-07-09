@@ -7,22 +7,28 @@ Each item: the problem, the fix design, where it goes, size, and how to
 verify. Ordered by priority (correctness first, then leverage per effort).
 Items in [Deferred.md](Deferred.md) stay deferred and are not re-planned here.
 
+**Status (2026-07-09):** items 1–5, 9, 10 are **DONE** (shipped this session;
+see [Changelog.md](Changelog.md) and Issues I5/I6). Item 1 is done as a
+*mitigation* — every affected answer is flagged; the complete producer-side
+fix is I6c under section P. Items 6, 7, 8, 11 remain; the section text below is
+the standing design for them.
+
 Quick map:
 
-| # | Item | Source | Size | Kind |
-|---|------|--------|------|------|
-| 1 | Partial-graph commit + staleness cluster | I6, R1, R10 | M | correctness |
-| 2 | Dead mutual-recursion cycles (SCC) | I5 open half | S–M | correctness |
-| 3 | Graph identity hash in `status` | R9 | S | feature |
-| 4 | Coverage counts beyond `search` | R2 follow-up | S | feature |
-| 5 | `search mode=text` (ripgrep fallback) | R3 | M | feature |
-| 6 | Arena CI regression gate | R8 | L | process |
-| 7 | VerinaAgda A/B re-run | TODO | M | benchmark |
-| 8 | Stdlib overlay auto-build | TODO | M | feature |
-| 9 | Tool-catalogue grouping | TODO idea | S | ergonomics |
-| 10 | `format: json` for `unused` | TODO | S | feature |
-| 11 | Structural goal canonicalisation | TODO (P5) | L | deferred-ish |
-| P | Producer-side items to file in agda-deps | R12, R14, I6c | — | cross-repo |
+| # | Item | Source | Size | Kind | Status |
+|---|------|--------|------|------|--------|
+| 1 | Partial-graph commit + staleness cluster | I6, R1, R10 | M | correctness | **done** (mitigated; I6c → agda-deps) |
+| 2 | Dead mutual-recursion cycles (SCC) | I5 open half | S–M | correctness | **done** |
+| 3 | Graph identity hash in `status` | R9 | S | feature | **done** |
+| 4 | Coverage counts beyond `search` | R2 follow-up | S | feature | **done** |
+| 5 | `search mode=text` (ripgrep fallback) | R3 | M | feature | **done** |
+| 6 | Arena CI regression gate | R8 | L | process | open (staged plan below) |
+| 7 | VerinaAgda A/B re-run | TODO | M | benchmark | open (now unblocked) |
+| 8 | Stdlib overlay auto-build | TODO | M | feature | open |
+| 9 | Tool-catalogue grouping | TODO idea | S | ergonomics | **done** (tags; reduction still gated on §7) |
+| 10 | `format: json` for `unused` | TODO | S | feature | **done** (simpler than planned — `--json-out` already stdout) |
+| 11 | Structural goal canonicalisation | TODO (P5) | L | deferred-ish | parked (unchanged) |
+| P | Producer-side items to file in agda-deps | R12, R14, I6c | — | cross-repo | open (agda-deps) |
 
 ---
 

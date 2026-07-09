@@ -2,6 +2,52 @@
 
 ## Unreleased
 
+### Arena-feedback round 2: staleness signals, graph identity, dead cycles, text search (2026-07-09)
+
+The [ToFix.md](ToFix.md) batch — the correctness + feature items from the
+MCPBenchArena triage. Arena CI gate (G1–G4) re-verified green; the
+`interaction-spec` suite (now including the dead-cycle cases) passes; the
+`agda-unused` `-N1`/`-N4` byte-identity determinism test holds.
+
+- **Partial-graph flagging (I6) + source staleness (R1).** A parse error
+  under the default `--keep-going` producer drops the offending module's defs
+  while the build still exits 0, so a "no match" read as authoritative. Every
+  read answer (and `unused`) whose snapshot has failed/unparseable modules now
+  carries a `# partial:` footer; a snapshot whose graph file predates a source
+  edit (`ldStaleVsSource`, computed once at load) carries a `# stale:` footer
+  that **also fires in preloaded mode** (previously hardcoded never-stale).
+  Footers are suppressed on `format:json` answers (`appendTextFooters`) — which
+  also fixes a latent bug where `staleFooter` could corrupt a JSON envelope.
+  The withhold behaviour stays opt-in via `--require-well-typed` (withholding
+  by default would throw away the partial progress of modules that did build).
+- **Graph identity hashes in `status` (R9).** `status` now prints
+  `graph id: config=… content=…` — a config digest (build-date-stripped
+  producer + node-key/schema version + producer flags; stable across
+  machines/dates) and a content digest (a fold over the sorted def
+  name/kind/state set). The content hash makes a silent def drop (I6) visible;
+  both use the vendored Murmur64, no new dependency. `status` also lists any
+  failed modules and the source-vs-graph flag.
+- **Dead mutual-recursion cycles (I5, second half).** `agda-unused --kinds=dead`
+  now flags an `A ↔ B` cycle with no external entry (an SCC pass via
+  `Data.Graph.stronglyConnComp` over per-module intra-edges; a size-≥2
+  `CyclicSCC` is dead iff no member has a cross-module user or an
+  outside-the-SCC intra caller). Note: `deletion candidate (dead cycle with …)`.
+- **Coverage counts beyond `search` (R2).** `callers`/`callees`/`impact`/`roots`
+  now carry the same one-line closure-coverage footer on non-empty text
+  answers, and `callers`/`callees` add `unsearched_files` to the JSON envelope.
+- **`search mode=text` (R3).** A new `mode=text` shells out to ripgrep over the
+  source bytes (`findBin "rg"` / `$AGDA_EXPLORE_RG`), so pragmas, comments,
+  `using`-lists and regex — which the definition/edge index can't see — are
+  reachable; results are always current (read off disk, not the snapshot).
+  Makes `search` a superset of grep rather than a different-shaped subset.
+- **Tool ergonomics (R7).** Category tags (`[orient]`/`[find]`/`[trace]`/
+  `[reuse]`/`[audit]`) on the read-tool descriptions and `[prove]` on `check`,
+  which also gained a "when a goal is stuck, reach for `lemmas`/`auto`/
+  `case_split` before writing by hand" routing note.
+- **`format:json` for `unused`.** The `unused` tool takes `format:json` and
+  passes `--json-out` to agda-unused (which already emits the array to stdout),
+  returning it verbatim.
+
 ### Arena-feedback fixes: false-100 similarity, recursive dead code, per-answer coverage (2026-07-09)
 
 First batch from the MCPBenchArena upstream-request triage (R1–R14 →

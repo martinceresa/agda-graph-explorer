@@ -19,8 +19,10 @@ module AgdaUnused.Analysis
 
 import           Control.DeepSeq            ( NFData(..), rnf )
 import           Control.Parallel.Strategies ( parBuffer, rdeepseq, using )
+import           Data.Graph      ( SCC(..), stronglyConnComp )
 import           Data.List       ( foldl' )
 import qualified Data.Map.Strict as M
+import           Data.Maybe      ( fromMaybe, isJust )
 import qualified Data.Set        as S
 import           Data.Text       ( Text )
 import qualified Data.Text       as T
@@ -171,6 +173,16 @@ data Context = Context
     -- the in-file token-count fallback: a recursive def's own RHS
     -- mentions would otherwise read as evidence of use, shielding
     -- dead recursive defs from the deletion-candidate flag.
+  , ctxDeadCycles       :: !(M.Map (Text, Text) (S.Set Text))
+    -- ^ (module, short-name) -> the OTHER short-names in the same
+    -- dead mutual-recursion cycle. A key is present iff the def
+    -- belongs to an intra-module SCC of size >= 2 that no external
+    -- entry reaches (no member has a cross-module / re-export user, or
+    -- an intra-module caller from outside the SCC). One level up from
+    -- 'ctxSelfRecursive': the members are only each other's callers, so
+    -- the graph shows intra-module callers yet the cycle is dead as a
+    -- unit. The @dead@ check treats a keyed def as 'DefinedDead' and
+    -- names the mapped peers in the finding note.
   , ctxAllModules       :: !(S.Set Text)
   , ctxRxShortsByHost   :: !(M.Map Text (S.Set Text))
     -- ^ For each *host* module @H@ (the module that bears the
@@ -275,13 +287,18 @@ buildContext ExpandedGraph{..} bodies =
       maxDepth [] = 0
       maxDepth xs = maximum xs
 
-      -- Per-edge ingest, building the four usage indices in one pass.
+      -- Per-edge ingest, building the usage indices in one pass.
       -- Intra-module edges still populate 'intraModUsedQ' (used by the
       -- @defined@ check to distinguish dead vs internal-only) — except
       -- self-edges: a recursive call is not a caller, so counting it
       -- would shield a dead recursive def from the @dead@ check. Those
       -- are remembered in 'selfRec0' instead ('ctxSelfRecursive').
-      ingestEdge (src, dst) (!usersMod, !usedQ, !usersQ, !intraQ, !selfRec) =
+      -- Non-self intra edges ALSO feed 'intraEs' — a per-module directed
+      -- caller->callee short-name edge list — which the SCC pass below
+      -- ('computeDeadCycles') needs to find dead mutual-recursion cycles
+      -- (the 'intraModUsedQ' map loses the source structure a graph
+      -- needs).
+      ingestEdge (src, dst) (!usersMod, !usedQ, !usersQ, !intraQ, !selfRec, !intraEs) =
         let srcMod = moduleOfQName src
             dstMod = moduleOfQName dst
             dstSh  = shortNameOf dst dstMod
@@ -290,21 +307,22 @@ buildContext ExpandedGraph{..} bodies =
               then if src == dst
                 then
                   let !s = S.insert (dstMod, dstSh) selfRec
-                  in (usersMod, usedQ, usersQ, intraQ, s)
+                  in (usersMod, usedQ, usersQ, intraQ, s, intraEs)
                 else
-                  let !i = M.insertWith S.union (dstMod, dstSh)
-                            (S.singleton srcSh) intraQ
-                  in (usersMod, usedQ, usersQ, i, selfRec)
+                  let !i  = M.insertWith S.union (dstMod, dstSh)
+                             (S.singleton srcSh) intraQ
+                      !ie = M.insertWith (++) dstMod [(srcSh, dstSh)] intraEs
+                  in (usersMod, usedQ, usersQ, i, selfRec, ie)
               else
                 let !u1 = M.insertWith S.union dstMod (S.singleton srcMod) usersMod
                     !u2 = M.insertWith S.union srcMod (S.singleton (dstMod, dstSh)) usedQ
                     !u3 = M.insertWith S.union (dstMod, dstSh)
                             (S.singleton srcMod) usersQ
-                in (u1, u2, u3, intraQ, selfRec)
+                in (u1, u2, u3, intraQ, selfRec, intraEs)
 
-      (usersMod0, usedQ0, usersQ0, intraModUsedQ0, selfRec0) =
+      (usersMod0, usedQ0, usersQ0, intraModUsedQ0, selfRec0, intraEdges0) =
         foldl' (\acc e -> ingestEdge e acc)
-               (M.empty, M.empty, M.empty, M.empty, S.empty) egDefinitionEdges
+               (M.empty, M.empty, M.empty, M.empty, S.empty, M.empty) egDefinitionEdges
 
       usedShortInMod = M.map (S.map snd) usedQ0
 
@@ -340,6 +358,12 @@ buildContext ExpandedGraph{..} bodies =
       rxShortsByPair = M.fromListWith S.union
         [ ((host, src), shorts) | (host, src, shorts) <- rxRows ]
 
+      -- Dead mutual-recursion cycles: per-module SCC pass over the
+      -- intra-module call graph (self-edges already excluded), keeping
+      -- only SCCs no external entry reaches (see 'computeDeadCycles').
+      deadCycles0 =
+        computeDeadCycles intraEdges0 intraModUsedQ0 usersQ0 rxBySrcQ
+
   in Context
        { ctxModuleByFile     = moduleByFile
        , ctxDefShortByModule = defShortByMod
@@ -349,6 +373,7 @@ buildContext ExpandedGraph{..} bodies =
        , ctxUsersOfQName     = usersQ0
        , ctxIntraModUsedQ    = intraModUsedQ0
        , ctxSelfRecursive    = selfRec0
+       , ctxDeadCycles       = deadCycles0
        , ctxAllModules       = S.fromList egModules
        , ctxRxShortsByHost   = rxShortsByHost
        , ctxRxBySourceQ      = rxBySrcQ
@@ -489,11 +514,17 @@ definedButUnused ctx fp thisMod shorts =
   [ Finding
       { fileFinding   = fp
       , lineFinding   = M.findWithDefault 0 (thisMod, sh) (ctxDefLineByQ ctx)
-      , kindFinding   = if S.null intra then DefinedDead else DefinedInternalOnly
+      , kindFinding   = if dead then DefinedDead else DefinedInternalOnly
       , moduleFinding = thisMod
       , symbolFinding = Just sh
-      , noteFinding   = Just $ if S.null intra
-          then if selfRec
+      , noteFinding   = Just $
+          if isCycle
+            -- A mutual-recursion cycle no external entry reaches: the
+            -- graph shows intra-module callers, but they are only each
+            -- other, so the cycle is dead as a unit.
+            then "deletion candidate (dead cycle with " <> peersText <> ")"
+          else if S.null intra
+            then if selfRec
                  -- The elaborator never inlines a recursive def, so the
                  -- Phase-A inlined-callee worry below doesn't apply here.
                  then "deletion candidate (recursive: its only callers are its own calls)"
@@ -507,17 +538,32 @@ definedButUnused ctx fp thisMod shorts =
       , confFinding   = if S.null intra && trivial && not selfRec then Low else High
       }
   | sh <- S.toAscList shorts
-  , let trivial = (thisMod, sh) `S.member` ctxTrivialBody ctx
-        selfRec = (thisMod, sh) `S.member` ctxSelfRecursive ctx
+  , let trivial        = (thisMod, sh) `S.member` ctxTrivialBody ctx
+        selfRec        = (thisMod, sh) `S.member` ctxSelfRecursive ctx
+        deadCyclePeers = M.lookup (thisMod, sh) (ctxDeadCycles ctx)
+        isCycle        = isJust deadCyclePeers
+        peersText      = T.intercalate ", " (S.toAscList (fromMaybe S.empty deadCyclePeers))
   , S.null (usersClosure ctx (thisMod, sh))
   , let intra = M.findWithDefault S.empty (thisMod, sh) (ctxIntraModUsedQ ctx)
+  -- A def is reported 'DefinedDead' when it has NO intra-module caller
+  -- OR it is a dead-cycle member (its only callers are the cycle's
+  -- other members). 'internalOnly' is the complement: real intra-module
+  -- users the deletion note must not claim away. 'dead' gates the
+  -- source-text suppression below (both the plain-dead and cycle cases
+  -- can be masked by a live inlined mention).
+  , let dead         = S.null intra || isCycle
+        internalOnly = not (S.null intra) && not isCycle
   -- 'crossFile' (short name used in some OTHER file) and 'inFileUse'
   -- (occurs beyond the def's signature + LHS in THIS file) are the two
   -- halves of the elaborator-inlining suppression below. Bound once
   -- here so the two dead-branch guards share the single cross-file scan
-  -- instead of each recomputing it.
-  , let crossFile = mentionedCrossFile ctx fp sh
-        inFileUse = countToken sh (M.findWithDefault T.empty fp (ctxSourceBodies ctx)) > 2
+  -- instead of each recomputing it. 'countsInFile' says whether the
+  -- in-file count is meaningful: it is NOT for self-recursive or cycle
+  -- members, whose own / mutual RHS calls inflate the count and are
+  -- already explained by the graph's self / intra-cycle edges.
+  , let crossFile    = mentionedCrossFile ctx fp sh
+        inFileUse     = countToken sh (M.findWithDefault T.empty fp (ctxSourceBodies ctx)) > 2
+        countsInFile  = not selfRec && not isCycle
   -- PHASE B (the principled fix): a TRIVIAL-bodied def whose short
   -- name appears as a use in ANOTHER file is treated as having a
   -- synthetic external user — the elaborator inlined the callee and
@@ -527,25 +573,27 @@ definedButUnused ctx fp thisMod shorts =
   -- don't mask a genuinely-dead non-trivial def whose short name
   -- collides with an unrelated live identifier elsewhere. (The wider
   -- cross-file-or-in-file check still applies to all dead defs below.)
-  , S.null intra `implies` not (trivial && crossFile)
+  , dead `implies` not (trivial && crossFile)
   -- Suppress dead false positives caused by Agda's elaborator
-  -- inlining the callee: when there are *no* intra-module graph
-  -- users either, double-check the source text. If the short name
+  -- inlining the callee: when the def reads as dead (no intra caller,
+  -- or a dead cycle), double-check the source text. If the short name
   -- appears as a use in another file (or more than twice in this
   -- file's body, beyond the def's signature + LHS), it's a live
   -- reference the dep graph just lost. We only apply this to the
-  -- DEAD branch; the internal-only branch already has graph evidence
+  -- DEAD branch; a genuine internal-only def already has graph evidence
   -- of intra-module use and doesn't need a source-text fallback.
-  -- The in-file half is skipped for self-recursive defs: their own
-  -- RHS calls push the count past the sig+LHS allowance, and the
-  -- graph's self-edge already explains those mentions precisely.
-  , S.null intra `implies` not (crossFile || (not selfRec && inFileUse))
+  -- The in-file half is skipped for self-recursive and cycle members
+  -- ('countsInFile'): their own / mutual RHS calls push the count past
+  -- the sig+LHS allowance, and the graph edges already explain those
+  -- mentions precisely. The cross-file half still applies.
+  , dead `implies` not (crossFile || (countsInFile && inFileUse))
   -- Skip the @internal-only@ "wrap in @private@" suggestion for
   -- names the producer already reports as 'Private'. They're
   -- already wrapped; re-flagging them is noise. The 'DefinedDead'
-  -- branch still fires for private names — a private with NO
-  -- callers anywhere remains a deletion candidate.
-  , not (S.null intra) `implies`
+  -- branch still fires for private names — a private with NO callers
+  -- anywhere (or a private dead cycle) remains a deletion candidate,
+  -- so this gate is on 'internalOnly', not merely on having a caller.
+  , internalOnly `implies`
       (M.findWithDefault Public (thisMod, sh) (ctxDefAccessByQ ctx) /= Private)
   ]
   where
@@ -595,15 +643,25 @@ countToken needle haystack
 -- joins via the direct-user path. Iteration is cycle-protected by a
 -- 'Set' visit log.
 usersClosure :: Context -> (Text, Text) -> S.Set Text
-usersClosure ctx start = go S.empty S.empty [start]
+usersClosure ctx = usersClosureCore (ctxUsersOfQName ctx) (ctxRxBySourceQ ctx)
+
+-- | The pure map-driven core of 'usersClosure', taking the two indices
+-- it reads directly instead of a whole 'Context'. Shared with the
+-- dead-cycle pass ('computeDeadCycles'), which runs during context
+-- construction (before a 'Context' exists to hand around).
+usersClosureCore
+  :: M.Map (Text, Text) (S.Set Text)   -- ^ 'ctxUsersOfQName'
+  -> M.Map (Text, Text) (S.Set Text)   -- ^ 'ctxRxBySourceQ'
+  -> (Text, Text) -> S.Set Text
+usersClosureCore usersQ rxBySrcQ start = go S.empty S.empty [start]
   where
     go _visited !users [] = users
     go !visited !users (k@(_m, sh) : rest)
       | S.member k visited = go visited users rest
       | otherwise =
           let !visited' = S.insert k visited
-              !direct   = M.findWithDefault S.empty k (ctxUsersOfQName ctx)
-              !hosts    = M.findWithDefault S.empty k (ctxRxBySourceQ ctx)
+              !direct   = M.findWithDefault S.empty k usersQ
+              !hosts    = M.findWithDefault S.empty k rxBySrcQ
               !users'   = S.union users (S.union direct hosts)
               -- Walk one level into the re-export DAG: every host might
               -- itself be a re-export site for the same short name. The
@@ -611,6 +669,47 @@ usersClosure ctx start = go S.empty S.empty [start]
               -- guard keeps us correct on any future grammar surprises.
               !next     = [ (h, sh) | h <- S.toList hosts ]
           in go visited' users' (next ++ rest)
+
+-- | Dead mutual-recursion cycles, one level up from 'ctxSelfRecursive'.
+-- Per module, run 'stronglyConnComp' over the intra-module directed
+-- call graph (@caller -> callee@ short names; self-edges are already
+-- excluded upstream). A 'CyclicSCC' of size >= 2 is dead as a unit iff
+-- NO member is reachable from outside the cycle — i.e. no member has a
+-- cross-module / re-export user ('usersClosureCore' empty) and no member
+-- has an intra-module caller from OUTSIDE the SCC. Each member of a dead
+-- cycle maps to the set of its OTHER members' short names (for the
+-- finding note). Deterministic: modules iterated in key order, the SCC
+-- input built from sorted node / adjacency lists.
+computeDeadCycles
+  :: M.Map Text [(Text, Text)]         -- ^ per-module intra edges (caller, callee)
+  -> M.Map (Text, Text) (S.Set Text)   -- ^ intra-module callers ('ctxIntraModUsedQ')
+  -> M.Map (Text, Text) (S.Set Text)   -- ^ cross-module users ('ctxUsersOfQName')
+  -> M.Map (Text, Text) (S.Set Text)   -- ^ re-export hosts ('ctxRxBySourceQ')
+  -> M.Map (Text, Text) (S.Set Text)
+computeDeadCycles intraEdges intraCallers usersQ rxBySrcQ =
+  M.fromList
+    [ ((m, sh), S.delete sh members)
+    | (m, edges)  <- M.toList intraEdges
+    , CyclicSCC vs <- stronglyConnComp (sccInput edges)
+    , length vs >= 2
+    , let members = S.fromList vs
+    , cycleIsDead m members
+    , sh <- S.toAscList members
+    ]
+  where
+    -- Directed adjacency for one module, nodes emitted in sorted order.
+    sccInput edges =
+      let nodes = S.fromList (concat [ [s, d] | (s, d) <- edges ])
+          adj   = M.fromListWith S.union [ (s, S.singleton d) | (s, d) <- edges ]
+      in [ (n, n, S.toAscList (M.findWithDefault S.empty n adj))
+         | n <- S.toAscList nodes ]
+
+    cycleIsDead m members = all memberDead (S.toAscList members)
+      where
+        memberDead sh =
+             S.null (usersClosureCore usersQ rxBySrcQ (m, sh))
+          && S.null (M.findWithDefault S.empty (m, sh) intraCallers
+                       `S.difference` members)
 
 -- | An @open import M … public@ where the re-export looks dead.
 --
