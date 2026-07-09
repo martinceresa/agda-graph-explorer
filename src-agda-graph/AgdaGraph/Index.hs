@@ -160,6 +160,7 @@ buildIndex ExpandedGraph{..} =
             , defLine   = Nothing
             , defAccess = Public
             , defSig    = Nothing
+            , defUnsafe = []
             , defX      = 0
             , defY      = 0
             , defOrigin = Nothing

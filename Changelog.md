@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Producer follow-ups: `unsafe` audit (R12) + `renaming` alias resolution (R14) (2026-07-09)
+
+Consumer-side wiring for two graph fields `agda-deps` shipped 2026-07-09.
+Both decode with empty defaults, so an older graph stays valid. Schema-decode
++ backward-compat tests in `test/Spec.hs`; determinism gates hold.
+
+- **`unsafe` soundness escapes (R12).** `AgdaGraph.Schema.Definition` gains
+  `defUnsafe :: ![Text]` (`.:? "unsafe" .!= []`; values `non-terminating` /
+  `trustme`, the def's *direct* escapes, orthogonal to the 4-state `state`).
+  `search` gains an `unsafe` filter — `unsafe=any` (with an empty `query`)
+  enumerates every escape, an `agda --safe`-style audit that was grep-only
+  before; `unsafe=non-terminating|trustme` narrows. The escape shows as an
+  `[unsafe: …]` tag in list rows / the JSON `unsafe` field and as an
+  `unsafe:` line in `locate`.
+- **`renaming` re-export aliases (R14).** `AgdaGraph.Schema.ReExport` gains
+  `rxRenames :: !(Map Text Text)` (`.:? "renames" .!= mempty`), an in-scope
+  alias → canonical node-key. The daemon builds a host-qualified alias index
+  (`ldAliases`) at load; `resolveDefNote` gains an alias tier so
+  `locate`/`type_of`/… on `Reexports.combine` resolve to `Core.Base.merge`
+  with an `is a renaming alias for` note, and `search combine` now surfaces
+  the alias (`Reexports.combine → Core.Base.merge`) instead of silently
+  returning only the unrelated real `Data.Fin.Base.combine` — the X1-style
+  misleading case where the MCP was worse than reading source.
+
 ### Arena-feedback round 2: staleness signals, graph identity, dead cycles, text search (2026-07-09)
 
 The [ToFix.md](ToFix.md) batch — the correctness + feature items from the

@@ -213,6 +213,7 @@ graphTools =
                  , ("mode", sp "name (default; searches definition names via the graph) | text (ripgreps source bytes — use for pragmas/comments/regex the graph doesn't index).")
                  , ("kind", sp "Filter by kind: function|projection|datatype|record|constructor|postulate|primitive|other. (name mode only)")
                  , ("state", sp "Filter by state: defined|postulate|hole|failed. (name mode only)")
+                 , ("unsafe", sp "Filter by soundness escape (name mode): `any` lists every unsafe def (an agda --safe-style audit), or a kind — `non-terminating` | `trustme`. Combine with an empty `query` to enumerate.")
                  , ("module_prefix", sp "Only definitions whose module starts with this prefix. (name mode only)")
                  , ("limit", ip "Max results (default 30).")
                  , ("top_level_only", bp "Drop where-block / anonymous-module locals (default false). (name mode only)")
@@ -223,7 +224,8 @@ graphTools =
           _           -> withFresh ss (\ld ->
                   querySearch ld (argBool a "top_level_only" False)
                     (argText a "module_prefix")
-                    (argText a "kind") (argText a "state") (argInt a "limit" 30)
+                    (argText a "kind") (argText a "state") (argText a "unsafe")
+                    (argInt a "limit" 30)
                     (parseFmt (argText a "format"))
                     (fromMaybe "" (argText a "query"))))
 

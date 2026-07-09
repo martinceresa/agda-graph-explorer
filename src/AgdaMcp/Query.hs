@@ -102,6 +102,7 @@ defItem d mp = object $
   , "access" .= renderAccess (defAccess d)
   ]
   ++ [ "line"       .= l          | Just l <- [defLine d] ]
+  ++ [ "unsafe"     .= defUnsafe d | not (null (defUnsafe d)) ]
   ++ [ "origin"     .= og         | Just og <- [defOrigin d] ]
   ++ [ "provenance" .= renderProv p | Just p <- [mp] ]
 
@@ -159,10 +160,19 @@ stateSuffix s       = "/" <> renderState s
 originSuffix :: Definition -> Text
 originSuffix d = maybe "" (\o -> "  [external: " <> o <> "]") (defOrigin d)
 
+-- | @[unsafe: non-terminating, trustme]@ tag for a def the producer flagged
+-- with a direct soundness escape ('defUnsafe'); empty for a safe def. Makes
+-- an @agda --safe@-relevant escape visible wherever a def is listed (R12).
+unsafeSuffix :: Definition -> Text
+unsafeSuffix d = case defUnsafe d of
+  [] -> ""
+  us -> "  [unsafe: " <> T.intercalate ", " us <> "]"
+
 oneLine :: Definition -> Text
 oneLine d =
   "- `" <> defName d <> "` [" <> renderKind (defKind d)
-        <> stateSuffix (defState d) <> "] " <> loc d <> originSuffix d
+        <> stateSuffix (defState d) <> "] " <> loc d
+        <> unsafeSuffix d <> originSuffix d
 
 -- | Bullet list of definitions, each annotated with its enclosing owner
 -- when it's a @where@-/anonymous helper, truncated to @lim@ with a
@@ -360,11 +370,19 @@ resolveDefNote ld name = case lookupDef (ldIndex ld) name of
                     in isDottedSuffix name' nm
     in case filter matches (realDefs ld) of
          [d] -> Just ("", d)
-         _   | ldAutoResolveUnique ld
-             , [d] <- rankedMatches ld name
-                 -> Just ( "(auto-resolved `" <> name <> "` to `"
-                             <> defName d <> "`)\n", d )
-             | otherwise -> Nothing
+         _   -> aliasOrFuzzy
+  where
+    -- Tier 2.5: a @renaming@ re-export alias ('ldAliases', R14) — not a
+    -- graph node itself — resolves to the canonical def it renames. An
+    -- exact alias hit beats the tier-3 fuzzy near-match below.
+    aliasOrFuzzy
+      | Just canonical <- M.lookup name (ldAliases ld)
+      , Just d <- lookupDef (ldIndex ld) canonical
+          = Just ("(`" <> name <> "` is a `renaming` alias for `" <> canonical <> "`)\n", d)
+      -- Tier 3 (gated by 'ldAutoResolveUnique'): a unique near-match.
+      | ldAutoResolveUnique ld, [d] <- rankedMatches ld name
+          = Just ("(auto-resolved `" <> name <> "` to `" <> defName d <> "`)\n", d)
+      | otherwise = Nothing
 
 -- | The enclosing top-level definition of a @where@-/anonymous-module
 -- helper: the nearest non-local def at or above the helper's start line,
@@ -493,6 +511,9 @@ queryLocate ld name = case resolveDefNote ld name of
                           <> ", access: " <> renderAccess (defAccess d)
                           <> (if recursive then " (recursive)" else "")
          ] ++
+         [ "  unsafe:   " <> T.intercalate ", " (defUnsafe d)
+             <> " (direct soundness escape — breaks `agda --safe`)"
+         | not (null (defUnsafe d)) ] ++
          [ "  owner:    " <> defName o <> maybe "" ((":" <>) . tshow) (defLine o)
          | Just o <- [ownerOf ld d] ] ++
          [ "  origin:   external overlay `" <> og <> "` — needs an `open import` before use; \
@@ -1206,35 +1227,45 @@ baseName = snd . T.breakOnEnd "."
 -- ---------------------------------------------------------------------
 
 -- | Substring search with optional structural filters. @q@ may be empty
--- when at least one of @mKind@ / @mState@ is given — that lists every
--- definition of a kind/state. @topLevelOnly@ drops @where@-/anonymous
--- locals. Bad kind/state filter values produce an explicit error.
-querySearch :: Loaded -> Bool -> Maybe Text -> Maybe Text -> Maybe Text -> Int -> OutFmt -> Text -> Text
-querySearch ld topLevelOnly mModPrefix mKindTxt mStateTxt lim fmt q =
+-- when at least one of @mKind@ / @mState@ / @mUnsafe@ / @mModPrefix@ is
+-- given — that lists every definition matching the filter (e.g.
+-- @unsafe=any@ enumerates every soundness escape, an @agda --safe@-style
+-- audit; R12). @topLevelOnly@ drops @where@-/anonymous locals. Bad
+-- kind/state filter values produce an explicit error.
+querySearch :: Loaded -> Bool -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe Text -> Int -> OutFmt -> Text -> Text
+querySearch ld topLevelOnly mModPrefix mKindTxt mStateTxt mUnsafe lim fmt q =
   case filterError mKindTxt mStateTxt of
     Just err -> err
     Nothing
-      | T.null q && mKind == Nothing && mState == Nothing && mModPrefix == Nothing ->
-          "Provide a `query` substring, or a `kind`/`state`/`module_prefix` filter to list by."
+      | T.null q && mKind == Nothing && mState == Nothing
+                 && mModPrefix == Nothing && mUnsafe == Nothing ->
+          "Provide a `query` substring, or a `kind`/`state`/`module_prefix`/`unsafe` filter to list by."
       | otherwise ->
           let base   = if T.null q then realDefs ld else rankedMatches ld q
               kept   = filter keep base
               keep d = (not topLevelOnly || not (isLocalName d))
                          && maybe True (== defKind d)  mKind
                          && maybe True (== defState d) mState
+                         && unsafePred mUnsafe d
                          && modulePrefixPred mModPrefix d
+              -- unsafe=true|any (or empty) ⇒ any escape; unsafe=<kind> ⇒ that one.
+              unsafePred Nothing  _ = True
+              unsafePred (Just u) d'
+                | u `elem` ["true", "any", ""] = not (null (defUnsafe d'))
+                | otherwise                    = u `elem` defUnsafe d'
               notes  = T.concat
                          [ if topLevelOnly then " (top-level only)" else ""
                          , maybe "" (\p -> " module_prefix=" <> p) mModPrefix
                          , maybe "" (\k -> " kind=" <> k) mKindTxt
-                         , maybe "" (\s -> " state=" <> s) mStateTxt ]
+                         , maybe "" (\s -> " state=" <> s) mStateTxt
+                         , maybe "" (\u -> " unsafe=" <> u) mUnsafe ]
               subj   = if T.null q then "definitions" <> notes
                                    else "match(es)" <> notes <> " for `" <> q <> "`"
           in case fmt of
                FmtJson -> listEnvelope "search" queryObj Nothing (length kept)
-                            (orphanExtras ld)
+                            (orphanExtras ld ++ aliasExtra)
                             [ defItem d Nothing | d <- take lim kept ]
-               FmtText -> case kept of
+               FmtText -> (<> aliasSection) $ case kept of
                  [] -> "No definitions" <> (if T.null q then "" else " matching `" <> q <> "`")
                          <> notes <> "." <> coverageNote ld
                  _  -> tshow (length kept) <> " " <> subj <> ":\n" <> bulletList ld lim kept
@@ -1242,11 +1273,28 @@ querySearch ld topLevelOnly mModPrefix mKindTxt mStateTxt lim fmt q =
   where
     mKind  = mKindTxt  >>= parseKind
     mState = mStateTxt >>= parseState
+    -- Re-export aliases ('ldAliases', R14) whose host-qualified name matches
+    -- the (non-empty) query as a substring — surfaced so `search combine`
+    -- reveals a `Reexports.combine` alias for `Core.Base.merge` instead of
+    -- silently returning only the unrelated real def of that short name.
+    aliasHits
+      | T.null q  = []
+      | otherwise = [ (a, c) | (a, c) <- M.toList (ldAliases ld)
+                             , T.toLower q `T.isInfixOf` T.toLower a ]
+    aliasSection
+      | null aliasHits = ""
+      | otherwise = "\nrenaming re-export alias(es):\n"
+          <> T.unlines [ "- `" <> a <> "` → `" <> c <> "`" | (a, c) <- aliasHits ]
+    aliasExtra
+      | null aliasHits = []
+      | otherwise = [ "aliases" .= [ object [ "alias" .= a, "renames" .= c ]
+                                   | (a, c) <- aliasHits ] ]
     queryObj = object $
       [ "query" .= q, "limit" .= lim, "top_level_only" .= topLevelOnly ]
       ++ [ "module_prefix" .= p | Just p <- [mModPrefix] ]
       ++ [ "kind"  .= k | Just k <- [mKindTxt] ]
       ++ [ "state" .= s | Just s <- [mStateTxt] ]
+      ++ [ "unsafe" .= u | Just u <- [mUnsafe] ]
 
 -- | Group definitions by their defining module, with a count each.
 -- Shared by 'queryImpact' and 'moduleSummary'.

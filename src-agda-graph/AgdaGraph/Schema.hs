@@ -117,6 +117,15 @@ data Definition = Definition
     -- otherwise. The text is the reified type collapsed to one line:
     -- shown as-written (not normalised), with Agda's default printing
     -- (no @--show-implicit@).
+  , defUnsafe :: ![Text]
+    -- ^ Soundness escapes the def uses /directly/: @"non-terminating"@ (a
+    -- @NON_TERMINATING@ pragma on the def) and/or @"trustme"@ (its body
+    -- references @primTrustMe@). Empty — and absent on the wire — for a
+    -- safe def. Orthogonal to 'defState' (the 4-state kind). The producer
+    -- tags only direct use; transitive taint is a reachability query the
+    -- consumer layers on the dep graph. (@--no-positivity-check@ /
+    -- @--type-in-type@ file-level escapes are pending producer-side and
+    -- will arrive as a separate top-level field.)
   , defX      :: !Double
   , defY      :: !Double
   , defOrigin :: !(Maybe Text)
@@ -139,6 +148,7 @@ instance FromJSON Definition where
       <*> o .:? "line"
       <*> o .:? "access" .!= Public
       <*> o .:? "type"
+      <*> o .:? "unsafe" .!= []
       <*> o .:? "x"      .!= 0.0
       <*> o .:? "y"      .!= 0.0
       <*> pure Nothing
@@ -150,6 +160,12 @@ data ReExport = ReExport
   { rxFrom  :: !Text
   , rxTo    :: !Text
   , rxNames :: ![Text]
+  , rxRenames :: !(M.Map Text Text)
+    -- ^ For a @renaming (orig to alias)@ clause on the re-export: the
+    -- in-scope alias short-name mapped to its canonical node-key (a member
+    -- of 'rxNames'), e.g. @combine ↦ Core.Base.merge@. Empty — and absent
+    -- on the wire — for a plain @open import M public@ with no @renaming@,
+    -- so a graph from an older producer decodes to 'mempty'.
   } deriving (Show, Generic)
 
 instance NFData ReExport
@@ -157,6 +173,7 @@ instance NFData ReExport
 instance FromJSON ReExport where
   parseJSON = withObject "ReExport" $ \o ->
     ReExport <$> o .: "from" <*> o .: "to" <*> o .: "names"
+             <*> o .:? "renames" .!= mempty
 
 -- | How an edge was discovered during the producer's walk. Optional on
 -- the wire: older producers omit the @definitionEdgesProvenance@ field
@@ -408,7 +425,7 @@ instance A.ToJSON Provenance where
             ProvWith -> "with"; ProvUnknown -> "unknown"
 
 instance A.ToJSON Definition where
-  toJSON d = A.object
+  toJSON d = A.object $
     [ "id"     A..= defId d
     , "name"   A..= defName d
     , "module" A..= defModule d
@@ -420,10 +437,13 @@ instance A.ToJSON Definition where
     , "x"      A..= defX d
     , "y"      A..= defY d
     ]
+    -- Omitted when empty, matching the producer (keeps safe defs terse).
+    ++ [ "unsafe" A..= defUnsafe d | not (null (defUnsafe d)) ]
 
 instance A.ToJSON ReExport where
-  toJSON r = A.object
+  toJSON r = A.object $
     [ "from" A..= rxFrom r, "to" A..= rxTo r, "names" A..= rxNames r ]
+    ++ [ "renames" A..= rxRenames r | not (M.null (rxRenames r)) ]
 
 instance A.ToJSON ExternalsSummary where
   toJSON e = A.object

@@ -89,7 +89,7 @@ import           System.Process       (CreateProcess (..), proc,
 import           AgdaGraph.GoalCanon   (hashString, word64Hex16)
 import           AgdaGraph.Glob       (globMatch)
 import           AgdaGraph.Index      (Index, buildIndexLean, idxDefs, idxRealCount)
-import           AgdaGraph.Schema     (Definition (..), ExpandedGraph (..))
+import           AgdaGraph.Schema     (Definition (..), ExpandedGraph (..), ReExport (..))
 import           AgdaGraph.Union      (unionExpandedGraphs)
 import           AgdaGraph.Similarity (SigBodyFingerprints,
                                        buildSigBodyFingerprints,
@@ -243,6 +243,13 @@ data Loaded = Loaded
     -- (already @coverage-ignore@-filtered), so invisible to queries.
     -- Surfaced by @status@ and by the empty-result coverage note. Empty in
     -- preloaded mode.
+  , ldAliases   :: !(M.Map Text Text)
+    -- ^ @renaming@ re-export aliases: a host-qualified alias name
+    -- (@Host.combine@) mapped to the canonical node-key it renames
+    -- (@Core.Base.merge@), built from every 'ReExport' row's 'rxRenames'.
+    -- Lets 'AgdaMcp.Query.resolveDefNote' resolve an alias — which is not a
+    -- graph node — to its origin, and @search@ surface it (R14). Empty when
+    -- no re-export carries a @renaming@ clause.
   , ldStaleVsSource :: !Bool
     -- ^ At snapshot-construction time, the backing graph file was older
     -- than the newest source under the include roots — i.e. the graph
@@ -667,6 +674,12 @@ loadedFromGraph cfg mGraphFile egProject = do
     _ -> pure False
   let nkv = egNodeKeyVersion eg
       (configHash, contentHash) = graphIdentity cfg eg rds
+      -- Host-qualified alias -> canonical node-key, from every re-export
+      -- row's renaming clause (R14). Keyed by @rxFrom.<alias>@ so a query
+      -- for the fully-qualified alias resolves through it.
+      aliases = M.fromList
+        [ (rxFrom r <> "." <> alias, canonical)
+        | r <- egReExports eg, (alias, canonical) <- M.toList (rxRenames r) ]
   -- Force both digests here so the transient union 'eg' they read is released
   -- by 'commitBuild's major GC (same discipline as 'ix'/'rds' above), rather
   -- than pinned in an unforced thunk.
@@ -698,6 +711,7 @@ loadedFromGraph cfg mGraphFile egProject = do
     , ldStaleVsSource = staleVsSrc
     , ldConfigHash  = configHash
     , ldContentHash = contentHash
+    , ldAliases    = aliases
     }
 
 -- | Canonical @(config, content)@ identity digests for a snapshot (arena

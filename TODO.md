@@ -40,6 +40,13 @@ open items below (designs, files, verification gates) is in
   slice): `search`/`callers`/`callees`/`impact`/`roots` now carry the count;
   extend to `brief`/`path` if measurement shows it helps.
 
+- [ ] **Transitive soundness taint** (R12 follow-on): `search unsafe=…` now
+  flags a def's *direct* escape; layer a reachability query (via the dep
+  graph) so `roots`/`impact` can report a theorem tainted by a
+  `non-terminating`/`trustme` dependency. Also pending: file-level option
+  escapes (`--no-positivity-check`, `--type-in-type`) once agda-deps Phase 2
+  emits them as a separate top-level field.
+
 - [ ] **Round-6 P5 follow-up: structural goal canonicalisation.** `agda-goals`
   canonicalises goal types textually (whitespace + alpha-rename) because
   `--interaction-json` only exposes rendered strings, not internal `Term`s. To
@@ -60,6 +67,12 @@ open items below (designs, files, verification gates) is in
 
 ## Shipped — see Changelog
 
+- [x] Producer-follow-ups R12 + R14 (2026-07-09) — now that `agda-deps` emits
+  the wire fields: `Schema.Definition.defUnsafe` + a `search unsafe=` audit
+  filter and an `[unsafe: …]` tag in `locate`/lists (R12); and
+  `Schema.ReExport.rxRenames` + alias resolution — `locate`/`type_of` resolve
+  `Host.combine` to its `renaming` origin and `search` surfaces the alias
+  (R14). Schema-decode + backward-compat regression tests in `test/Spec.hs`.
 - [x] Arena-feedback round 2 (2026-07-09) — the ToFix.md batch: I6 partial-graph
   flagging + R1 source-staleness footer (incl. preloaded mode), R9 graph
   identity hashes in `status`, I5 dead mutual-recursion cycles, R2 coverage

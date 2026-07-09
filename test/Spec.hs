@@ -35,7 +35,8 @@ import           AgdaInteract.Edit
 import qualified AgdaRepair.Diagnostic as RD
 import qualified AgdaRepair.Edit       as RE
 import           Data.Aeson            ( eitherDecode )
-import           AgdaGraph.Schema      ( ExpandedGraph )
+import qualified Data.Map.Strict       as Map
+import           AgdaGraph.Schema      ( ExpandedGraph(..), Definition(..), ReExport(..) )
 import           AgdaUnused.Analysis   ( Finding(..), FindingKind(..), analyse )
 
 ----------------------------------------------------------------------
@@ -71,6 +72,7 @@ main = do
   sequence_ (map ($ fails) repairEditTests)
   sequence_ (map ($ fails) goalCanonTests)
   sequence_ (map ($ fails) unusedDeadTests)
+  sequence_ (map ($ fails) schemaFieldTests)
   replayTests fails
   n <- readIORef fails
   if n == 0
@@ -398,6 +400,47 @@ unusedDeadTests = concat
           [DefinedInternalOnly] (kindOf "cycB")
       ]
   ]
+
+----------------------------------------------------------------------
+-- Schema wire fields: the producer's `unsafe` (R12) and re-export
+-- `renames` (R14) decode into 'defUnsafe' / 'rxRenames', and their
+-- absence in an older graph degrades to empty (backward compatibility).
+
+schemaGraphJson :: BL.ByteString
+schemaGraphJson = BLC.pack $ unlines
+  [ "{ \"v\": 2, \"mode\": \"expanded\", \"schemaVersion\": 2"
+  , ", \"modules\": [\"Danger\", \"Reexports\", \"Core.Base\"]"
+  , ", \"moduleFiles\": { \"Danger\": \"/t/Danger.agda\" }"
+  , ", \"definitions\":"
+  , "  [ { \"name\": \"Danger.loops\", \"module\": \"Danger\", \"kind\": \"function\", \"unsafe\": [\"non-terminating\"] }"
+  , "  , { \"name\": \"Danger.cheat\", \"module\": \"Danger\", \"kind\": \"function\", \"unsafe\": [\"trustme\"] }"
+  , "  , { \"name\": \"Danger.safe\",  \"module\": \"Danger\", \"kind\": \"function\" }"
+  , "  ]"
+  , ", \"definitionEdges\": []"
+  , ", \"reexports\":"
+  , "  [ { \"from\": \"Reexports\", \"to\": \"Core.Base\", \"names\": [\"Core.Base.merge\"]"
+  , "    , \"renames\": { \"combine\": \"Core.Base.merge\" } }"
+  , "  , { \"from\": \"Reexports\", \"to\": \"Core.Base\", \"names\": [\"Core.Base.plain\"] }"
+  , "  ]"
+  , "}"
+  ]
+
+schemaFieldTests :: [Check]
+schemaFieldTests = case eitherDecode schemaGraphJson :: Either String ExpandedGraph of
+  Left err -> [ check ("schema fixture decodes: " ++ err) False ]
+  Right g ->
+    let unsafeOf n = concat [ defUnsafe d | d <- egDefinitions g, defName d == n ]
+        renamesOf src = [ rxRenames r | r <- egReExports g, head (rxNames r) == src ]
+    in
+    [ checkEq "R12: unsafe non-terminating decodes" ["non-terminating"] (unsafeOf "Danger.loops")
+    , checkEq "R12: unsafe trustme decodes"         ["trustme"]         (unsafeOf "Danger.cheat")
+    , checkEq "R12: absent unsafe → empty"          []                  (unsafeOf "Danger.safe")
+    , checkEq "R14: renames decodes to alias→canonical"
+        [Map.fromList [("combine", "Core.Base.merge")]]
+        (renamesOf "Core.Base.merge")
+    , checkEq "R14: absent renames → empty map"
+        [Map.empty] (renamesOf "Core.Base.plain")
+    ]
 
 ----------------------------------------------------------------------
 -- Fixture replay — the protocol-skew tripwire.
