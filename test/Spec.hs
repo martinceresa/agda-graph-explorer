@@ -34,6 +34,9 @@ import           AgdaInteract.GoalId
 import           AgdaInteract.Edit
 import qualified AgdaRepair.Diagnostic as RD
 import qualified AgdaRepair.Edit       as RE
+import           Data.Aeson            ( eitherDecode )
+import           AgdaGraph.Schema      ( ExpandedGraph )
+import           AgdaUnused.Analysis   ( Finding(..), FindingKind(..), analyse )
 
 ----------------------------------------------------------------------
 -- Tiny harness.
@@ -67,6 +70,7 @@ main = do
   sequence_ (map ($ fails) diagnosticTests)
   sequence_ (map ($ fails) repairEditTests)
   sequence_ (map ($ fails) goalCanonTests)
+  sequence_ (map ($ fails) unusedDeadTests)
   replayTests fails
   n <- readIORef fails
   if n == 0
@@ -226,6 +230,74 @@ iotcmTests =
   , check "give shows unicode via escapes (read round-trips)"
       ("\\955" `T.isInfixOf` T.pack (Iotcm.iotcmGive "F.agda" 0 "λ x → x"))
   ]
+
+----------------------------------------------------------------------
+-- agda-unused: the dead-definition check must not count a def's own
+-- recursive call as a caller (I5), while a real intra-module caller
+-- still demotes dead → internal-only.
+
+unusedGraphJson :: BL.ByteString
+unusedGraphJson = BLC.pack $ unlines
+  [ "{ \"v\": 2, \"mode\": \"expanded\", \"schemaVersion\": 2"
+  , ", \"modules\": [\"Deadwood\"]"
+  , ", \"moduleFiles\": { \"Deadwood\": \"/t/Deadwood.agda\" }"
+  , ", \"definitions\":"
+  , "  [ { \"name\": \"Deadwood.deadA\",  \"module\": \"Deadwood\", \"kind\": \"function\", \"state\": \"D\" }"
+  , "  , { \"name\": \"Deadwood.deadC\",  \"module\": \"Deadwood\", \"kind\": \"function\", \"state\": \"D\" }"
+  , "  , { \"name\": \"Deadwood.helper\", \"module\": \"Deadwood\", \"kind\": \"function\", \"state\": \"D\" }"
+  , "  , { \"name\": \"Deadwood.busy\",   \"module\": \"Deadwood\", \"kind\": \"function\", \"state\": \"D\" }"
+  , "  , { \"name\": \"Deadwood.caller\", \"module\": \"Deadwood\", \"kind\": \"function\", \"state\": \"D\" }"
+  , "  ]"
+  , ", \"definitionEdges\":"
+  , "  [ [\"Deadwood.deadC\",  \"Deadwood.deadC\"]"
+  , "  , [\"Deadwood.busy\",   \"Deadwood.busy\"]"
+  , "  , [\"Deadwood.caller\", \"Deadwood.helper\"]"
+  , "  , [\"Deadwood.caller\", \"Deadwood.busy\"]"
+  , "  ]"
+  , "}"
+  ]
+
+unusedSrc :: Text
+unusedSrc = T.unlines
+  [ "module Deadwood where"
+  , ""
+  , "deadA : Nat"
+  , "deadA = zero"
+  , ""
+  , "deadC : Nat -> Nat"
+  , "deadC zero = zero"
+  , "deadC (suc n) = deadC n"
+  , ""
+  , "helper : Nat"
+  , "helper = zero"
+  , ""
+  , "busy : Nat -> Nat"
+  , "busy zero = zero"
+  , "busy (suc n) = busy n"
+  , ""
+  , "caller : Nat"
+  , "caller = helper + busy zero"
+  ]
+
+unusedDeadTests :: [Check]
+unusedDeadTests = case eitherDecode unusedGraphJson :: Either String ExpandedGraph of
+  Left err -> [ check ("unused fixture graph decodes: " ++ err) False ]
+  Right g ->
+    let findings = analyse g [("/t/Deadwood.agda", unusedSrc)]
+        kindOf sh = [ kindFinding f | f <- findings, symbolFinding f == Just sh ]
+        noteOf sh = [ n | f <- findings, symbolFinding f == Just sh
+                        , Just n <- [noteFinding f] ]
+    in
+    [ checkEq "self-recursive def with no other callers is dead"
+        [DefinedDead] (kindOf "deadC")
+    , check "dead recursive note says so"
+        (any ("recursive" `T.isInfixOf`) (noteOf "deadC"))
+    , checkEq "plain dead def still dead" [DefinedDead] (kindOf "deadA")
+    , checkEq "self-recursion plus a real intra caller stays internal-only"
+        [DefinedInternalOnly] (kindOf "busy")
+    , checkEq "intra-module-called def stays internal-only"
+        [DefinedInternalOnly] (kindOf "helper")
+    ]
 
 ----------------------------------------------------------------------
 -- Fixture replay — the protocol-skew tripwire.

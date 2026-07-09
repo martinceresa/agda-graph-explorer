@@ -162,7 +162,15 @@ data Context = Context
     -- ^ For each (module, short-name) qname, the set of *intra-module*
     -- caller short-names. Lets the @defined@ check distinguish
     -- genuinely-dead names (no callers anywhere) from internal-only
-    -- names (intra-module callers, no cross-module user).
+    -- names (intra-module callers, no cross-module user). Self-edges
+    -- are excluded (a def is not its own caller) — they land in
+    -- 'ctxSelfRecursive' instead.
+  , ctxSelfRecursive    :: !(S.Set (Text, Text))
+    -- ^ (module, short-name) of every definition with a graph
+    -- self-edge (a recursive call). The @dead@ check uses it to skip
+    -- the in-file token-count fallback: a recursive def's own RHS
+    -- mentions would otherwise read as evidence of use, shielding
+    -- dead recursive defs from the deletion-candidate flag.
   , ctxAllModules       :: !(S.Set Text)
   , ctxRxShortsByHost   :: !(M.Map Text (S.Set Text))
     -- ^ For each *host* module @H@ (the module that bears the
@@ -269,27 +277,34 @@ buildContext ExpandedGraph{..} bodies =
 
       -- Per-edge ingest, building the four usage indices in one pass.
       -- Intra-module edges still populate 'intraModUsedQ' (used by the
-      -- @defined@ check to distinguish dead vs internal-only).
-      ingestEdge (src, dst) (!usersMod, !usedQ, !usersQ, !intraQ) =
+      -- @defined@ check to distinguish dead vs internal-only) — except
+      -- self-edges: a recursive call is not a caller, so counting it
+      -- would shield a dead recursive def from the @dead@ check. Those
+      -- are remembered in 'selfRec0' instead ('ctxSelfRecursive').
+      ingestEdge (src, dst) (!usersMod, !usedQ, !usersQ, !intraQ, !selfRec) =
         let srcMod = moduleOfQName src
             dstMod = moduleOfQName dst
             dstSh  = shortNameOf dst dstMod
             srcSh  = shortNameOf src srcMod
         in if srcMod == dstMod
-              then
-                let !i = M.insertWith S.union (dstMod, dstSh)
-                          (S.singleton srcSh) intraQ
-                in (usersMod, usedQ, usersQ, i)
+              then if src == dst
+                then
+                  let !s = S.insert (dstMod, dstSh) selfRec
+                  in (usersMod, usedQ, usersQ, intraQ, s)
+                else
+                  let !i = M.insertWith S.union (dstMod, dstSh)
+                            (S.singleton srcSh) intraQ
+                  in (usersMod, usedQ, usersQ, i, selfRec)
               else
                 let !u1 = M.insertWith S.union dstMod (S.singleton srcMod) usersMod
                     !u2 = M.insertWith S.union srcMod (S.singleton (dstMod, dstSh)) usedQ
                     !u3 = M.insertWith S.union (dstMod, dstSh)
                             (S.singleton srcMod) usersQ
-                in (u1, u2, u3, intraQ)
+                in (u1, u2, u3, intraQ, selfRec)
 
-      (usersMod0, usedQ0, usersQ0, intraModUsedQ0) =
+      (usersMod0, usedQ0, usersQ0, intraModUsedQ0, selfRec0) =
         foldl' (\acc e -> ingestEdge e acc)
-               (M.empty, M.empty, M.empty, M.empty) egDefinitionEdges
+               (M.empty, M.empty, M.empty, M.empty, S.empty) egDefinitionEdges
 
       usedShortInMod = M.map (S.map snd) usedQ0
 
@@ -333,6 +348,7 @@ buildContext ExpandedGraph{..} bodies =
        , ctxUsedQNames       = usedQ0
        , ctxUsersOfQName     = usersQ0
        , ctxIntraModUsedQ    = intraModUsedQ0
+       , ctxSelfRecursive    = selfRec0
        , ctxAllModules       = S.fromList egModules
        , ctxRxShortsByHost   = rxShortsByHost
        , ctxRxBySourceQ      = rxBySrcQ
@@ -477,17 +493,22 @@ definedButUnused ctx fp thisMod shorts =
       , moduleFinding = thisMod
       , symbolFinding = Just sh
       , noteFinding   = Just $ if S.null intra
-          then if trivial
+          then if selfRec
+                 -- The elaborator never inlines a recursive def, so the
+                 -- Phase-A inlined-callee worry below doesn't apply here.
+                 then "deletion candidate (recursive: its only callers are its own calls)"
+                 else if trivial
                  -- PHASE A: a surviving dead finding whose body is
                  -- trivial is more likely an inlined callee than a
                  -- true orphan; say so and downgrade the confidence.
-                 then "deletion candidate (low confidence: trivial body, possibly inlined)"
-                 else "deletion candidate"
+                        then "deletion candidate (low confidence: trivial body, possibly inlined)"
+                        else "deletion candidate"
           else "intra-module callers only"
-      , confFinding   = if S.null intra && trivial then Low else High
+      , confFinding   = if S.null intra && trivial && not selfRec then Low else High
       }
   | sh <- S.toAscList shorts
   , let trivial = (thisMod, sh) `S.member` ctxTrivialBody ctx
+        selfRec = (thisMod, sh) `S.member` ctxSelfRecursive ctx
   , S.null (usersClosure ctx (thisMod, sh))
   , let intra = M.findWithDefault S.empty (thisMod, sh) (ctxIntraModUsedQ ctx)
   -- 'crossFile' (short name used in some OTHER file) and 'inFileUse'
@@ -515,7 +536,10 @@ definedButUnused ctx fp thisMod shorts =
   -- reference the dep graph just lost. We only apply this to the
   -- DEAD branch; the internal-only branch already has graph evidence
   -- of intra-module use and doesn't need a source-text fallback.
-  , S.null intra `implies` not (crossFile || inFileUse)
+  -- The in-file half is skipped for self-recursive defs: their own
+  -- RHS calls push the count past the sig+LHS allowance, and the
+  -- graph's self-edge already explains those mentions precisely.
+  , S.null intra `implies` not (crossFile || (not selfRec && inFileUse))
   -- Skip the @internal-only@ "wrap in @private@" suggestion for
   -- names the producer already reports as 'Private'. They're
   -- already wrapped; re-flagging them is noise. The 'DefinedDead'

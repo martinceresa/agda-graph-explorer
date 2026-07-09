@@ -162,11 +162,16 @@ test-suite interaction-spec
                        AgdaInteract.Edit
                        AgdaRepair.Diagnostic
                        AgdaRepair.Edit
+                       AgdaUnused.Analysis
+                       AgdaUnused.Json
+                       AgdaUnused.Source
   build-depends:       base >= 4.10 && < 4.23,
                        agda-graph,
                        aeson >= 2.0 && < 3,
                        bytestring,
                        containers,
+                       deepseq,
+                       parallel,
                        text
   default-language:    Haskell2010
 

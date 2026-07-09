@@ -64,7 +64,9 @@ graphTools =
   , Tool "locate"
       "Where a definition lives: module, file:line, kind, state, visibility, \
       \caller/dependency counts, blast radius, and enclosing owner for a \
-      \where-helper. Use instead of grepping for a definition site."
+      \where-helper. Use instead of grepping for a definition site. Needs a \
+      \resolvable name — if a short or operator name misses, run `search` \
+      \first to get the fully-qualified name."
       (objSchema [("name", sp "FQN or unique dotted-suffix; a unique near-match is auto-resolved, ambiguous names list candidates.")] ["name"])
       (\ss a -> needName a $ \n -> withFresh ss (\ld -> queryLocate ld n))
 
@@ -144,7 +146,9 @@ graphTools =
 
   , Tool "type_of"
       "The type signature of a definition — the elaborated (type-checker) form \
-      \by default, or the as-written source with `source=true`."
+      \by default, or the as-written source with `source=true`. Needs a \
+      \resolvable name — if a short or operator name misses, run `search` \
+      \first to get the fully-qualified name."
       (objSchema [ ("name", sp "Definition whose type signature you want.")
                  , ("source", bp "Show the as-written source signature instead of the elaborated type (default false).")
                  ] ["name"])
@@ -197,7 +201,9 @@ graphTools =
   , Tool "search"
       "Find definitions whose qualified name contains a substring, ranked by \
       \match tightness; `kind`/`state`/`module_prefix` filter (an empty `query` \
-      \plus a filter *lists* all of a kind/state)."
+      \plus a filter *lists* all of a kind/state). Start here when you only \
+      \know part of a name (or a mixfix operator like `_++_`), then feed the \
+      \fully-qualified result to `type_of`/`locate`/`callers`."
       (objSchema [ ("query", sp "Case-insensitive substring; may be empty when a kind/state/module_prefix filter is given.")
                  , ("kind", sp "Filter by kind: function|projection|datatype|record|constructor|postulate|primitive|other.")
                  , ("state", sp "Filter by state: defined|postulate|hole|failed.")

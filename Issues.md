@@ -393,3 +393,148 @@ design notes in `bench/microbench/ANTI_README.md`. The complementary "where the 
 *wins*" benchmark is `scripts/micro_bench.py` (read tools) and `scripts/micro_bench_live.py`
 (interactive tools). The 30-agent ideation fan-out that generated the cases is the
 `anti-bench-ideation` workflow.
+
+---
+
+### I4 — `similar_types` reports 100% for definitions whose rendered types differ
+
+- **Reported:** 2026-07-09 (MCPBenchArena R5, from the X1 anti-benchmark case
+  `similar-types-false-100`; also I3 cluster 3).
+- **Resolved:** 2026-07-09 — see [Resolution](#resolution-2026-07-09).
+- **Component:** `src/AgdaMcp/Query.hs` → `sigSimilarCands` (the shared core:
+  `similar_types` **and** `find_lemma` anchor mode).
+- **Severity:** medium — a confident false positive that can burn an agent's
+  turns (it reads "100%" as "same type").
+
+#### Summary
+
+The score is `weightedJaccard` over WL *signature-topology* fingerprints
+(kind/state/out-degree + neighbour-colour multisets — nothing reflects the
+rendered type text), so defs whose types merely share a shape collapse to
+identical fingerprints and score exactly 1.0. Measured on the arena stdlib sig
+graph: `similar_types name=Data.Nat.Properties.+-identityʳ` rated `*-assoc`,
+`+-comm`, `*-zeroʳ` — genuinely different types — at **100%**.
+
+#### Resolution (2026-07-09)
+
+`capDifferingSig` (Query.hs, applied inside `sigSimilarCands` so
+`find_lemma`'s anchor mode inherits it): when both defs carry a rendered
+signature (`defSig`, producer `--with-signatures`) and the
+whitespace-normalised strings differ, the score is capped at 0.99 — rendered
+as 99.0% (`pctOf` rounds to one decimal, so anything above 0.99 could still
+display as 100%). Identical rendered types keep 100%; graphs without
+signatures are uncapped (nothing to compare). Verified on the arena case:
+`*-assoc`/`+-comm` now 99.0%, while a true identical-type twin
+(`Data.Integer.Properties.m≤pred[n]⇒m<n` / `i≤pred[j]⇒i<j`) still reads
+100.0%.
+
+---
+
+### I5 — `unused --kinds=dead` misses recursive dead code (self-call counted as a caller)
+
+- **Reported:** 2026-07-09 (MCPBenchArena R13, from the A3 dead-code sweep:
+  `Deadwood.deadC` — `deadC (suc n) = deadC n`, no other references — missed;
+  tool recall 4/5 vs grep 5/5).
+- **Resolved:** 2026-07-09 for **self**-recursion — see
+  [Resolution](#resolution-2026-07-09-1). Mutually-recursive cycles with no
+  external entry remain open (below).
+- **Component:** `src/AgdaUnused/Analysis.hs` → `ingestEdge` /
+  `definedButUnused`.
+- **Severity:** medium — dead-code sweeps under-report exactly the defs most
+  likely to be leftovers (retired recursive helpers).
+
+#### Summary
+
+A self-edge in `definitionEdges` populated `ctxIntraModUsedQ`, so a def whose
+only reference is its own recursive call was classified
+`DefinedInternalOnly` ("intra-module callers only") and never surfaced under
+`--kinds=dead`.
+
+#### Resolution (2026-07-09)
+
+Two coupled changes — the obvious one-line guard alone would have made it
+*worse* (the def would flip from internal-only to **no finding at all**):
+
+1. `ingestEdge` no longer counts a self-edge as an intra-module caller; the
+   def is recorded in a new `ctxSelfRecursive` set instead.
+2. The dead branch's in-file token-count fallback (the elaborator-inlining
+   suppression: >2 whole-token occurrences ⇒ assume live) is skipped for
+   self-recursive defs — their own RHS calls push the count past the
+   sig+LHS allowance, which is precisely what the graph's self-edge already
+   explains. The cross-file half of the suppression still applies.
+
+Also, the recursive note takes precedence over the Phase-A trivial-body
+confidence downgrade (the elaborator never inlines a recursive def), so the
+finding reads `deletion candidate (recursive: its only callers are its own
+calls)` at High confidence. A def with a self-edge *plus* a real
+intra-module caller stays internal-only. Unit-tested both ways in
+`test/Spec.hs` (`unusedDeadTests`); verified end-to-end on the arena midproj
+fixture (`deadC` flagged, `deadA`/`deadB` unchanged) and `-N1`/`-N4`
+byte-identity holds.
+
+#### Open half: mutual-recursion cycles
+
+A cycle (`A ↔ B`) with no external entry still reads as internal-only —
+each member is the other's "caller". Fix sketch: an SCC pass over the
+intra-module qname edges flagging SCCs with no incoming edge from outside
+(`Data.Graph.stronglyConnComp` over the `(module, short-name)` pairs;
+agda-unused works on the JSON view and never builds the `Index`, so the
+Index-side `AgdaOptimization.Condense` machinery is not reusable as-is).
+
+---
+
+### I6 — a parse error under default `--keep-going` silently commits a partial graph served as fresh
+
+- **Reported:** 2026-07-09 (MCPBenchArena R11 + the R10 poll aspect, from the
+  A2 edit-storm broken-file variant; specializes I3 cluster 1).
+- **Component:** `src/AgdaMcp/State.hs` → `runOneEntry` / `commitOrKeep` /
+  `ensureFresh`.
+- **Severity:** high — a confident false negative: `search` returns "no
+  match" for definitions that still textually exist, with no error and no
+  staleness flag, on a transient state (a half-typed edit) every editing
+  agent passes through.
+- **Status:** open.
+
+#### Measured (arena A2)
+
+Live `--entry` watcher; editing the source into an unparseable state (delete
+a def **and** open an unterminated block comment) makes `search` for
+still-existing defs (`aa`, `cc`) return *no match* — no error, no
+`# stale:` footer. 2/6 probes poisoned; the graph recovers ~2.2 s after the
+parse error is fixed. grep reads current bytes and is unaffected.
+
+#### Root cause (confirmed in-repo)
+
+1. `buildBaseArgs` passes `--keep-going` by default, so `agda-deps` emits a
+   **partial** graph on a parse error rather than nothing.
+2. `runOneEntry` decides success by `doesFileExist graphPath` **only** — the
+   producer exit code is interpolated into the error message but never
+   consulted. A partial graph is a "successful" build.
+3. A *parse* failure never reaches the type-checker, so the module doesn't
+   land in `failedModules` → `ldFailed` is empty → `commitOrKeep`'s
+   `--require-well-typed` guard never trips.
+4. The partial graph is promoted, `ssDirty` clears, and every downstream
+   staleness signal (all inferred from *build scheduling*, never from *graph
+   content*) reports fresh.
+
+Mitigation today: `--strict-producer` drops `--keep-going`; the producer then
+writes no graph on error, `runOneEntry` returns `Left`, and the failed-build
+path keeps the stale snapshot + re-dirties (serve-stale works as designed).
+
+#### Suggested fix
+
+1. `runOneEntry`: consult the producer exit code — "graph file exists but
+   the producer reported errors" should withhold (or at minimum stale-flag)
+   rather than commit as fresh.
+2. Cheap content tripwire: flag a definition-count drop vs the prior
+   snapshot on commit. (A def-set identity hash — the R9/arena
+   `graph_config_hash` ask — would make such silent drops first-class.)
+3. Fully correct fix is cross-repo: the producer records parse failures in
+   `failedModules` (or a distinct field) so the consumer can tell
+   "partial-but-trustworthy" from "defs silently dropped".
+
+Related R10 poll finding: in `--no-watch` poll mode the *triggering* query is
+already answered from the old snapshot **with** the stale footer when
+auto-rebuild is on (`ensureFresh` returns `stale=True` before scheduling the
+background rebuild) — the arena's 25% poisoning measurement likely includes
+post-commit reads, which this issue covers.

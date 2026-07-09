@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+### Arena-feedback fixes: false-100 similarity, recursive dead code, per-answer coverage (2026-07-09)
+
+First batch from the MCPBenchArena upstream-request triage (R1–R14 →
+I4/I5/I6 filed; features recorded in TODO). The arena's CI gate (G1–G4)
+re-verified green against these changes.
+
+- **`similar_types` / `find_lemma` anchor mode (I4).** The WL fingerprint is
+  pure signature topology, so different-typed defs with the same shape scored
+  a confident 100%. `capDifferingSig` now caps the score at 99.0% whenever
+  both rendered signatures are present and differ (whitespace-insensitive);
+  identical rendered types keep 100%. The arena's `similar-types-false-100`
+  case flips from `mcp_worse` to `tie`.
+- **`agda-unused --kinds=dead` (I5, self-recursion half).** A self-edge no
+  longer counts as an intra-module caller (`ctxSelfRecursive`), and the
+  dead branch's in-file token-count suppression is skipped for
+  self-recursive defs (their own RHS calls explain the extra occurrences).
+  `deadC (suc n) = deadC n` with no external refs is now a High-confidence
+  `deletion candidate (recursive: …)`; a self-edge plus a real intra caller
+  stays internal-only. Unit-tested in `test/Spec.hs` (`unusedDeadTests`,
+  which now compiles the `AgdaUnused.*` modules into `interaction-spec`);
+  `-N1`/`-N4` byte-identity holds.
+- **`search` per-answer closure coverage (arena R2, minimal).** Non-empty
+  results get a compact one-line footer (`⚠ N source file(s) outside the
+  entry closure are invisible to this search — see status`) and the
+  `format:json` envelope a top-level `unsearched_files` count
+  (`listEnvelope` grew an extras slot). Empty results keep the full
+  `coverageNote`; silent when nothing is orphaned.
+- **Advisor blurbs (arena R7).** `type_of`/`locate` descriptions now say to
+  run `search` first when a short/operator name misses; `search`'s
+  description marks it as the entry point that feeds FQNs to the others.
+  (The nudge previously existed only in runtime not-found text, after the
+  dead-end.)
+
 ### `agda-explore`: trim tool response bytes (2026-07-08)
 
 Tool *outputs* (not descriptions) are re-read by the agent on every call, so

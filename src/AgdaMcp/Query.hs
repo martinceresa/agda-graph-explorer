@@ -36,6 +36,7 @@ module AgdaMcp.Query
 
 import           Control.Exception  (SomeException, try)
 import           Data.Aeson         (Value, object, (.=))
+import           Data.Aeson.Types   (Pair)
 import           Data.Aeson.Text    (encodeToLazyText)
 import           Data.Char          (isDigit, isSpace)
 import           Data.Maybe         (isJust)
@@ -105,9 +106,11 @@ defItem d mp = object $
 
 -- | The shared list-result JSON envelope: tool, echoed query, resolved
 -- canonical name (if any), total match count, shown count (after @limit@),
--- and rows. @total@/@shown@ keep the @…and N more@ affordance.
-listEnvelope :: Text -> Value -> Maybe Text -> Int -> [Value] -> Text
-listEnvelope tool q resolved total items = jsonText $ object $
+-- and rows. @total@/@shown@ keep the @…and N more@ affordance. @extras@
+-- appends tool-specific top-level pairs (e.g. @search@'s closure-coverage
+-- count).
+listEnvelope :: Text -> Value -> Maybe Text -> Int -> [Pair] -> [Value] -> Text
+listEnvelope tool q resolved total extras items = jsonText $ object $
   [ "tool"  .= tool
   , "query" .= q
   , "total" .= total
@@ -115,6 +118,7 @@ listEnvelope tool q resolved total items = jsonText $ object $
   , "items" .= items
   ]
   ++ [ "resolved" .= r | Just r <- [resolved] ]
+  ++ extras
 
 renderState :: State -> Text
 renderState Defined   = "Defined"
@@ -210,6 +214,18 @@ coverageNote :: Loaded -> Text
 coverageNote ld = case orphanWarning (ldOrphanFiles ld) of
   "" -> ""
   w  -> "\n\n" <> w
+
+-- | Compact one-line closure-coverage footer for /non-empty/ list answers
+-- ('querySearch'): hits over a partial closure are still a partial answer,
+-- but repeating the full 'orphanWarning' on every hit list would drown the
+-- results. Count-only; @status@ carries the detail. Empty when nothing is
+-- orphaned (the common case), like 'coverageNote'.
+coverageFootnote :: Loaded -> Text
+coverageFootnote ld = case ldOrphanFiles ld of
+  [] -> ""
+  fs -> "\n(⚠ " <> tshow (length fs)
+          <> " source file(s) outside the entry closure are invisible to "
+          <> "this search — see `status`)"
 
 -- | Does @name@ resolve to a definition in this snapshot? Uses the full
 -- 'resolveDefNote' resolver (not bare 'lookupDef'), so a legitimately
@@ -532,7 +548,7 @@ edgesQuery wantReverse ld transitive mPrefix mProvTxt byMod lim fmt name =
     _ -> case resolveDefNote ld name of
       Nothing        -> case fmt of
         FmtText -> notFound ld name
-        FmtJson -> listEnvelope tool queryObj Nothing 0 []
+        FmtJson -> listEnvelope tool queryObj Nothing 0 [] []
       Just (note, d) -> render note d
   where
     tool  = if wantReverse then "callers" else "callees"
@@ -598,7 +614,7 @@ edgesQuery wantReverse ld transitive mPrefix mProvTxt byMod lim fmt name =
              let wantProv = not transitive && not byMod
                  items = [ defItem dx (if wantProv then provOf (defId dx) else Nothing)
                          | dx <- take lim ds ]
-             in listEnvelope tool queryObj (Just (defName d)) n items
+             in listEnvelope tool queryObj (Just (defName d)) n [] items
 
 -- | Like 'bulletList' but annotates each line with its edge provenance
 -- (when the graph carries tags). Used for direct callers/callees.
@@ -874,6 +890,19 @@ queryRoots ld lim byMod chains mModPrefix mKindTxt mStateTxt name =
 -- (UNSORTED — each caller imposes its own ordering and rendering) plus the
 -- provenance note. Both callers thus rank by the identical metric the
 -- @silhouette@ analysis uses, by construction rather than by copy.
+-- | The WL fingerprint sees only signature-graph topology, so unrelated
+-- defs whose types merely share a shape (any @X → X → X@) collapse to
+-- identical fingerprints and would score a confident 100%. When both
+-- rendered signatures are present and differ (whitespace-insensitively),
+-- cap the score just below 1 so only a true type match reads as exact
+-- ('pctOf' rounds to one decimal, so anything above 0.99 could render
+-- as 100%). No-op when either signature is absent — nothing to compare.
+capDifferingSig :: Definition -> Definition -> Double -> Double
+capDifferingSig a b s = case (norm <$> defSig a, norm <$> defSig b) of
+  (Just x, Just y) | x /= y -> min 0.99 s
+  _                         -> s
+  where norm = T.unwords . T.words
+
 sigSimilarCands
   :: Loaded -> Text -> Definition -> Double -> (Definition -> Bool)
   -> Either Text ([(Double, Definition)], Text)
@@ -893,7 +922,8 @@ sigSimilarCands ld label d minSim keep =
                      , let dj = defAt ix j
                      , defKind dj /= KOther
                      , keep dj
-                     , let s = weightedJaccard mine (sbfSig sbf V.! j)
+                     , let s = capDifferingSig d dj
+                                 (weightedJaccard mine (sbfSig sbf V.! j))
                      , s >= minSim ]
              provNote = if sbfHasProvenance sbf then ""
                         else "\n(note: graph lacks edge provenance, so the "
@@ -1192,11 +1222,14 @@ querySearch ld topLevelOnly mModPrefix mKindTxt mStateTxt lim fmt q =
                                    else "match(es)" <> notes <> " for `" <> q <> "`"
           in case fmt of
                FmtJson -> listEnvelope "search" queryObj Nothing (length kept)
+                            [ "unsearched_files" .= length (ldOrphanFiles ld)
+                            | not (null (ldOrphanFiles ld)) ]
                             [ defItem d Nothing | d <- take lim kept ]
                FmtText -> case kept of
                  [] -> "No definitions" <> (if T.null q then "" else " matching `" <> q <> "`")
                          <> notes <> "." <> coverageNote ld
                  _  -> tshow (length kept) <> " " <> subj <> ":\n" <> bulletList ld lim kept
+                         <> coverageFootnote ld
   where
     mKind  = mKindTxt  >>= parseKind
     mState = mStateTxt >>= parseState

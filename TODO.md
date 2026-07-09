@@ -3,12 +3,45 @@
 Forward-looking work on the graph consumers. For runnable examples see
 [Examples.md](Examples.md); for deferred / refused ideas see
 [Backlog.md](Backlog.md) and [Deferred.md](Deferred.md); for shipped work see
-[Changelog.md](Changelog.md).
+[Changelog.md](Changelog.md). A consolidated, prioritized fix plan for the
+open items below (designs, files, verification gates) is in
+[ToFix.md](ToFix.md).
 
 ---
+## Ideas
+- [ ] Reduce MCP tools: group the most used tools so agents know what to call.
 
 ## Open
 
+- [ ] **Per-answer staleness signal** (arena R1; relates I6). Enrich
+  `staleFooter` (Tools.hs) with graph-mtime vs source-mtime, and extend
+  beyond live mode — preloaded snapshots are hardcoded never-stale
+  (`ensureFresh`), so a `--graph` behind the working tree answers with full
+  confidence.
+- [ ] **`search mode=text` ripgrep fallback** (arena R3). When the query
+  looks textual (pragmas, comments, regex), shell out to `rg` so the MCP is
+  a superset of grep instead of a different-shaped subset. Model on
+  `runUnused`'s shell-out (`findBin` + `readCreateProcessWithExitCode`).
+- [ ] **Adopt the arena CI regression gate** (arena R8; deliverable in
+  `MCPBenchArena/ci/` — workflow + `ci_gate.py` asserting G1–G4:
+  find_lemma 10/10, misleading-* ties, live lemmas/auto). Friction: our CI
+  is deliberately Agda-free; the gate needs agda 2.9 + agda-deps +
+  registered agda-stdlib 2.4 + the arena repo pinned + in-CI stdlib graph
+  builds. Budget as a new Agda-in-CI job, not an extra step.
+- [ ] **Canonical graph identity hash in `status`** (arena R9). Their recipe
+  (`arenalib.graph_config_hash`): sha256[:12] of sorted-JSON {producer
+  flags, seed sha, build-date-stripped `producer`, `nodeKeyVersion`,
+  `schemaVersion`}. A def-set-covering variant would also make I6's silent
+  def drops visible.
+- [ ] **Per-answer closure-coverage count beyond `search`** (arena R2
+  follow-up; `search` got the compact footer + `unsearched_files` JSON field
+  2026-07-09).
+- [ ] **Dead mutual-recursion cycles** (I5 open half). SCC pass over the
+  intra-module qname edges in `AgdaUnused.Analysis` flagging cycles with no
+  external entry (`Data.Graph.stronglyConnComp`; the Index-side `Condense`
+  isn't reusable there).
+
+- [ ] Check VerinaAgda benchmark and try to close the gap.
 - [ ] Stdlib federation follow-ups (base landed 2026-07-05 — see Changelog:
   `--overlay-graph` / `overlay-graphs:` + `scripts/build-stdlib-graph.sh`).
   Remaining: auto-build + auto-register a stdlib overlay on first run (warm
@@ -39,6 +72,10 @@ Forward-looking work on the graph consumers. For runnable examples see
 
 ## Shipped — see Changelog
 
+- [x] Arena-feedback quick wins (2026-07-09) — `similar_types` false-100 cap
+  (I4), recursive dead code flagged by `unused` (I5 self-recursion half),
+  `search` per-answer closure-coverage count, advisor blurbs on
+  `type_of`/`locate`/`search`. Arena CI gate G1–G4 re-verified green.
 - [x] `agda-explore`: goal→lemma retrieval overhaul + hint-guided `auto`
   (2026-07-08) — `find_lemma`/`lemmas` rank by name + algebraic shape +
   operator-weighted coverage (qualifier-stripped, graph-vocab keep):
