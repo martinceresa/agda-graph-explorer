@@ -12,9 +12,7 @@ module AgdaMcp.Tools
   ) where
 
 import           Data.Aeson         (Value (..), object, (.=))
-import           Data.Aeson.Text    (encodeToLazyText)
 import qualified Data.Aeson.KeyMap  as KM
-import qualified Data.Text.Lazy     as TL
 import           Data.IORef         (modifyIORef', readIORef, writeIORef)
 import           Data.List          (isPrefixOf, sortOn)
 import qualified Data.Map.Strict    as M
@@ -27,6 +25,7 @@ import           Data.Time.Format.ISO8601 (iso8601Show)
 import           System.Directory   (doesPathExist)
 import           System.Exit        (ExitCode (..))
 import           System.FilePath    (isAbsolute, normalise, (</>))
+import           Text.Read          (readMaybe)
 import           System.Process     (CreateProcess (..), proc,
                                      readCreateProcessWithExitCode)
 
@@ -323,10 +322,9 @@ appendTextFooters footers txt
   | isJsonPayload txt       = txt
   | otherwise               = txt <> footers
   where
-    isJsonPayload t = case T.uncons (T.dropWhile isSpacec t) of
+    isJsonPayload t = case T.uncons (T.stripStart t) of
       Just (c, _) -> c == '{' || c == '['
       Nothing     -> False
-    isSpacec c = c == ' ' || c == '\n' || c == '\r' || c == '\t'
 
 -- | Record the @stale@ telemetry column for the request currently in
 -- flight. Every tool runner that calls 'ensureFresh' threads the
@@ -376,9 +374,12 @@ withFreshFailFast ss name f = do
   cur <- readIORef (ssLoaded ss)
   case cur of
     Just ld | not (nameInSnapshot ld name) -> do
-      -- Fast path: absent from the current snapshot, answer instantly.
+      -- Fast path: absent from the current snapshot, answer instantly — but
+      -- still carry the partial/source-stale footers, since "not in graph"
+      -- is exactly the answer a partial (parse-failed) build makes unsound (I6).
       noteRebuilt ss False
-      pure (Right (notInGraph ld (cfgEntries (ssConfig ss)) name))
+      pure (Right (appendTextFooters (snapshotFooters ld)
+                     (notInGraph ld (cfgEntries (ssConfig ss)) name)))
     _ -> withFreshIO ss f                   -- present, or no snapshot yet
 
 runUnused :: ToolRunner
@@ -454,67 +455,55 @@ runUnused ss a = do
 -- it is independent of the graph snapshot — no @ensureFresh@, no staleness
 -- caveat. Mirrors 'runUnused''s shell-out (findBin + the same process call).
 runSearchText :: ToolRunner
-runSearchText ss a = do
-  let c     = ssConfig ss
-      q     = fromMaybe "" (argText a "query")
-      lim   = max 1 (argInt a "limit" 30)
-      fmt   = parseFmt (argText a "format")
-      roots = if null (cfgIncludes c) then [cfgProjectRoot c] else cfgIncludes c
-  if T.null q
-    then pure (Left "search mode=text needs a non-empty `query` (a ripgrep pattern).")
-    else if all null roots
-      then pure (Left "search mode=text needs a project root or include dirs; none are \
-                      \configured (run with --project / -i, not a bare --graph).")
-      else do
-        mbin <- findBin "rg" (cfgRgBin c) "AGDA_EXPLORE_RG"
-        case mbin of
-          Nothing  -> pure (Left "could not locate ripgrep (`rg`) for text mode — install \
-                                 \it, set AGDA_EXPLORE_RG, or pass --rg-bin.")
-          Just bin -> do
-            let rgArgs = [ "-n", "--no-heading", "--color=never", "-S"
-                         , "--glob", "*.agda", "--glob", "*.lagda*"
-                         , "--", T.unpack q ] ++ roots
-            (ec, out, err) <- readCreateProcessWithExitCode
-                                (proc bin rgArgs) { cwd = Just (cfgProjectRoot c) } ""
-            case ec of
-              -- rg: 0 = matches, 1 = no matches, >=2 = real error.
-              ExitFailure n | n >= 2 ->
-                pure (Left ("ripgrep failed (exit " <> T.pack (show n) <> "):\n"
-                              <> T.pack (unlines (lastN 15 (lines err)))))
-              _ ->
-                let hits  = filter (not . null) (lines out)
-                    shown = take lim hits
-                    more  = length hits - length shown
-                in pure . Right $ case fmt of
-                     FmtJson -> TL.toStrict . encodeToLazyText $ object
-                       [ "tool"  .= ("search" :: Text)
-                       , "mode"  .= ("text" :: Text)
-                       , "query" .= q
-                       , "total" .= length hits
-                       , "shown" .= length shown
-                       , "items" .= map rgRow shown ]
-                     _ | null hits ->
-                           "text mode (ripgrep): no matches for `" <> q <> "` under "
-                             <> T.intercalate ", " (map T.pack roots) <> "."
-                       | otherwise ->
-                           "text mode (ripgrep over source bytes — always current, not the \
-                           \graph): " <> T.pack (show (length hits)) <> " line(s) for `"
-                             <> q <> "`:\n" <> T.unlines (map T.pack shown)
-                             <> (if more > 0
-                                   then "…and " <> T.pack (show more) <> " more line(s).\n"
-                                   else "")
+runSearchText ss a
+  | T.null q      = pure (Left "search mode=text needs a non-empty `query` (a ripgrep pattern).")
+  | all null roots = pure (Left "search mode=text needs a project root or include dirs; none are \
+                                \configured (run with --project / -i, not a bare --graph).")
+  | otherwise = do
+      mbin <- findBin "rg" (cfgRgBin c) "AGDA_EXPLORE_RG"
+      case mbin of
+        Nothing  -> pure (Left "could not locate ripgrep (`rg`) for text mode — install \
+                               \it, set AGDA_EXPLORE_RG, or pass --rg-bin.")
+        Just bin -> do
+          let rgArgs = [ "-n", "--no-heading", "--color=never", "-S"
+                       , "--glob", "*.agda", "--glob", "*.lagda*"
+                       , "--", T.unpack q ] ++ roots
+          (ec, out, err) <- readCreateProcessWithExitCode
+                              (proc bin rgArgs) { cwd = Just (cfgProjectRoot c) } ""
+          pure . Right $ case ec of
+            -- rg: 0 = matches, 1 = no matches, >=2 = real error.
+            ExitFailure n | n >= 2 -> "ripgrep failed (exit " <> T.pack (show n) <> "):\n"
+                                        <> T.pack (lastLines 15 err)
+            _ -> render (filter (not . null) (lines out))
   where
-    lastN k xs = drop (max 0 (length xs - k)) xs
+    c     = ssConfig ss
+    q     = fromMaybe "" (argText a "query")
+    lim   = max 1 (argInt a "limit" 30)
+    fmt   = parseFmt (argText a "format")
+    roots = if null (cfgIncludes c) then [cfgProjectRoot c] else cfgIncludes c
+    render hits =
+      let shown = take lim hits
+          more  = length hits - length shown
+      in case fmt of
+           FmtJson -> listEnvelope "search" (String q) Nothing (length hits)
+                        [ "mode" .= ("text" :: Text) ] (map rgRow shown)
+           _ | null hits ->
+                 "text mode (ripgrep): no matches for `" <> q <> "` under "
+                   <> T.intercalate ", " (map T.pack roots) <> "."
+             | otherwise ->
+                 "text mode (ripgrep over source bytes — always current, not the graph): "
+                   <> T.pack (show (length hits)) <> " line(s) for `" <> q <> "`:\n"
+                   <> T.unlines (map T.pack shown)
+                   <> (if more > 0 then "…and " <> T.pack (show more) <> " more line(s).\n" else "")
     -- rg --no-heading line: "path:line:text". Split on the first two colons;
     -- fall back to a bare text row if the shape is unexpected.
     rgRow ln = case break (== ':') ln of
       (file, ':' : rest) -> case break (== ':') rest of
         (num, ':' : txt) -> object [ "file" .= file
-                                   , "line" .= (readMaybeInt num :: Maybe Int)
+                                   , "line" .= (readMaybe num :: Maybe Int)
                                    , "text" .= txt ]
         _ -> object [ "text" .= ln ]
       _ -> object [ "text" .= ln ]
-    readMaybeInt s = case reads s of [(n, "")] -> Just n; _ -> Nothing
 
 -- | Resolve the @scope@ argument to an absolute path for @agda-unused@,
 -- which keys its module table by /absolute/ path — a relative @scope@

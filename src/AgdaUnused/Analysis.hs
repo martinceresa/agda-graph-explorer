@@ -288,17 +288,14 @@ buildContext ExpandedGraph{..} bodies =
       maxDepth xs = maximum xs
 
       -- Per-edge ingest, building the usage indices in one pass.
-      -- Intra-module edges still populate 'intraModUsedQ' (used by the
-      -- @defined@ check to distinguish dead vs internal-only) — except
-      -- self-edges: a recursive call is not a caller, so counting it
-      -- would shield a dead recursive def from the @dead@ check. Those
-      -- are remembered in 'selfRec0' instead ('ctxSelfRecursive').
-      -- Non-self intra edges ALSO feed 'intraEs' — a per-module directed
-      -- caller->callee short-name edge list — which the SCC pass below
-      -- ('computeDeadCycles') needs to find dead mutual-recursion cycles
-      -- (the 'intraModUsedQ' map loses the source structure a graph
-      -- needs).
-      ingestEdge (src, dst) (!usersMod, !usedQ, !usersQ, !intraQ, !selfRec, !intraEs) =
+      -- Intra-module edges populate 'intraModUsedQ' ((mod,callee) -> caller
+      -- shorts), used by the @defined@ check to distinguish dead vs
+      -- internal-only AND — since SCCs are transpose-invariant — as the
+      -- call graph the dead-cycle pass ('computeDeadCycles') runs over.
+      -- Self-edges are excluded (a recursive call is not a caller, so
+      -- counting it would shield a dead recursive def from the @dead@
+      -- check) and remembered in 'selfRec0' ('ctxSelfRecursive') instead.
+      ingestEdge (src, dst) (!usersMod, !usedQ, !usersQ, !intraQ, !selfRec) =
         let srcMod = moduleOfQName src
             dstMod = moduleOfQName dst
             dstSh  = shortNameOf dst dstMod
@@ -307,22 +304,21 @@ buildContext ExpandedGraph{..} bodies =
               then if src == dst
                 then
                   let !s = S.insert (dstMod, dstSh) selfRec
-                  in (usersMod, usedQ, usersQ, intraQ, s, intraEs)
+                  in (usersMod, usedQ, usersQ, intraQ, s)
                 else
-                  let !i  = M.insertWith S.union (dstMod, dstSh)
+                  let !i = M.insertWith S.union (dstMod, dstSh)
                              (S.singleton srcSh) intraQ
-                      !ie = M.insertWith (++) dstMod [(srcSh, dstSh)] intraEs
-                  in (usersMod, usedQ, usersQ, i, selfRec, ie)
+                  in (usersMod, usedQ, usersQ, i, selfRec)
               else
                 let !u1 = M.insertWith S.union dstMod (S.singleton srcMod) usersMod
                     !u2 = M.insertWith S.union srcMod (S.singleton (dstMod, dstSh)) usedQ
                     !u3 = M.insertWith S.union (dstMod, dstSh)
                             (S.singleton srcMod) usersQ
-                in (u1, u2, u3, intraQ, selfRec, intraEs)
+                in (u1, u2, u3, intraQ, selfRec)
 
-      (usersMod0, usedQ0, usersQ0, intraModUsedQ0, selfRec0, intraEdges0) =
+      (usersMod0, usedQ0, usersQ0, intraModUsedQ0, selfRec0) =
         foldl' (\acc e -> ingestEdge e acc)
-               (M.empty, M.empty, M.empty, M.empty, S.empty, M.empty) egDefinitionEdges
+               (M.empty, M.empty, M.empty, M.empty, S.empty) egDefinitionEdges
 
       usedShortInMod = M.map (S.map snd) usedQ0
 
@@ -362,7 +358,7 @@ buildContext ExpandedGraph{..} bodies =
       -- intra-module call graph (self-edges already excluded), keeping
       -- only SCCs no external entry reaches (see 'computeDeadCycles').
       deadCycles0 =
-        computeDeadCycles intraEdges0 intraModUsedQ0 usersQ0 rxBySrcQ
+        computeDeadCycles intraModUsedQ0 usersQ0 rxBySrcQ
 
   in Context
        { ctxModuleByFile     = moduleByFile
@@ -552,7 +548,7 @@ definedButUnused ctx fp thisMod shorts =
   -- source-text suppression below (both the plain-dead and cycle cases
   -- can be masked by a live inlined mention).
   , let dead         = S.null intra || isCycle
-        internalOnly = not (S.null intra) && not isCycle
+        internalOnly = not dead        -- the two are the halves of one partition
   -- 'crossFile' (short name used in some OTHER file) and 'inFileUse'
   -- (occurs beyond the def's signature + LHS in THIS file) are the two
   -- halves of the elaborator-inlining suppression below. Bound once
@@ -671,37 +667,43 @@ usersClosureCore usersQ rxBySrcQ start = go S.empty S.empty [start]
           in go visited' users' (next ++ rest)
 
 -- | Dead mutual-recursion cycles, one level up from 'ctxSelfRecursive'.
--- Per module, run 'stronglyConnComp' over the intra-module directed
--- call graph (@caller -> callee@ short names; self-edges are already
--- excluded upstream). A 'CyclicSCC' of size >= 2 is dead as a unit iff
--- NO member is reachable from outside the cycle — i.e. no member has a
--- cross-module / re-export user ('usersClosureCore' empty) and no member
--- has an intra-module caller from OUTSIDE the SCC. Each member of a dead
--- cycle maps to the set of its OTHER members' short names (for the
--- finding note). Deterministic: modules iterated in key order, the SCC
--- input built from sorted node / adjacency lists.
+-- Per module, run 'stronglyConnComp' over the intra-module call graph. The
+-- graph is read straight off 'ctxIntraModUsedQ' (@(mod,callee) -> caller
+-- shorts@, self-edges already excluded): its edges are @callee -> callers@,
+-- the transpose of the call graph — and SCCs are invariant under transpose,
+-- so the components are identical. A 'CyclicSCC' of size >= 2 is dead as a
+-- unit iff NO member is reachable from outside the cycle — no member has a
+-- cross-module / re-export user ('usersClosureCore' empty) and none has an
+-- intra-module caller from OUTSIDE the SCC. Each member of a dead cycle maps
+-- to its OTHER members' short names (for the finding note). Deterministic:
+-- modules iterated in key order, SCC input built from sorted node lists.
 computeDeadCycles
-  :: M.Map Text [(Text, Text)]         -- ^ per-module intra edges (caller, callee)
-  -> M.Map (Text, Text) (S.Set Text)   -- ^ intra-module callers ('ctxIntraModUsedQ')
+  :: M.Map (Text, Text) (S.Set Text)   -- ^ intra-module callers ('ctxIntraModUsedQ')
   -> M.Map (Text, Text) (S.Set Text)   -- ^ cross-module users ('ctxUsersOfQName')
   -> M.Map (Text, Text) (S.Set Text)   -- ^ re-export hosts ('ctxRxBySourceQ')
   -> M.Map (Text, Text) (S.Set Text)
-computeDeadCycles intraEdges intraCallers usersQ rxBySrcQ =
+computeDeadCycles intraCallers usersQ rxBySrcQ =
   M.fromList
     [ ((m, sh), S.delete sh members)
-    | (m, edges)  <- M.toList intraEdges
-    , CyclicSCC vs <- stronglyConnComp (sccInput edges)
+    | (m, calleeCallers) <- M.toList byModule
+    , CyclicSCC vs <- stronglyConnComp (sccInput calleeCallers)
     , length vs >= 2
     , let members = S.fromList vs
     , cycleIsDead m members
     , sh <- S.toAscList members
     ]
   where
-    -- Directed adjacency for one module, nodes emitted in sorted order.
-    sccInput edges =
-      let nodes = S.fromList (concat [ [s, d] | (s, d) <- edges ])
-          adj   = M.fromListWith S.union [ (s, S.singleton d) | (s, d) <- edges ]
-      in [ (n, n, S.toAscList (M.findWithDefault S.empty n adj))
+    -- Regroup 'intraCallers' (keyed by (module, callee)) by module.
+    byModule :: M.Map Text (M.Map Text (S.Set Text))
+    byModule = M.fromListWith M.union
+      [ (m, M.singleton callee callers)
+      | ((m, callee), callers) <- M.toList intraCallers ]
+
+    -- Adjacency (callee -> its callers, the transpose) for one module, with
+    -- every node (callee key OR caller value) emitted in sorted order.
+    sccInput cc =
+      let nodes = S.fromList (M.keys cc ++ concatMap S.toList (M.elems cc))
+      in [ (n, n, S.toAscList (M.findWithDefault S.empty n cc))
          | n <- S.toAscList nodes ]
 
     cycleIsDead m members = all memberDead (S.toAscList members)

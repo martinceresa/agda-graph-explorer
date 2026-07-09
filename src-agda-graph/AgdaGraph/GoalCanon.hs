@@ -29,6 +29,7 @@ module AgdaGraph.GoalCanon
     -- * Hash
   , hashCanonical
   , hashString
+  , word64Hex16
 
     -- * Conclusion / token extraction (find_lemma)
   , conclusionOf
@@ -53,6 +54,7 @@ import qualified Data.Text        as T
 import           Data.Word        ( Word64 )
 import qualified Data.Map.Strict  as Map
 
+import           Numeric              ( showHex )
 import           Data.Digest.Murmur64 ( asWord64, hash64 )
 
 -- | Stable 64-bit string hash. Vendored from @murmur-hash@ to keep this
@@ -61,6 +63,13 @@ import           Data.Digest.Murmur64 ( asWord64, hash64 )
 -- buckets remain cross-referenceable with @agda-deps@'s @hashQName@.
 hashString :: String -> Word64
 hashString = asWord64 . hash64
+
+-- | Render a 'Word64' as a fixed 16-char zero-padded lowercase hex string —
+-- the canonical form for the identity/fingerprint digests this hash feeds
+-- (shared by @agda-explore@'s graph identity and @term-cluster@'s cluster
+-- ids so the two agree by construction).
+word64Hex16 :: Word64 -> String
+word64Hex16 w = let s = showHex w "" in replicate (16 - length s) '0' ++ s
 
 -- | Canonical form of a rendered goal-type string. The 'Eq' / 'Ord'
 -- instances are the operative comparison — the underlying 'Text' is

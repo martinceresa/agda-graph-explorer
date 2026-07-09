@@ -43,6 +43,8 @@ module AgdaMcp.State
   , findBin
   , binaryIdent
   , stalenessBanner
+    -- * Misc helpers
+  , lastLines
   ) where
 
 import           Control.Concurrent       (forkIO, threadDelay)
@@ -57,9 +59,9 @@ import qualified Data.ByteString.Lazy as BL
 import           Data.Char            (isDigit)
 import           Data.IORef
 import qualified Data.IntMap.Strict   as IM
-import           Data.List            (isInfixOf, isSuffixOf, maximumBy, sort)
+import           Data.List            (foldl', isInfixOf, isPrefixOf, isSuffixOf, maximumBy, sort)
 import qualified Data.Map.Strict      as M
-import           Data.Maybe           (catMaybes, isJust, mapMaybe)
+import           Data.Maybe           (catMaybes, fromMaybe, isJust, mapMaybe)
 import qualified Data.Set             as S
 import           Data.Ord             (comparing)
 import           Data.Text            (Text)
@@ -84,8 +86,7 @@ import           System.Mem           (performMajorGC)
 import           System.Process       (CreateProcess (..), proc,
                                        readCreateProcessWithExitCode)
 
-import           Numeric              (showHex)
-import           AgdaGraph.GoalCanon   (hashString)
+import           AgdaGraph.GoalCanon   (hashString, word64Hex16)
 import           AgdaGraph.Glob       (globMatch)
 import           AgdaGraph.Index      (Index, buildIndexLean, idxDefs, idxRealCount)
 import           AgdaGraph.Schema     (Definition (..), ExpandedGraph (..))
@@ -662,12 +663,15 @@ loadedFromGraph cfg mGraphFile egProject = do
     Just gp | not (null (cfgIncludes cfg)) -> do
       mg <- safeMtime gp
       let ScanSig _ mNewest = sig
-      pure $ case (mNewest, mg) of
-        (Just newest, Just gmt) -> newest > gmt
-        _                       -> False
+      pure (fromMaybe False ((>) <$> mNewest <*> mg))
     _ -> pure False
   let nkv = egNodeKeyVersion eg
       (configHash, contentHash) = graphIdentity cfg eg rds
+  -- Force both digests here so the transient union 'eg' they read is released
+  -- by 'commitBuild's major GC (same discipline as 'ix'/'rds' above), rather
+  -- than pinned in an unforced thunk.
+  _ <- evaluate (force configHash)
+  _ <- evaluate (force contentHash)
   if nkv < currentNodeKeyVersion
     then hPutStrLn stderr
            ("agda-explore: " ++ maybe "graph" id mGraphFile
@@ -709,35 +713,38 @@ loadedFromGraph cfg mGraphFile egProject = do
 --     Not byte-compatible with the arena's own hash (theirs folds in an
 --     arena-side seed sha), so @status@ prints the ingredients too and the
 --     arena composes its own.
---   * /content/ — one line per real def (@name TAB kind TAB state@), sorted,
---     so it is order-independent and changes iff the def set changes.
+--   * /content/ — an order-independent sum of a per-def hash
+--     (@name TAB kind TAB state@), so it changes iff the def set changes
+--     without paying a sort or a whole-corpus intermediate string.
 graphIdentity :: Config -> ExpandedGraph -> [Definition] -> (Text, Text)
-graphIdentity cfg eg rds = (hex configMaterial, hex contentMaterial)
+graphIdentity cfg eg rds = (hex configHash, hex contentHash)
   where
-    hex = T.pack . pad . flip showHex "" . hashString
-    pad h = replicate (16 - length h) '0' ++ h
-    configMaterial = unlines $
+    hex = T.pack . word64Hex16
+    configHash  = hashString $ unlines $
       [ "producer=" ++ maybe "" (T.unpack . stripBuilt) (egProducer eg)
       , "nodeKeyVersion=" ++ show (egNodeKeyVersion eg)
       , "schemaVersion=2"
       ] ++ [ "flag=" ++ f | f <- buildFlagsFor cfg ]
-    contentMaterial = unlines $ sort
-      [ T.unpack (defName d) ++ "\t" ++ show (defKind d) ++ "\t" ++ show (defState d)
-      | d <- rds ]
+    -- Sum (Word64, wrapping) of per-def hashes: commutative ⇒ independent of
+    -- def order (the set is unordered), changes on any add/drop/rename.
+    contentHash = foldl' (\ !acc d -> acc + hashString (defLine d)) 0 rds
+    defLine d = T.unpack (defName d) ++ "\t" ++ show (defKind d) ++ "\t" ++ show (defState d)
 
 -- | The producer flag set that identifies a graph's build recipe. Empty in
 -- preloaded mode (the user supplied a fixed graph; no rebuild flags apply),
--- else the shared 'buildBaseArgs' minus the volatile include-dir paths
--- (machine-specific; excluded so the hash is portable).
+-- else the shared 'buildBaseArgs' minus the machine-specific paths (include
+-- dirs and the strict-producer cache dir), so the hash stays portable.
 buildFlagsFor :: Config -> [String]
 buildFlagsFor cfg
   | cfgPreloaded cfg = []
-  | otherwise        = filter (/= "-i") (dropIncludes (buildBaseArgs cfg))
+  | otherwise        = filter portable (dropIncludes (buildBaseArgs cfg))
   where
-    -- @-i DIR@ come in pairs at the end of 'buildBaseArgs'; drop both.
+    -- @-i DIR@ come in pairs; drop both. --cache-dir=PATH carries an absolute
+    -- path under --strict-producer, so drop it too (it's environment, not recipe).
     dropIncludes ("-i" : _ : rest) = dropIncludes rest
     dropIncludes (x : rest)        = x : dropIncludes rest
     dropIncludes []                = []
+    portable a = not ("--cache-dir=" `isPrefixOf` a)
 
 -- | Strip a @, built <date>,@ segment from a producer fingerprint so the
 -- config identity hash is stable across rebuild dates (mirrors the arena's

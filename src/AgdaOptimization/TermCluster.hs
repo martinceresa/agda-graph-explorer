@@ -72,11 +72,11 @@ import           Data.Ord             ( Down(..), comparing )
 import           Data.Text            ( Text )
 import qualified Data.Text            as T
 import           Data.Word            ( Word64 )
-import           Numeric              ( showHex )
 import           System.IO            ( hPutStrLn, stderr )
 import           Text.Printf          ( printf )
 import           Text.Regex.TDFA      ( Regex, makeRegex, matchTest )
 
+import           AgdaGraph.GoalCanon  ( word64Hex16 )
 import           AgdaGraph.Index      ( Index(..), defAt )
 import           AgdaGraph.Schema     ( Definition(..) )
 
@@ -509,7 +509,7 @@ emitHuman ix Options{..} totalHashes distinctHashes hasDepths nExcluded nRanked 
             _            -> cScore c
           renderRow rank c =
             [ show rank
-            , hexHash16 (cHash c)
+            , word64Hex16 (cHash c)
             , show (cSize c)
             , show (cDefCount c)
             , show (cModuleCount c)
@@ -539,12 +539,6 @@ showTopDefs ix = T.unpack . T.intercalate ", " . map one
     one (defId, k) =
       let d = defAt ix defId
       in defName d <> T.pack ("\x00D7" ++ show k)
-
--- | 16-character zero-padded hex of a 'Word64' fingerprint.
-hexHash16 :: Word64 -> String
-hexHash16 w =
-  let s = showHex w ""
-  in replicate (max 0 (16 - length s)) '0' ++ s
 
 -- ---------------------------------------------------------------------------
 -- JSON output
@@ -602,7 +596,7 @@ optionsJson Options{..} = A.object
 clusterJson :: Index -> Int -> Cluster -> A.Value
 clusterJson ix rank Cluster{..} = A.object
   [ "rank"         .= rank
-  , "hash"         .= hexHash16 cHash
+  , "hash"         .= word64Hex16 cHash
   , "size"         .= cSize
   , "def_count"    .= cDefCount
   , "module_count" .= cModuleCount

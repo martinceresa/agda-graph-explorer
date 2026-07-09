@@ -32,6 +32,7 @@ module AgdaMcp.Query
   , nameInSnapshot
   , notInGraph
   , orphanWarning
+  , listEnvelope
   ) where
 
 import           Control.Exception  (SomeException, try)
@@ -227,6 +228,13 @@ coverageFootnote ld = case ldOrphanFiles ld of
   fs -> "\n(⚠ " <> tshow (length fs)
           <> " source file(s) outside the entry closure are invisible to "
           <> "this query — see `status`)"
+
+-- | The structured JSON counterpart of 'coverageFootnote': the closure-
+-- coverage count as an @unsearched_files@ envelope field, or @[]@ when
+-- nothing is orphaned. Passed as 'listEnvelope' extras by the JSON branches
+-- of @search@ / @callers@ / @callees@ so the signal is defined once.
+orphanExtras :: Loaded -> [Pair]
+orphanExtras ld = [ "unsearched_files" .= length fs | let fs = ldOrphanFiles ld, not (null fs) ]
 
 -- | Does @name@ resolve to a definition in this snapshot? Uses the full
 -- 'resolveDefNote' resolver (not bare 'lookupDef'), so a legitimately
@@ -616,10 +624,7 @@ edgesQuery wantReverse ld transitive mPrefix mProvTxt byMod lim fmt name =
              let wantProv = not transitive && not byMod
                  items = [ defItem dx (if wantProv then provOf (defId dx) else Nothing)
                          | dx <- take lim ds ]
-             in listEnvelope tool queryObj (Just (defName d)) n
-                  [ "unsearched_files" .= length (ldOrphanFiles ld)
-                  | not (null (ldOrphanFiles ld)) ]
-                  items
+             in listEnvelope tool queryObj (Just (defName d)) n (orphanExtras ld) items
 
 -- | Like 'bulletList' but annotates each line with its edge provenance
 -- (when the graph carries tags). Used for direct callers/callees.
@@ -888,13 +893,6 @@ queryRoots ld lim byMod chains mModPrefix mKindTxt mStateTxt name =
 -- ('AgdaGraph.Similarity.buildSigBodyFingerprints') the batch @silhouette@
 -- analysis clusters on — so a high-similarity pair here is exactly a
 -- structural-twin candidate there (an equal fingerprint scores 1.0).
--- | Shared Weisfeiler–Leman signature-fingerprint scoring behind
--- 'querySimilarTypes' and @find_lemma@'s anchor mode. Given an already-resolved
--- subject definition and a candidate predicate, returns either a
--- too-small-footprint message (keyed by @label@) or the scored candidates
--- (UNSORTED — each caller imposes its own ordering and rendering) plus the
--- provenance note. Both callers thus rank by the identical metric the
--- @silhouette@ analysis uses, by construction rather than by copy.
 -- | The WL fingerprint sees only signature-graph topology, so unrelated
 -- defs whose types merely share a shape (any @X → X → X@) collapse to
 -- identical fingerprints and would score a confident 100%. When both
@@ -908,6 +906,13 @@ capDifferingSig a b s = case (norm <$> defSig a, norm <$> defSig b) of
   _                         -> s
   where norm = T.unwords . T.words
 
+-- | Shared Weisfeiler–Leman signature-fingerprint scoring behind
+-- 'querySimilarTypes' and @find_lemma@'s anchor mode. Given an already-resolved
+-- subject definition and a candidate predicate, returns either a
+-- too-small-footprint message (keyed by @label@) or the scored candidates
+-- (UNSORTED — each caller imposes its own ordering and rendering) plus the
+-- provenance note. Both callers thus rank by the identical metric the
+-- @silhouette@ analysis uses, by construction rather than by copy.
 sigSimilarCands
   :: Loaded -> Text -> Definition -> Double -> (Definition -> Bool)
   -> Either Text ([(Double, Definition)], Text)
@@ -1227,8 +1232,7 @@ querySearch ld topLevelOnly mModPrefix mKindTxt mStateTxt lim fmt q =
                                    else "match(es)" <> notes <> " for `" <> q <> "`"
           in case fmt of
                FmtJson -> listEnvelope "search" queryObj Nothing (length kept)
-                            [ "unsearched_files" .= length (ldOrphanFiles ld)
-                            | not (null (ldOrphanFiles ld)) ]
+                            (orphanExtras ld)
                             [ defItem d Nothing | d <- take lim kept ]
                FmtText -> case kept of
                  [] -> "No definitions" <> (if T.null q then "" else " matching `" <> q <> "`")
