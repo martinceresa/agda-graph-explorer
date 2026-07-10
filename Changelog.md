@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+### Arena-feedback round 3: out-of-scope `auto` hints + carrier-aware lemma ranking (R19 + R20) (2026-07-10)
+
+The two fresh MCPBenchArena observations from the powered P1 haiku×5 run,
+both on the interactive write-side. Filed as Issues **I7** (R19) and **I8**
+(R20). Arena CI gate (G1–G4) re-verified green; `interaction-spec` passes
+(new `lemmaRankTests` + `hintOutOfScope` goldens).
+
+- **`auto` flags out-of-scope closing lemmas instead of a flat "no solution"
+  (I7 / R19).** `autoSolve` was discarding the `NotInScope` error from a hint
+  probe, so a graph-ranked lemma that would close the goal but whose module
+  the file hasn't imported read as "unprovable". Now the new pure
+  `AgdaRepair.Diagnostic.hintOutOfScope` classifies it, and `auto`/`auto_all`
+  append `Note — N graph-ranked hint(s) are not in the file's import scope …
+  add `open import M using (h)` … or run `repair``, with each import line
+  rendered from the hint's own ranked `Definition` (new
+  `AgdaMcp.Query.goalHintCands` → `AgdaRepair.Strategy.importLineFor`). Honest
+  phrasing: untried candidates, not verified closers. The one-at-a-time hint
+  protocol is unchanged.
+- **Carrier-aware lemma ranking (I8 / R20).** For `n + zero ≡ n` the ℕ, ℤ and
+  Sign `+`-identity lemmas tokenise identically (qualifier-strip erases the
+  carrier), so they tied at 62.5% and `Data.Integer` won alphabetically. The
+  free-text ranking core moved to the new shared
+  `AgdaGraph.LemmaRank` (so the offline suite can test it) and gained a
+  **carrier-module affinity** tie-breaker: the goal's value/type tokens
+  (`zero`, `ℕ`, plus the live goal context in `lemmas`) resolve to their
+  defining modules' path segments (`Nat`), and a candidate sharing a
+  non-generic segment sorts first — a `[carrier: …]` marker flags the match.
+  Affinity sits *after* coverage+Jaccard, so the displayed percentage and
+  find_lemma recall are unchanged (G1-safe). Empty carrier ⇒ byte-identical
+  to the old ranking. Known non-fix: `Data.Nat.Binary.Properties.+-identityʳ`
+  (unit literally named `zero`) legitimately out-covers the ℕ lemma at 75%,
+  above the tie-break's reach.
+- **`goal` argument accepts a JSON integer (I8 secondary / R20).** New
+  `AgdaMcp.ToolDef.argScalarText` coerces an integral JSON number to text, so
+  `{"goal": 0}` no longer dead-ends on the string-only accessor; the
+  `withGoal` error now echoes the accepted forms.
+
 ### Transitive soundness taint on `roots` / `impact` (R12 follow-on) (2026-07-09)
 
 `search unsafe=` flagged only a def's *direct* escape. A theorem can carry no
@@ -51,8 +88,8 @@ Both decode with empty defaults, so an older graph stays valid. Schema-decode
 
 ### Arena-feedback round 2: staleness signals, graph identity, dead cycles, text search (2026-07-09)
 
-The [ToFix.md](ToFix.md) batch — the correctness + feature items from the
-MCPBenchArena triage. Arena CI gate (G1–G4) re-verified green; the
+The [FixRLess.md](Plan/FixRLess.md) (ex-`ToFix.md`) batch — the correctness +
+feature items from the MCPBenchArena triage. Arena CI gate (G1–G4) re-verified green; the
 `interaction-spec` suite (now including the dead-cycle cases) passes; the
 `agda-unused` `-N1`/`-N4` byte-identity determinism test holds.
 

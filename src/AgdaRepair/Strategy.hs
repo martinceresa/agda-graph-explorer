@@ -19,6 +19,7 @@ module AgdaRepair.Strategy
   , candidatesFor
   , inScopeNames
   , importCandidates
+  , importLineFor
   ) where
 
 import           Data.Char        (isDigit)

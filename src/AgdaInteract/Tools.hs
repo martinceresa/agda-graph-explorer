@@ -54,7 +54,7 @@ import           Text.Read               (readMaybe)
 
 import           AgdaGraph.Interaction.Iotcm
 import           AgdaGraph.Interaction.Protocol
-import           AgdaGraph.Schema        (defModule, defName)
+import           AgdaGraph.Schema        (Definition, defModule, defName)
 import           AgdaInteract.Edit
 import           AgdaInteract.GoalId
 import           AgdaInteract.Guard
@@ -63,7 +63,7 @@ import           AgdaInteract.Registry
 import           AgdaInteract.Session
 import           AgdaMcp.Inspect         (GoalLite (..), InspectEvent (..),
                                           emitInspect)
-import           AgdaMcp.Query           (queryFindLemma, goalHintNames)
+import           AgdaMcp.Query           (queryFindLemma, goalHintCands)
 import           AgdaMcp.State
 import           AgdaMcp.ToolDef
 import qualified AgdaRepair.Diagnostic   as RD
@@ -549,13 +549,19 @@ runAuto :: ToolRunner
 runAuto ss a = withGoal ss a $ \sess file e iid -> do
   let secs = max 1 (argInt a "timeout" 5)
       k    = max 0 (argInt a "hints" 6)
-  hints <- if k == 0 then pure [] else collectHints ss k (geType e)
+  -- One graph snapshot: hint names to seed Mimer, paired with the def each
+  -- came from so an out-of-scope hint can be reported with its import line.
+  mLd <- either (const Nothing) (Just . fst) <$> ensureFresh ss
+  let hintCands = case mLd of Just ld | k > 0 -> goalHintCands ld k (geType e); _ -> []
+      hints     = map fst hintCands
   res <- autoSolve sess file iid secs hints
   case res of
     AutoGive mh s -> fmap (headline mh <>) <$> applyHoleEdit ss (writeFlag a) file e s
     -- No solution: surface Agda's error if the plain probe sent one, else
-    -- the no-solution note (listing the hints we tried).
-    AutoNone mErr -> pure (Left (fromMaybe (noSolution hints) mErr))
+    -- the no-solution note (listing the hints we tried), then flag any hint
+    -- that was skipped because it is out of the file's import scope (R19).
+    AutoNone mErr oos ->
+      pure (Left (fromMaybe (noSolution hints) mErr <> oosNote "auto" hintCands oos))
   where
     headline Nothing  = "Mimer filled the goal:\n\n"
     headline (Just h) = "Mimer filled the goal via lemma `" <> h <> "`:\n\n"
@@ -567,31 +573,52 @@ runAuto ss a = withGoal ss a $ \sess file e iid -> do
         <> " — guide it with `case_split goal=…`, `refine`, `lemmas goal=…`, \
            \or `give` an explicit term."
 
+-- | Footer flagging graph-ranked hints Mimer could not try because they are
+-- out of the file's import scope (R19). Names the defining module's
+-- ready-to-paste import line (from the def the hint was ranked off, so it is
+-- exact — no re-resolution). Blank when nothing was out of scope. Honest
+-- phrasing: these are untried candidates, not verified closers.
+oosNote :: Text -> [(Text, Definition)] -> [Text] -> Text
+oosNote _    _     []  = ""
+oosNote tool cands oos =
+  "\nNote — " <> showT (length oos) <> " graph-ranked hint(s) are \
+  \not in the file's import scope, so Mimer could not try them:\n"
+    <> T.unlines [ "  - `" <> h <> "`" <> importHint h | h <- oos ]
+    <> "Add the import(s) and re-run `" <> tool <> "`, or run `repair file=…` to add them for you."
+  where
+    importHint h = case lookup h cands of
+      Just d  -> " — add `" <> RS.importLineFor d <> "`"
+      Nothing -> ""
+
 -- | Outcome of a (possibly hint-guided) Mimer search at one goal.
 data AutoResult
   = AutoGive (Maybe Text) Text  -- ^ term found; @Just h@ = via lemma hint @h@, @Nothing@ = unhinted
-  | AutoNone (Maybe Text)       -- ^ nothing found; @Just@ = an Agda error from the plain probe
+  | AutoNone (Maybe Text) [Text]
+      -- ^ nothing found; @Just@ = an Agda error from the plain probe, plus
+      --   the hints whose probe Agda rejected as out of scope (in try order).
 
 -- | Mimer at one goal: plain first (closes trivial holes fast), then each
 -- lemma hint on its own. An unknown/out-of-scope hint aborts the entire
 -- Mimer call on Agda 2.9 (verified), so hints must NOT be batched — but
 -- scope resolution happens before search, so a bad hint fails ~instantly.
 -- Stops at the first 'GiveAction'; hint probes use a smaller budget (a real
--- hint solves near-instantly).
+-- hint solves near-instantly). A hint probe that fails with a not-in-scope
+-- error is recorded (not discarded) so 'runAuto' can flag it (R19).
 autoSolve :: Session -> FilePath -> Int -> Int -> [Text] -> IO AutoResult
 autoSolve sess file iid secs hints = do
     (m0, mErr) <- probe ("-t " ++ show secs)
     case m0 of
       Just t  -> pure (AutoGive Nothing t)
-      Nothing -> tryHints hints mErr
+      Nothing -> tryHints hints [] mErr
   where
     hintSecs = max 1 (min 3 secs)
-    tryHints []       mErr = pure (AutoNone mErr)
-    tryHints (h : hs) mErr = do
-      (m, _) <- probe ("-t " ++ show hintSecs ++ " " ++ T.unpack h)
+    tryHints []       oos mErr = pure (AutoNone mErr (reverse oos))
+    tryHints (h : hs) oos mErr = do
+      (m, hErr) <- probe ("-t " ++ show hintSecs ++ " " ++ T.unpack h)
       case m of
         Just t  -> pure (AutoGive (Just h) t)
-        Nothing -> tryHints hs mErr
+        Nothing -> tryHints hs (if maybe False (RD.hintOutOfScope h) hErr
+                                  then h : oos else oos) mErr
     probe opts = do
       out <- runRaw sess (iotcmAutoOne file AsIs iid opts)
       pure $ case out of
@@ -599,16 +626,6 @@ autoSolve sess file iid secs hints = do
         Right rs -> case [gr | ReplyGiveAction _ gr <- rs] of
           (GiveStr t : _) -> (Just t, Nothing)
           _               -> (Nothing, firstError rs)
-
--- | Up to @n@ Mimer hint names for a goal type, off the current graph
--- snapshot (empty if the graph is unavailable — hint search then degrades
--- to plain Mimer). Reads 'ssLoaded' via 'ensureFresh', like `lemmas`.
-collectHints :: ServerState -> Int -> Text -> IO [Text]
-collectHints ss n goalTy = do
-  ef <- ensureFresh ss
-  pure $ case ef of
-    Right (ld, _) -> goalHintNames ld n goalTy
-    Left _        -> []
 
 -- | Mimer over every open goal of a module in one call: no goal ids, one
 -- combined diff for the solved goals (or apply + reload with @write:true@),
@@ -641,23 +658,29 @@ runAutoAll ss a = do
                 Right orig -> do
                   let secs = max 1 (argInt a "timeout" 5)
                       k    = max 0 (argInt a "hints" 6)
-                  -- One graph snapshot; per-goal Mimer hints off each type.
+                  -- One graph snapshot; per-goal Mimer hint (name, def) pairs
+                  -- off each type — the def lets an out-of-scope hint be
+                  -- reported with its import line (R19).
                   mLd <- either (const Nothing) (Just . fst) <$> ensureFresh ss
                   let hintsFor e
                         | k == 0    = []
-                        | otherwise = maybe [] (\ld -> goalHintNames ld k (geType e)) mLd
+                        | otherwise = maybe [] (\ld -> goalHintCands ld k (geType e)) mLd
                       esWithHints = [ (e, hintsFor e) | e <- es ]
-                  (edits, solved, unsolved) <-
+                  (edits, solved, unsolved, oosAll) <-
                     autoAllLoop sess file (codeBlocksFor file orig) secs esWithHints
                   -- The in-session gives diverge from disk (which stays
                   -- untouched unless write:true) — reload on next use.
                   markSessionDirty ss file
-                  let survivors
-                        | null unsolved = ""
+                  let hintMap = M.toList (M.fromListWith (\_ old -> old)
+                                            (concatMap snd esWithHints))
+                      oosBlock = oosNote "auto_all" hintMap (nub oosAll)
+                      survivors
+                        | null unsolved = oosBlock
                         | otherwise =
                             "\nMimer found nothing for: "
                               <> T.intercalate ", " (map (renderStableId . geStable) unsolved)
                               <> " — try `refine`, `lemmas goal=…`, or `give` an explicit term."
+                              <> oosBlock
                   if null edits
                     then pure (Right ("Mimer solved none of the " <> showT (length es)
                                         <> " open goal(s) in " <> T.pack file
@@ -676,21 +699,21 @@ runAutoAll ss a = do
 -- hole-range edits in ORIGINAL-text offsets (the in-session gives never
 -- move the on-disk text). Continue-on-failure — unlike @construct@, an
 -- unsolved goal is a /result/ here, not an abort.
-autoAllLoop :: Session -> FilePath -> CodeBlocks -> Int -> [(GoalEntry, [Text])]
-            -> IO ([(Int, Int, Text)], [Text], [GoalEntry])
-autoAllLoop sess file cb secs = go [] [] []
+autoAllLoop :: Session -> FilePath -> CodeBlocks -> Int -> [(GoalEntry, [(Text, Definition)])]
+            -> IO ([(Int, Int, Text)], [Text], [GoalEntry], [Text])
+autoAllLoop sess file cb secs = go [] [] [] []
   where
-    go eds ok bad []               = pure (reverse eds, reverse ok, reverse bad)
-    go eds ok bad ((e, hints) : rest) = case (geIid e, geRange e) of
+    go eds ok bad oos []               = pure (reverse eds, reverse ok, reverse bad, reverse oos)
+    go eds ok bad oos ((e, hintCands) : rest) = case (geIid e, geRange e) of
       (Just iid, Just (GoalRange s en))
         | isInsideCode cb (rpPos s) -> do
-            res <- autoSolve sess file iid secs hints
+            res <- autoSolve sess file iid secs (map fst hintCands)
             case res of
               AutoGive _ t ->
                 go ((rpPos s, rpPos en, t) : eds)
-                   (renderStableId (geStable e) : ok) bad rest
-              AutoNone _ -> go eds ok (e : bad) rest
-      _ -> go eds ok (e : bad) rest
+                   (renderStableId (geStable e) : ok) bad oos rest
+              AutoNone _ hoos -> go eds ok (e : bad) (reverse hoos ++ oos) rest
+      _ -> go eds ok (e : bad) oos rest
 
 -- ---------------------------------------------------------------------
 -- Scratch / staging buffer (stage / promote / discard)
@@ -1164,8 +1187,9 @@ withGoal
   :: ServerState -> Value
   -> (Session -> FilePath -> GoalEntry -> Int -> IO (Either Text Text))
   -> IO (Either Text Text)
-withGoal ss a act = case argText a "goal" of
-  Nothing      -> pure (Left "this tool requires a `goal` argument (a stable id like `g0`).")
+withGoal ss a act = case argScalarText a "goal" of
+  Nothing      -> pure (Left "this tool requires a `goal` argument — a stable id like `g0` \
+                              \(a bare integer such as 0 also works).")
   Just goalArg -> case parseStableId goalArg of
     Nothing  -> pure (Left ("not a goal id: " <> goalArg <> " (expected `g0`, `g1`, …)."))
     Just sid -> do
@@ -1950,18 +1974,34 @@ giveStepEdit sess lbl holeS holeE cmd parenInput = do
 -- reuse an existing lemma. Reads 'ssLoaded' directly (no rebuild) — the
 -- interaction bridge deliberately bypasses 'ensureFresh'.
 runLemmas :: ToolRunner
-runLemmas ss a = withGoal ss a $ \_sess _file e _iid -> do
+runLemmas ss a = withGoal ss a $ \sess file e iid -> do
+  -- Live goal context (binder types like `n : ℕ`) steers carrier affinity
+  -- so the goal's actual carrier instance outranks same-shaped ones from
+  -- other number types (R20); degrade to [] if the goal query fails.
+  ctxTypes <- ctxTypesOf sess file iid
   ef <- ensureFresh ss
   case ef of
     Left err      -> pure (Left ("graph index unavailable: " <> T.pack err))
     Right (ld, _) ->
       let goalTy = geType e
           out    = queryFindLemma ld (argInt a "limit" 10) (argDouble a "min_sim" 0.3)
-                     (argText a "kind") (argText a "module_prefix") (Just goalTy) Nothing
+                     (argText a "kind") (argText a "module_prefix") (Just goalTy) Nothing ctxTypes
       in pure (Right ("Goal " <> renderStableId (geStable e) <> "  : " <> goalTy <> "\n\n" <> out
                        <> "\n\n(Reuse a candidate with `give`/`refine`. Recall-first name/shape \
                           \overlap — a suggestion, not a proof it applies; for WL type-shape \
                           \matching pass an `anchor` to the read-side `find_lemma`.)"))
+
+-- | The in-scope context binder types of a goal (@[ceType | ceInScope]@),
+-- fetched live off the session. @[]@ on any non-goal-type reply or error —
+-- callers use it only to enrich lemma-carrier ranking, so a miss just falls
+-- back to goal-string tokens.
+ctxTypesOf :: Session -> FilePath -> Int -> IO [Text]
+ctxTypesOf sess file iid = do
+  eRaw <- runRaw sess (iotcmGoalTypeContext file Simplified iid)
+  pure $ case eRaw of
+    Right rs | Right (GiGoalType _ ces) <- firstGoalInfo rs
+             -> [ ceType c | c <- ces, ceInScope c ]
+    _        -> []
 
 -- | Orientation bundle for a live goal: its live type + context (as
 -- `goal_type`) then the top reusable lemmas (as `lemmas`) — the write-side
@@ -1969,17 +2009,20 @@ runLemmas ss a = withGoal ss a $ \_sess _file e _iid -> do
 -- search uses the goal's cached type ('geType'), matching `lemmas`.
 runGoalBrief :: ToolRunner
 runGoalBrief ss a = withGoal ss a $ \sess file e iid -> do
-  eInfo <- runCmd sess (iotcmGoalTypeContext file Simplified iid)
-                       (fmap renderGoalTypeFull . firstGoalInfo)
-  case eInfo of
-    Left err   -> pure (Left err)
-    Right info -> do
+  eRaw <- runRaw sess (iotcmGoalTypeContext file Simplified iid)
+  case eRaw >>= firstGoalInfo of
+    Left err -> pure (Left err)
+    Right gi -> do
+      let info     = renderGoalTypeFull gi
+          ctxTypes = case gi of
+            GiGoalType _ ces -> [ ceType c | c <- ces, ceInScope c ]
+            _                -> []
       ef <- ensureFresh ss
       let lemmaBlock = case ef of
             Left err'     -> "(lemma search unavailable: " <> T.pack err' <> ")"
             Right (ld, _) ->
               queryFindLemma ld (argInt a "limit" 5) (argDouble a "min_sim" 0.3)
-                (argText a "kind") (argText a "module_prefix") (Just (geType e)) Nothing
+                (argText a "kind") (argText a "module_prefix") (Just (geType e)) Nothing ctxTypes
       pure (Right (T.stripEnd info
                     <> "\n\n── candidate lemmas ──\n" <> T.stripEnd lemmaBlock
                     <> "\n\n(Fill with `auto goal=" <> renderStableId (geStable e)

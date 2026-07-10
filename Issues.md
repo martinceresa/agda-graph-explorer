@@ -594,3 +594,136 @@ crafted `failedModules` graph (footer fires) and a clean one (silent);
 **Still open (cross-repo, I6c):** the producer should distinguish a
 parse-dropped def set from a trustworthy partial so the consumer needn't
 infer from `ldFailed` + content hash. Filed for `agda-deps`.
+
+---
+
+### I7 — `auto` reports a flat "no solution" when its closing hint lemma is out of import scope
+
+- **Reported:** 2026-07-10 (MCPBenchArena R19, from the powered P1 haiku×5
+  run, rung-b).
+- **Resolved:** 2026-07-10 — see [Resolution](#resolution-2026-07-10).
+- **Component:** `src/AgdaInteract/Tools.hs` → `autoSolve` / `runAuto` /
+  `runAutoAll`.
+- **Severity:** medium-high — a confident false negative on the write-side
+  tool an agent reaches for to close a goal: the graph *names* the closing
+  lemma, but the answer reads as "unprovable".
+
+#### Summary
+
+`auto`/`auto_all` seed Mimer with the top graph-ranked lemma base-names,
+tried one at a time (an out-of-scope hint aborts the whole `Cmd_autoOne` on
+Agda 2.9; a qualified name is rejected — hence bare base-names). When the
+winning lemma's module is not imported by the file, the hint probe fails with
+a `NotInScope` error — which `autoSolve` **computed and then discarded** (the
+hint loop bound `(m, _)`), so the hint was indistinguishable from a genuine
+Mimer search miss. The final answer was `noSolution hints` — a flat "found no
+solution (tried lemma hints: …)". By contrast `give` on the same term
+surfaces the raw `NotInScope` verbatim: the server *could* see the
+missing-import fact; `auto` swallowed it.
+
+#### Repro (arena `RungB.agda`, goal `n + zero ≡ n`, imports only `Data.Nat`)
+
+- `auto goal=g0` → `auto/Mimer found no solution … (tried lemma hints:
+  `+-identityʳ`, …)` — names the lemma, then fails.
+- Add `open import Data.Nat.Properties using (+-identityʳ)` → `auto goal=g0`
+  fills `idr n = +-identityʳ n`.
+- `give goal=g0 term="+-identityʳ n"` on the un-imported file → a clear
+  `[NotInScope] +-identityʳ`.
+
+#### Resolution (2026-07-10)
+
+Arena option (b) — detect and report actionably; auto-import + retry
+(option (a)) is deferred (it needs the temp-file revalidation machinery, and
+`repair` already adds an import once a term is in the file).
+
+- **`AgdaRepair.Diagnostic.hintOutOfScope`** (pure, exported, golden-tested):
+  a hint is out of scope iff it appears in `notInScopeNames err`, or (a
+  fallback) the burst carries a `NotInScope` tag and the hint occurs in the
+  message. Lenient: any other error stays a plain failure (behaviour
+  degrades to today's).
+- **`autoSolve`** no longer discards the per-hint error; `AutoResult`'s
+  failure case carries the out-of-scope hints in try order. The
+  one-at-a-time protocol is untouched.
+- **`AgdaMcp.Query.goalHintCands`** returns `(base-name, source Definition)`
+  pairs (the same ranking core as `goalHintNames`, reimplemented on top), so
+  `runAuto`/`runAutoAll` can render each out-of-scope hint's exact import
+  line via `AgdaRepair.Strategy.importLineFor` — no re-resolution.
+- **Message:** on a no-solution with out-of-scope hints, `auto`/`auto_all`
+  append `Note — N graph-ranked hint(s) are not in the file's import scope …
+  add `open import M using (h)` … or run `repair``. Honest phrasing: untried
+  candidates, not verified closers.
+
+Verified live on `RungB.agda`: `auto goal=g0` now appends the out-of-scope
+note with import lines; after adding the import, `auto goal=g0 write:true`
+fills `idr n = +-identityʳ n`. Note: the specific module named for
+`+-identityʳ` inherits I8's coverage-level ranking artifact
+(`Data.Nat.Binary.Properties.+-identityʳ`, whose unit is literally named
+`zero`, outranks the ℕ instance), so the suggested import can be the ℕᵇ one;
+the mechanism is correct and the note is actionable regardless. Arena CI gate
+G1–G4 still PASS.
+
+---
+
+### I8 — `lemmas`/`find_lemma` goal ranking under-discriminates across carrier types; `goal` id rejects a JSON integer
+
+- **Reported:** 2026-07-10 (MCPBenchArena R20, from the powered P1 haiku×5
+  run, rung-b).
+- **Resolved:** 2026-07-10 — see [Resolution](#resolution-2026-07-10-1).
+- **Component:** ranking core → new `src-agda-graph/AgdaGraph/LemmaRank.hs`
+  (factored out of `AgdaMcp.Query`); `withGoal` / `argScalarText` for the
+  goal-id half.
+- **Severity:** medium — a flat menu of near-identical candidates for a
+  trivial goal, a measured contributor to interactive thrashing (the mirror
+  of I4: there `similar_types` was over-confident; here `lemmas` is
+  under-discriminating).
+
+#### Summary
+
+For a `Data.Nat` goal `n + zero ≡ n`, `lemmas` returned the `+`-identity
+family across ℕ / ℤ / Sign all tied at 62.5%, with the correct
+`Data.Nat.Properties.+-identityʳ` sorted *below* the `Data.Integer` variants.
+`matchTokens` qualifier-strip maps `Data.Nat._+_` and `Data.Integer._+_` both
+to `+`, so the ℕ and ℤ candidates' token bags are byte-identical — a complete
+`(coverage, jaccard, bag)` tie, resolved by `defName` alphabetically
+(`Data.Integer` < `Data.Nat`). The discriminating signal — which carrier type
+the goal actually uses — was available (the candidate's `defModule`, and in
+the live path the goal context `n : ℕ`) but unused. Separately, `withGoal`
+read the goal via string-only `argText`, so a client sending the JSON integer
+`{"goal": 0}` got a misleading "requires a `goal` argument" (a schema-misuse
+dead-end; the R7 friction axis).
+
+#### Resolution (2026-07-10)
+
+**Ranking (carrier-module affinity, tie-break only).** The free-text ranking
+core moved to `AgdaGraph.LemmaRank` (so the offline test-suite can exercise
+it; `AgdaMcp.Query` drags in the process-heavy `AgdaMcp.State`). The score is
+now `(weightedCoverage, tokenJaccard, carrierAffinity, negate bagSize)` —
+coverage and Jaccard are **unchanged and first** (the historically-tuned
+find_lemma 10/10 signal), so affinity only reorders otherwise-exact ties and
+the displayed percentage never changes. Affinity looks up the modules that
+*define* the goal's value/type carrier tokens (`zero`, `ℕ` — from real
+constructor/datatype/record defs, plus any `renaming` alias host) and boosts
+a candidate whose own module shares a non-generic path segment (`Nat`). The
+live `lemmas` path fetches the goal context (`iotcmGoalTypeContext`) and feeds
+the binder types into the carrier set; the read-side `find_lemma` stays
+context-free. Matched rows carry a `[carrier: …]` marker. Empty carrier set
+(no matching def, no alias, a signature-less graph) ⇒ affinity 0 everywhere ⇒
+ranking byte-identical to the pre-fix behaviour.
+
+Verified: `find_lemma goal="n + zero ≡ n"` on the stdlib sig graph now ranks
+`Data.Nat.Properties.+-identityʳ` (62.5%, `[carrier: Nat]`) above the
+byte-identical `Data.Integer.Properties.+-identityʳ` (62.5%, no marker); live
+`lemmas` agrees. Unit-tested in `test/Spec.hs` (`lemmaRankTests`), including a
+coverage-stays-0.625 tripwire and a no-carrier determinism pin. Arena CI gate
+G1–G4 PASS.
+
+**Known limitation (documented, not chased).**
+`Data.Nat.Binary.Properties.+-identityʳ` scores 0.75 — its identity element
+is literally *named* `zero`, covering the goal's `zero` token — and stays
+above the correct ℕ lemma. That is a coverage-level artifact the tie-break
+cannot (and must not, per G1) touch; both rows carry `[carrier: Nat]`.
+
+**Goal-id integer (secondary).** New `AgdaMcp.ToolDef.argScalarText` accepts a
+JSON string *or* an integral JSON number (rendered in decimal); `withGoal`
+uses it, and its error echoes the accepted forms (`g0`, or a bare integer).
+Verified live: `auto goal=0` (JSON integer) now runs instead of erroring.

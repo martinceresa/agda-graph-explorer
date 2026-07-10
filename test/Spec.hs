@@ -28,6 +28,8 @@ import           AgdaGraph.Interaction.Protocol
 import qualified AgdaGraph.Interaction.Iotcm as Iotcm
 import           AgdaGraph.GoalCanon   ( matchTokens, nameTokens, shapeTokens
                                        , weightedCoverage, stripQualifiers )
+import           AgdaGraph.LemmaRank   ( RankEnv(..), rankLemmaCandidates
+                                       , goalCarrierSegments, moduleSegments )
 import           AgdaInteract.Guard
 import           AgdaInteract.Literate
 import           AgdaInteract.GoalId
@@ -36,7 +38,8 @@ import qualified AgdaRepair.Diagnostic as RD
 import qualified AgdaRepair.Edit       as RE
 import           Data.Aeson            ( eitherDecode )
 import qualified Data.Map.Strict       as Map
-import           AgdaGraph.Schema      ( ExpandedGraph(..), Definition(..), ReExport(..) )
+import           AgdaGraph.Schema      ( ExpandedGraph(..), Definition(..), ReExport(..)
+                                       , State(..), Kind(..), Access(..) )
 import           AgdaGraph.Index       ( buildIndex, lookupId, unsafeDeps, defAt )
 import           AgdaUnused.Analysis   ( Finding(..), FindingKind(..), analyse )
 
@@ -75,6 +78,7 @@ main = do
   sequence_ (map ($ fails) unusedDeadTests)
   sequence_ (map ($ fails) schemaFieldTests)
   sequence_ (map ($ fails) taintTests)
+  sequence_ (map ($ fails) lemmaRankTests)
   replayTests fails
   n <- readIORef fails
   if n == 0
@@ -488,6 +492,71 @@ taintTests = case eitherDecode taintGraphJson :: Either String ExpandedGraph of
     ]
 
 ----------------------------------------------------------------------
+-- LemmaRank — carrier-affinity tie-break (arena R20).
+
+-- | Build a 'Definition' fixture; only the fields the ranker reads matter.
+mkDef :: Text -> Text -> Kind -> Maybe Text -> Definition
+mkDef nm md kind sig = Definition
+  { defId = -1, defName = nm, defModule = md, defState = Defined
+  , defKind = kind, defLine = Nothing, defAccess = Public
+  , defSig = sig, defUnsafe = [], defX = 0, defY = 0, defOrigin = Nothing }
+
+lemmaRankTests :: [Check]
+lemmaRankTests =
+  [ -- Arena repro: for `n + zero ≡ n` the ℕ instance must outrank the
+    -- byte-identical ℤ one, and the Sign variant sits below on Jaccard.
+    checkEq "rank: Data.Nat.+-identityʳ outranks the ℤ then Sign variants"
+      [ "Data.Nat.Properties.+-identity\691"
+      , "Data.Integer.Properties.+-identity\691"
+      , "Data.Sign.Properties.*-identity\691" ]
+      (map (defName . snd) (rankLemmaCandidates arenaEnv (const True) 0.3 goalPlusZero []))
+  , check "rank: coverage stays 0.625 for the whole identity family (G1 tripwire)"
+      (all (\((c,_,_,_),_) -> abs (c - 0.625) < 1e-9)
+           (rankLemmaCandidates arenaEnv (const True) 0.3 goalPlusZero []))
+  , check "rank: ℕ instance has affinity 1, ℤ instance affinity 0"
+      (case rankLemmaCandidates arenaEnv (const True) 0.3 goalPlusZero [] of
+         (((_,_,aNat,_),_) : ((_,_,aInt,_),_) : _) -> aNat == 1 && aInt == 0
+         _                                         -> False)
+  , check "carrier: goal `zero` token resolves to the Nat segment"
+      (Set.member "Nat" (goalCarrierSegments arenaEnv goalPlusZero []))
+  , check "carrier: generic namespace segments never match"
+      (Set.null (Set.intersection
+                   (Set.fromList ["Data","Agda","Builtin","Properties","Base"])
+                   (goalCarrierSegments arenaEnv goalPlusZero [])))
+  , checkEq "carrier: a Commutative goal has no value carrier"
+      Set.empty (goalCarrierSegments arenaEnv "m + n \8801 n + m" [])
+  , check "carrier: context type ℕ contributes the Nat segment"
+      (Set.member "Nat" (goalCarrierSegments natEnv "foo" ["\8469"]))
+  , checkEq "carrier: the same goal with no context yields no carrier"
+      Set.empty (goalCarrierSegments natEnv "foo" [])
+  , check "carrier: a renaming alias's host module supplies the segment"
+      (Set.member "Nat" (goalCarrierSegments aliasEnv "\8469" []))
+  , checkEq "carrier: empty env → empty segments (no-renames determinism pin)"
+      Set.empty (goalCarrierSegments (RankEnv [] Map.empty) goalPlusZero [])
+  , checkEq "rank: with no carrier signal, order is the pre-R20 alphabetical tie-break"
+      [ "Data.Integer.Properties.+-identity\691"
+      , "Data.Nat.Properties.+-identity\691"
+      , "Data.Sign.Properties.*-identity\691" ]
+      (map (defName . snd) (rankLemmaCandidates arenaEnv (const True) 0.3 "m + n \8801 n + m" []))
+  , checkEq "moduleSegments strips generic components" (Set.fromList ["Nat"])
+      (moduleSegments "Data.Nat.Properties")
+  ]
+  where
+    goalPlusZero = "n + zero \8801 n"                     -- n + zero ≡ n
+    idr = "Algebra.RightIdentity Relation.Binary.PropositionalEquality._\8801_ "
+    arenaEnv = RankEnv
+      [ mkDef "Data.Nat.Properties.+-identity\691"     "Data.Nat.Properties"     KFunction
+              (Just (idr <> "0 Data.Nat._+_"))
+      , mkDef "Data.Integer.Properties.+-identity\691" "Data.Integer.Properties" KFunction
+              (Just (idr <> "(Data.Integer.+ 0) Data.Integer._+_"))
+      , mkDef "Data.Sign.Properties.*-identity\691"    "Data.Sign.Properties"    KFunction
+              (Just (idr <> "Data.Sign.+ Data.Sign._*_"))
+      , mkDef "Agda.Builtin.Nat.Nat.zero"              "Agda.Builtin.Nat"        KConstructor Nothing
+      ] Map.empty
+    natEnv   = RankEnv [ mkDef "Data.Nat.Base.\8469" "Data.Nat.Base" KDatatype Nothing ] Map.empty
+    aliasEnv = RankEnv [] (Map.singleton "Data.Nat.Base.\8469" "Agda.Builtin.Nat.Nat")
+
+----------------------------------------------------------------------
 -- Fixture replay — the protocol-skew tripwire.
 
 fixtureDir :: FilePath
@@ -700,6 +769,14 @@ diagnosticTests =
       True ("_\215_" `elem` RD.nameKeys "\215")            -- × ↦ _×_
   , check "isRefusableTag flags termination but not scope"
       (RD.isRefusableTag "TerminationIssue" && not (RD.isRefusableTag "NotInScope"))
+  -- hintOutOfScope (R19): a Mimer hint the file hasn't imported must be
+  -- recognised from the NotInScope reply; a genuine search miss must not.
+  , check "hintOutOfScope: true when the hint is the not-in-scope name"
+      (RD.hintOutOfScope "\8484" notInScopeMsg)                 -- ℤ, named in notInScopeMsg
+  , check "hintOutOfScope: false for an unrelated hint on a scope error"
+      (not (RD.hintOutOfScope "+-identity\691" notInScopeMsg))  -- +-identityʳ, not named
+  , check "hintOutOfScope: false on a non-scope (UnequalTypes) error"
+      (not (RD.hintOutOfScope "\8484" unequalMsg))
   ]
 
 ----------------------------------------------------------------------

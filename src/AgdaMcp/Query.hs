@@ -25,6 +25,7 @@ module AgdaMcp.Query
   , querySimilarBodies
   , queryFindLemma
   , goalHintNames
+  , goalHintCands
   , querySearch
   , queryStats
   , readSignature
@@ -61,9 +62,11 @@ import           AgdaGraph.Schema   (Access (..), Definition (..),
                                      Provenance (..), State (..))
 import           AgdaGraph.Similarity (SigBodyFingerprints (..), fingerprintSize)
 import           AgdaGraph.WL       (weightedJaccard)
-import           AgdaGraph.GoalCanon (conclusionOf, matchTokens, nameTokens,
-                                     shapeTokens, tokenJaccard, weightedCoverage,
-                                     stripQualifiers)
+import           AgdaGraph.GoalCanon (conclusionOf, matchTokens,
+                                     shapeTokens, stripQualifiers)
+import           AgdaGraph.LemmaRank (RankEnv (..), LemmaScore,
+                                     rankLemmaCandidates, goalCarrierSegments,
+                                     moduleSegments)
 
 import           AgdaMcp.State      (Loaded (..))
 
@@ -1162,8 +1165,9 @@ queryFindLemma
   -> Maybe Text     -- ^ module_prefix filter
   -> Maybe Text     -- ^ goal (free-text mode)
   -> Maybe Text     -- ^ anchor (anchor mode)
+  -> [Text]         -- ^ live context binder types (carrier affinity; @[]@ read-side)
   -> Text
-queryFindLemma ld lim minSim mKindTxt mModPrefix mGoal mAnchor =
+queryFindLemma ld lim minSim mKindTxt mModPrefix mGoal mAnchor ctxTypes =
   case badParse parseKind mKindTxt of
     Just bad -> "Unknown kind filter `" <> bad <> "` — use one of function / "
                   <> "projection / datatype / record / constructor / postulate / primitive / other."
@@ -1204,7 +1208,7 @@ queryFindLemma ld lim minSim mKindTxt mModPrefix mGoal mAnchor =
                         <> "`" <> filterNote
                         <> " (Weisfeiler–Leman signature fingerprint — the `similar_types`/"
                         <> "`silhouette` metric):\n"
-                        <> lemmaList ranked <> provNote
+                        <> lemmaList Set.empty ranked <> provNote
 
     -- ----------------------------------------------------------------
     -- Free-text mode: qualifier-stripped name/shape tokens + operator-
@@ -1220,7 +1224,8 @@ queryFindLemma ld lim minSim mKindTxt mModPrefix mGoal mAnchor =
           -- does ANY real def carry a signature at all? (ignores filters,
           -- so the "rebuild" note fires only on a truly sig-less graph.)
           anySig   = any (isJust . defSig) (realDefs ld)
-          ranked   = take lim (rankGoalCandidates ld candKeep minSim goal)
+          ranked   = take lim (rankGoalCandidates ld candKeep minSim goal ctxTypes)
+          carrier  = goalCarrierSegments (RankEnv (realDefs ld) (ldAliases ld)) goal ctxTypes
           shapeNote
             | Set.null gshape = ""
             | otherwise       = "; shape: " <> renderTokens gshape
@@ -1242,66 +1247,70 @@ queryFindLemma ld lim minSim mKindTxt mModPrefix mGoal mAnchor =
              else "Candidate lemmas for `" <> goal <> "`" <> filterNote
                     <> " (name/shape/coverage rank — a suggestion, not a proof; "
                     <> "`anchor` for WL type-shape):\n"
-                    <> lemmaList [ (prim3 sc, d) | (sc, d) <- ranked ]
+                    <> lemmaList carrier [ (prim3 sc, d) | (sc, d) <- ranked ]
                     <> "\n(goal tokens: " <> renderTokens gbase <> shapeNote <> ")"
                     <> weakNote
 
-    -- score-tuple accessors: (weighted coverage, jaccard, -bagsize).
-    prim3 (a, _, _) = a
-    jac3  (_, b, _) = b
+    -- score-tuple accessors: (weighted coverage, jaccard, affinity, -bagsize).
+    prim3 (a, _, _, _) = a
+    jac3  (_, b, _, _) = b
 
     renderTokens ts
       | Set.null ts = "(none)"
       | otherwise   = T.intercalate ", " [ "`" <> t <> "`" | t <- Set.toAscList ts ]
 
-    -- one ranked bullet, with the matched conclusion annotation.
-    lemmaList ranked = T.intercalate "\n"
+    -- one ranked bullet, with the matched conclusion annotation and, when
+    -- the candidate's module shares a carrier segment with the goal, a
+    -- `[carrier: …]` marker that differentiates an otherwise-flat menu.
+    lemmaList carrierSegs ranked = T.intercalate "\n"
       [ "- " <> pctOf s <> " `" <> defName d <> "` ["
               <> renderKind (defKind d) <> stateSuffix (defState d)
-              <> "] " <> loc d <> concSuffix d <> originSuffix d
+              <> "] " <> loc d <> concSuffix d <> carrierSuffix carrierSegs d <> originSuffix d
       | (s, d) <- ranked ]
+
+    carrierSuffix segs d
+      | Set.null hit = ""
+      | otherwise    = "  [carrier: " <> T.intercalate ", " (Set.toAscList hit) <> "]"
+      where hit = Set.intersection segs (moduleSegments (defModule d))
 
 -- | Ranked free-text goal candidates — the shared ranking core behind
 -- free-text `find_lemma` (rendering, in 'queryFindLemma') and `auto`'s
--- Mimer-hint seeding ('goalHintNames'), so the two never diverge.
--- Tokenises the goal (qualifier-stripped 'matchTokens' + algebraic
--- 'shapeTokens') and scores every signature-carrying def kept by
--- @candKeep@ by operator-'weightedCoverage', then 'tokenJaccard', then
--- tighter signature; keeps hits with coverage @>= minSim@, most-relevant
--- first. Empty when the graph carries no signatures.
+-- Mimer-hint seeding ('goalHintCands'), so the two never diverge. A thin
+-- adapter over 'rankLemmaCandidates' (in the shared @agda-graph@ library,
+-- so the test-suite can exercise it): supplies the snapshot's defs +
+-- @renaming@ aliases as a 'RankEnv'. @ctxTypes@ are the goal's live context
+-- binder types (@[]@ on the read side); they steer carrier affinity only.
+-- Empty when the graph carries no signatures.
 rankGoalCandidates
-  :: Loaded -> (Definition -> Bool) -> Double -> Text
-  -> [((Double, Double, Int), Definition)]
-rankGoalCandidates ld candKeep minSim goal =
-  sortBy (comparing (\(sc, d) -> (Down sc, defName d)))
-    [ (sc, d)
-    | d <- realDefs ld, candKeep d
-    , Just sig <- [defSig d]
-    , let bag = matchTokens keep (conclusionOf sig) `Set.union` nameTokens (defName d)
-          sc  = ( weightedCoverage gtoks bag, tokenJaccard gtoks bag, negate (Set.size bag) )
-    , (\(a, _, _) -> a) sc >= minSim ]
-  where
-    vocab  = Set.fromList [ baseName (defName d) | d <- realDefs ld ]
-    keep t = t `Set.member` vocab
-    gtoks  = matchTokens keep concl `Set.union` shapeTokens concl
-    concl  = conclusionOf goal
+  :: Loaded -> (Definition -> Bool) -> Double -> Text -> [Text]
+  -> [(LemmaScore, Definition)]
+rankGoalCandidates ld candKeep minSim goal ctxTypes =
+  rankLemmaCandidates (RankEnv (realDefs ld) (ldAliases ld)) candKeep minSim goal ctxTypes
 
--- | Up to @n@ in-scope short names to seed Mimer hints for a goal, most
--- relevant first: the base component of each ranked candidate's FQN
--- (Mimer 2.9 rejects a qualified hint name, and an out-of-scope hint
--- aborts the whole search — so `auto` tries them one at a time), deduped
--- in rank order. A modest coverage floor keeps out junk hints. Empty when
--- the graph has no signatures.
-goalHintNames :: Loaded -> Int -> Text -> [Text]
-goalHintNames ld n goal =
-  take n (ordNub [ baseName (defName d)
-                 | (_, d) <- rankGoalCandidates ld (const True) 0.4 goal ])
+-- | Ranked @(base-name, source def)@ pairs to seed Mimer hints for a goal,
+-- most relevant first, deduped on the base name (keeping the first, i.e.
+-- highest-ranked, def). The base name is what Mimer takes (2.9 rejects a
+-- qualified hint, and an out-of-scope hint aborts the whole search — so
+-- `auto` tries them one at a time); the paired 'Definition' lets `auto`
+-- name the defining module of an out-of-scope hint (R19) without a second
+-- graph query. A modest coverage floor keeps junk out. Context-free
+-- (@ctxTypes = []@) — but inherits the carrier-affinity tiebreak, so the
+-- carrier-matching instance is tried first. Empty on a signature-less graph.
+goalHintCands :: Loaded -> Int -> Text -> [(Text, Definition)]
+goalHintCands ld n goal =
+  take n (ordNubOn fst [ (baseName (defName d), d)
+                       | (_, d) <- rankGoalCandidates ld (const True) 0.4 goal [] ])
   where
-    ordNub = go Set.empty
-    go _    []       = []
-    go seen (x : xs)
-      | x `Set.member` seen = go seen xs
-      | otherwise           = x : go (Set.insert x seen) xs
+    ordNubOn key = go Set.empty
+      where
+        go _    []       = []
+        go seen (x : xs)
+          | key x `Set.member` seen = go seen xs
+          | otherwise               = x : go (Set.insert (key x) seen) xs
+
+-- | Up to @n@ Mimer hint base-names for a goal (see 'goalHintCands').
+goalHintNames :: Loaded -> Int -> Text -> [Text]
+goalHintNames ld n goal = map fst (goalHintCands ld n goal)
 
 -- | Base (final dotted component) of a qualified name
 -- (@Data.Nat.Properties.+-comm@ → @+-comm@).

@@ -26,6 +26,7 @@ module AgdaRepair.Diagnostic
   , stripUnderscores
   , nameKeys
   , isRefusableTag
+  , hintOutOfScope
   ) where
 
 import           Data.Char        (isAlphaNum)
@@ -103,6 +104,19 @@ errorTags = mapMaybe tagOf . T.lines
       , not (T.null close)
       = Just (T.strip tag)
       | otherwise = Nothing
+
+-- | Did agda reject a Mimer hint @h@ as out of scope? Mimer aborts the
+-- whole @Cmd_autoOne@ when a seeded hint name is not in scope (Agda 2.9),
+-- returning a @NotInScope@ error. Reporting that as "no solution" is a
+-- false negative — the graph named a closing lemma the file just hasn't
+-- imported (R19). Precise path: the structured not-in-scope list names the
+-- hint. Fallback: a @NotInScope@ tag with the (dot-free base) hint present
+-- in the message, hedging a layout the primary parser misses. Anything else
+-- is a genuine search failure, not a scope problem.
+hintOutOfScope :: Text -> Text -> Bool
+hintOutOfScope h err =
+     h `elem` notInScopeNames err
+  || ("NotInScope" `elem` errorTags err && h `T.isInfixOf` err)
 
 -- | Not-in-scope identifiers: the token after @when scope checking@, plus the
 -- indented entries under a @Not in scope:@ block, minus 'stopWords'. Handles

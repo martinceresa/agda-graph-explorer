@@ -5,7 +5,7 @@ Forward-looking work on the graph consumers. For runnable examples see
 [Backlog.md](Backlog.md) and [Deferred.md](Deferred.md); for shipped work see
 [Changelog.md](Changelog.md). A consolidated, prioritized fix plan for the
 open items below (designs, files, verification gates) is in
-[ToFix.md](ToFix.md).
+[Plan/FixRLess.md](Plan/FixRLess.md).
 
 ---
 ## Ideas
@@ -23,20 +23,20 @@ open items below (designs, files, verification gates) is in
   is deliberately Agda-free; the gate needs agda 2.9 + agda-deps +
   registered agda-stdlib 2.4 + the arena repo pinned + in-CI stdlib graph
   builds. Budget as a new Agda-in-CI job, not an extra step. Staging plan in
-  [ToFix.md](ToFix.md) §6 (offline G1+G2 first via cached graphs, live
+  [Plan/FixRLess.md](Plan/FixRLess.md) §6 (offline G1+G2 first via cached graphs, live
   G3+G4 second).
 
 - [ ] Check VerinaAgda benchmark and try to close the gap. Now unblocked:
   the I1/I2 retrieval + hint fixes landed and the ergonomics tags shipped —
   re-run the A/B with the sig graph + availability hint and record *per-rung*
-  uptake-when-stuck (the powered-P1 gap). See [ToFix.md](ToFix.md) §7.
+  uptake-when-stuck (the powered-P1 gap). See [Plan/FixRLess.md](Plan/FixRLess.md) §7.
 
 - [ ] Stdlib federation follow-ups (base landed 2026-07-05 — see Changelog:
   `--overlay-graph` / `overlay-graphs:` + `scripts/build-stdlib-graph.sh`).
   Remaining: auto-build + auto-register a stdlib overlay on first run (warm
   compilation), and a producer flag keeping cross-boundary external edges as
   dangling refs (would let `callers`/`impact` cross into the overlay — belongs
-  in the `agda-deps` repo). Consumer-side design in [ToFix.md](ToFix.md) §8.
+  in the `agda-deps` repo). Consumer-side design in [Plan/FixRLess.md](Plan/FixRLess.md) §8.
 
 - [ ] **Per-answer closure-coverage beyond the cone tools** (arena R2, final
   slice): `search`/`callers`/`callees`/`impact`/`roots` now carry the count;
@@ -80,7 +80,7 @@ open items below (designs, files, verification gates) is in
   `Schema.ReExport.rxRenames` + alias resolution — `locate`/`type_of` resolve
   `Host.combine` to its `renaming` origin and `search` surfaces the alias
   (R14). Schema-decode + backward-compat regression tests in `test/Spec.hs`.
-- [x] Arena-feedback round 2 (2026-07-09) — the ToFix.md batch: I6 partial-graph
+- [x] Arena-feedback round 2 (2026-07-09) — the FixRLess.md (ex-`ToFix.md`) batch: I6 partial-graph
   flagging + R1 source-staleness footer (incl. preloaded mode), R9 graph
   identity hashes in `status`, I5 dead mutual-recursion cycles, R2 coverage
   counts on `callers`/`callees`/`impact`/`roots`, R3 `search mode=text`

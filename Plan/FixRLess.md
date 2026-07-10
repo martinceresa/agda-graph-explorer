@@ -1,14 +1,18 @@
-# ToFix — consolidated fix plan for the open TODOs and arena requests
+# FixRLess — consolidated fix plan for the open TODOs and arena requests
+
+> Relocated from the repo-root `ToFix.md` to `Plan/FixRLess.md` (2026-07-10).
+> Scope unchanged: the R1–R14 triage batch. The later R19/R20 work has its own
+> plan in [Fix19.20.md](Fix19.20.md).
 
 Working plan for everything left open after the 2026-07-09 MCPBenchArena
 triage (Requests R1–R14 → Issues I4–I6 + TODO entries; the quick wins
-R5/R13/R7/R2-search shipped that day — see [Changelog.md](Changelog.md)).
+R5/R13/R7/R2-search shipped that day — see [Changelog.md](../Changelog.md)).
 Each item: the problem, the fix design, where it goes, size, and how to
 verify. Ordered by priority (correctness first, then leverage per effort).
-Items in [Deferred.md](Deferred.md) stay deferred and are not re-planned here.
+Items in [Deferred.md](../Deferred.md) stay deferred and are not re-planned here.
 
 **Status (2026-07-09):** items 1–5, 9, 10 are **DONE** (shipped this session;
-see [Changelog.md](Changelog.md) and Issues I5/I6). Item 1 is done as a
+see [Changelog.md](../Changelog.md) and Issues I5/I6). Item 1 is done as a
 *mitigation* — every affected answer is flagged; the complete producer-side
 fix is I6c under section P. Items 6, 7, 8, 11 remain; the section text below is
 the standing design for them.

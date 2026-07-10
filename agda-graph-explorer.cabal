@@ -28,6 +28,7 @@ library agda-graph
                     AgdaGraph.WL
                     AgdaGraph.Similarity
                     AgdaGraph.GoalCanon
+                    AgdaGraph.LemmaRank
                     AgdaGraph.ConfigCore
                     AgdaGraph.Interaction.Protocol
                     AgdaGraph.Interaction.Iotcm

@@ -203,7 +203,7 @@ graphTools =
           _ -> withFresh ss (\ld ->
                  queryFindLemma ld (argInt a "limit" 10) (argDouble a "min_sim" 0.3)
                    (argText a "kind") (argText a "module_prefix")
-                   (argText a "goal") (argText a "anchor")))
+                   (argText a "goal") (argText a "anchor") []))
 
   , Tool "search"
       "[find] Find definitions whose qualified name contains a substring, ranked by \
