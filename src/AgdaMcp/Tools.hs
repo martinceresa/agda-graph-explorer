@@ -20,7 +20,8 @@ import           Data.Maybe         (fromMaybe)
 import           Data.Ord           (Down (..))
 import           Data.Text          (Text)
 import qualified Data.Text          as T
-import           Data.Time.Clock    (diffUTCTime, getCurrentTime)
+import           Data.Time.Clock    (NominalDiffTime, diffUTCTime,
+                                     getCurrentTime)
 import           Data.Time.Format.ISO8601 (iso8601Show)
 import           System.Directory   (doesPathExist)
 import           System.Exit        (ExitCode (..))
@@ -312,6 +313,28 @@ sourceStaleFooter ld
         <> "the current sources (rebuild, or restart with a fresh --graph)."
   | otherwise = ""
 
+-- | Appended to a /watched/-mode read whose snapshot is behind a source edit
+-- the fsnotify watcher has not yet turned into a rebuild (debounce lag, R16).
+-- Distinct from 'staleFooter' (a rebuild is actually in flight): here none is
+-- scheduled yet, so the answer is transiently behind. Flags the confident
+-- false negative (the R1/R11 theme) with how far behind it is.
+pendingFooter :: NominalDiffTime -> Text
+pendingFooter dt =
+  "\n# stale: a source file under the include roots was edited " <> secs
+    <> " ago and the graph rebuild has not fired yet — this answer may be "
+    <> "behind, so a \"no match\" is not authoritative. Re-query shortly."
+  where
+    secs = T.pack (show (max (1 :: Int) (round dt))) <> "s"
+
+-- | The rebuild-side footer for a served snapshot's 'Freshness': the
+-- background-rebuild note ('staleFooter'), the R16 pending-rebuild note, or
+-- nothing when 'Fresh'. The snapshot's own health / source-staleness footers
+-- ('snapshotFooters') are appended separately and fire regardless.
+freshnessFooter :: Loaded -> Freshness -> Text
+freshnessFooter _  Fresh              = ""
+freshnessFooter ld Rebuilding         = staleFooter ld
+freshnessFooter _  (BehindPending dt) = pendingFooter dt
+
 -- | The health + source-staleness footers a served snapshot always carries,
 -- regardless of the rebuilding-stale flag. Threaded into every read answer.
 snapshotFooters :: Loaded -> Text
@@ -348,14 +371,14 @@ withFreshIO :: ServerState -> (Loaded -> IO (Either Text Text)) -> IO (Either Te
 withFreshIO ss f = do
   e <- ensureFresh ss
   case e of
-    Left err          -> pure (Left (T.pack err))
-    Right (ld, stale) -> do
-      noteRebuilt ss stale
+    Left err       -> pure (Left (T.pack err))
+    Right (ld, fr) -> do
+      noteRebuilt ss (freshnessStale fr)
       r <- f ld
       pure $ case r of
         Left err  -> Left err
         Right txt -> Right (appendTextFooters
-                              ((if stale then staleFooter ld else "") <> snapshotFooters ld)
+                              (freshnessFooter ld fr <> snapshotFooters ld)
                               txt)
 
 -- | The fail-fast wrapper used by @type_of@. Before paying the
@@ -394,8 +417,8 @@ runUnused ss a = do
   e <- ensureFresh ss
   case e of
     Left err -> pure (Left ("cannot prepare graph: " <> T.pack err))
-    Right (ld, stale) -> do
-      noteRebuilt ss stale
+    Right (ld, fr) -> do
+      noteRebuilt ss (freshnessStale fr)
       let c = ssConfig ss
       mscope <- resolveScope c ld (argText a "scope")
       case mscope of
@@ -442,7 +465,7 @@ runUnused ss a = do
                 if jsonOut
                   then T.pack body
                   else header <> caveat <> T.pack body
-                         <> (if stale then staleFooter ld else "")
+                         <> freshnessFooter ld fr
                          <> snapshotFooters ld
   where
     caveat =

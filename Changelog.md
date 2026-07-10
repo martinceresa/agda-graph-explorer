@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+### Arena-feedback round 4: live-watch staleness delta + brief/path coverage (R16 + R17) (2026-07-10)
+
+The two open consumer follow-ups from the 2026-07-09 arena verification
+(`MCPBenchArena/Requests.md`), both **Owner: agda-explore**. Verified live
+against a scratch project (`agda`/`agda-deps` on `$PATH`); `interaction-spec`
+passes; no change to the determinism-tested tools.
+
+- **`brief`/`path` carry the closure-coverage footer (R17).** The per-answer
+  `coverageFootnote` (⚠ N source file(s) outside the entry closure) already
+  rode `search`/`callers`/`callees`/`impact`/`roots`; it now also rides
+  `brief` and `path` (both the found-path and no-path branches), so an
+  out-of-closure blind spot reached through those two tools is no longer
+  silent. `brief` strips the footer out of its embedded callers/callees
+  sub-blocks so the orientation bundle shows it once, at the end. No footer
+  when nothing is orphaned (byte-identical to before) or on `--graph`-only
+  preloaded mode with no include roots.
+- **Live-watch "how far behind" staleness flag (R16).** A watched-mode read
+  served while the snapshot is behind an on-disk edit the fsnotify watcher has
+  not yet turned into a rebuild (debounce lag, or a missed event) previously
+  looked fresh and carried no flag (arena measured 0/3 flagged). `ensureFresh`
+  now returns a `Freshness` (`Fresh` / `Rebuilding` / `BehindPending dt`)
+  instead of a bare stale `Bool`: in watched mode, when no rebuild is dirty or
+  in flight, a TTL-cached `probeBehind` compares the newest source mtime under
+  the include roots against the snapshot's build time and, when behind,
+  appends `# stale: a source file … was edited Ns ago and the graph rebuild
+  has not fired yet — … a "no match" is not authoritative`. The scan is cached
+  under a 1s TTL so watched mode still pays no per-read scan in steady state;
+  poll and preloaded modes are unchanged (poll already flagged via its
+  `ScanSig` compare). Guarded so it never double-flags with the existing
+  source-staleness footer.
+- **R18** (mutually-recursive dead cycles) needed no work — it shipped in
+  `9b69b48` (`computeDeadCycles`); the arena's open marking predated that
+  batch.
+
 ### Arena-feedback round 3: out-of-scope `auto` hints + carrier-aware lemma ranking (R19 + R20) (2026-07-10)
 
 The two fresh MCPBenchArena observations from the powered P1 haiku×5 run,

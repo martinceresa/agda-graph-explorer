@@ -23,6 +23,8 @@ module AgdaMcp.State
     -- * Loaded snapshot
   , Loaded(..)
   , ScanSig(..)
+  , Freshness(..)
+  , freshnessStale
   , currentNodeKeyVersion
     -- * Server
   , ServerState(..)
@@ -66,7 +68,8 @@ import qualified Data.Set             as S
 import           Data.Ord             (comparing)
 import           Data.Text            (Text)
 import qualified Data.Text            as T
-import           Data.Time.Clock      (UTCTime, getCurrentTime)
+import           Data.Time.Clock      (NominalDiffTime, UTCTime, diffUTCTime,
+                                       getCurrentTime)
 import qualified Data.Vector          as V
 import           GHC.IO.Handle.Lock   (LockMode (..), hTryLock, hUnlock)
 import           System.Directory     (canonicalizePath,
@@ -186,6 +189,27 @@ defaultConfig = Config
 -- A change in either triggers a rebuild under 'ensureFresh'.
 data ScanSig = ScanSig !Int !(Maybe UTCTime)
   deriving (Eq)
+
+-- | How current the snapshot 'ensureFresh' serves is, for the read-side
+-- staleness footer + the @stale@ telemetry column. 'Fresh' needs no footer;
+-- the other two do (and both count as stale — see 'freshnessStale').
+data Freshness
+  = Fresh
+    -- ^ current: watched with no pending edit, or polled with a matching 'ScanSig'.
+  | Rebuilding
+    -- ^ a rebuild is in flight (serve-stale); the background worker will swap
+    -- the snapshot when it finishes.
+  | BehindPending !NominalDiffTime
+    -- ^ watched mode only (R16): a source under the include roots is newer
+    -- than the snapshot, but the fsnotify rebuild has not fired yet (debounce
+    -- lag). Carries the gap (newest source mtime − snapshot build time).
+  deriving (Eq)
+
+-- | Whether a 'Freshness' marks a stale read (the @stale@ telemetry column /
+-- a footer): everything but 'Fresh'.
+freshnessStale :: Freshness -> Bool
+freshnessStale Fresh = False
+freshnessStale _     = True
 
 -- | The node-key convention this binary expects. A loaded graph below
 -- this is stale-format and (in live mode) triggers a rebuild rather than
@@ -316,7 +340,7 @@ data ServerState = ServerState
     -- ^ Telemetry: whether the /most recent/ tool runner served a
     -- stale snapshot — i.e. a rebuild was pending/in-flight (the @stale@
     -- column), NOT "this query itself ran a rebuild". The tool runners
-    -- write it via the @(Loaded, Bool)@ plumbing;
+    -- write it via the @(Loaded, Freshness)@ plumbing ('freshnessStale');
     -- 'AgdaMcp.Tools.handleCall' reads and
     -- resets it after each @tools/call@. (status sets it 'False'; the
     -- @rebuild@ tool sets it 'True'.)
@@ -386,6 +410,12 @@ data ServerState = ServerState
     -- passive adoption telemetry, so which tools agents actually use is
     -- visible without parsing transcripts. In-memory only (resets with the
     -- daemon).
+  , ssBehindProbe :: !(IORef (Maybe (UTCTime, ScanSig)))
+    -- ^ TTL cache for the R16 "how far behind" probe: the wall-clock time of
+    -- the last proactive source rescan and its 'ScanSig'. In /watched/ mode
+    -- 'ensureFresh' rescans at most once per 'behindProbeTtl' to spot a
+    -- snapshot behind an on-disk edit the fsnotify watcher has not yet
+    -- delivered (debounce lag), without paying a full scan on every read.
   }
 
 newServerState :: Config -> IO ServerState
@@ -410,6 +440,7 @@ newServerState c =
     <*> newIORef S.empty
     <*> (if cfgInspect c then Just <$> newInspectHub else pure Nothing)
     <*> newIORef M.empty        -- ssToolCounts
+    <*> newIORef Nothing        -- ssBehindProbe
 
 -- ---------------------------------------------------------------------
 -- Source scanning
@@ -1163,17 +1194,47 @@ runBuildShared ss forceFull
 --     source tree's file-count + newest mtime and compare to the
 --     snapshot's 'ScanSig'. On a mismatch we also (lazily) ensure the
 --     background worker is running so 'ssWake' actually drains.
-ensureFresh :: ServerState -> IO (Either String (Loaded, Bool))
+-- | The TTL for the R16 behind-probe cache. A full source rescan on every
+-- read would defeat watched mode (whose whole point is to avoid scanning), so
+-- the proactive "am I behind?" check runs at most once per this window.
+-- Shorter than a typical fsnotify debounce lag (~2s measured), so a genuine
+-- edit is still flagged within it.
+behindProbeTtl :: NominalDiffTime
+behindProbeTtl = 1
+
+-- | R16: in /watched/ mode, is the served snapshot behind an on-disk edit the
+-- fsnotify watcher has not yet turned into a rebuild? Compares the newest
+-- source mtime under the include roots against the snapshot's build time,
+-- caching the scan under 'behindProbeTtl'. 'BehindPending' with the gap when
+-- behind, else 'Fresh'. Skipped (→ 'Fresh') when the snapshot already knows it
+-- predates a source ('ldStaleVsSource' — the source-staleness footer covers
+-- that) or when there are no include roots to scan.
+probeBehind :: ServerState -> Loaded -> IO Freshness
+probeBehind ServerState{..} ld
+  | ldStaleVsSource ld || null (cfgIncludes ssConfig) = pure Fresh
+  | otherwise = do
+      now    <- getCurrentTime
+      cached <- readIORef ssBehindProbe
+      ScanSig _ mNewest <- case cached of
+        Just (t, sig) | diffUTCTime now t < behindProbeTtl -> pure sig
+        _ -> do sig <- scanSources (cfgIncludes ssConfig)
+                writeIORef ssBehindProbe (Just (now, sig))
+                pure sig
+      pure $ case mNewest of
+        Just newest | newest > ldBuiltAt ld -> BehindPending (diffUTCTime newest (ldBuiltAt ld))
+        _                                   -> Fresh
+
+ensureFresh :: ServerState -> IO (Either String (Loaded, Freshness))
 ensureFresh ss@ServerState{..}
   | cfgPreloaded ssConfig = do
       cur <- readIORef ssLoaded
       case cur of
-        Just ld -> pure (Right (ld, False))   -- preloaded never rebuilds: never stale
+        Just ld -> pure (Right (ld, Fresh))   -- preloaded never rebuilds: never stale
         Nothing -> withMVar ssRebuildLock $ \_ -> do
           -- Re-check under the lock in case a concurrent caller seeded it.
           cur' <- readIORef ssLoaded
           case cur' of
-            Just ld -> pure (Right (ld, False))
+            Just ld -> pure (Right (ld, Fresh))
             Nothing -> seedFrom (loadLoaded ssConfig (cfgGraphPath ssConfig))
   | otherwise = do
       cur <- readIORef ssLoaded
@@ -1189,8 +1250,18 @@ ensureFresh ss@ServerState{..}
           -- than presenting soon-to-be-old data as fresh.
           building  <- readIORef ssBuilding
           if not warranted
-            then pure (Right (ld, building))   -- fresh enough (unless a build is in flight)
-            else do
+            then
+              -- Not scheduled for a rebuild. If one is in flight, this snapshot
+              -- is about to be superseded (serve-stale). Otherwise, in watched
+              -- mode, proactively check whether we are behind an edit the
+              -- fsnotify event has not delivered yet (R16 debounce lag).
+              if building
+                then pure (Right (ld, Rebuilding))
+                else do
+                  watching <- isWatching ss
+                  fr <- if watching then probeBehind ss ld else pure Fresh
+                  pure (Right (ld, fr))
+            else
               -- Serve stale + schedule an async rebuild. Coalescing:
               -- setting ssDirty and a single tryPutMVar is idempotent under
               -- concurrent callers; 'rebuildLocked' still serialises the
@@ -1201,11 +1272,11 @@ ensureFresh ss@ServerState{..}
                   writeIORef ssDirty True
                   ensureWorker ss
                   void (tryPutMVar ssWake ())
-                  pure (Right (ld, True))
+                  pure (Right (ld, Rebuilding))
                 -- Auto-rebuild off: no background rebuild is coming, so don't
                 -- cry stale — unless a manual rebuild (the `rebuild` tool) is
                 -- actually in flight right now.
-                else pure (Right (ld, building))
+                else pure (Right (ld, if building then Rebuilding else Fresh))
   where
     -- Is a rebuild warranted for the current snapshot? Watched: trust the
     -- dirty flag (no scan); polled: re-scan and compare the ScanSig. Both
@@ -1240,7 +1311,7 @@ ensureFresh ss@ServerState{..}
           r <- rebuildLocked ss $ \dirty ld ->
                  pure (dirty || not (loadedFormatCurrent ld))
           case r of
-            Right ld  -> pure (Right (ld, False))
+            Right ld  -> pure (Right (ld, Fresh))
             Left raw  -> do
               -- 'doBuild' stored the clean diagnostic + re-dirtied; kick
               -- the worker so retries happen off the query path.
@@ -1252,7 +1323,7 @@ ensureFresh ss@ServerState{..}
     seedFrom act = do
       r <- act
       case r of
-        Right ld -> writeIORef ssLoaded (Just ld) >> pure (Right (ld, False))
+        Right ld -> writeIORef ssLoaded (Just ld) >> pure (Right (ld, Fresh))
         Left e   -> pure (Left e)
 
 -- | Commit a freshly built snapshot: clear the cold-start and change-gate

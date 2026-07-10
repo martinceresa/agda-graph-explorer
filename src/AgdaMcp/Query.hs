@@ -596,6 +596,11 @@ queryBrief ld lim name = case resolveDefNote ld name of
   Nothing        -> notFound ld name
   Just (note, d) ->
     let fqn = defName d
+        cov = coverageFootnote ld
+        -- The embedded callers/callees sub-blocks each append 'cov' when
+        -- non-empty; strip it there so the orientation bundle carries the
+        -- closure-coverage footer once, at the end (R17), not per section.
+        dropCov = if T.null cov then id else T.replace cov ""
         sig = case defSig d of
                 Just t | not (T.null (T.strip t)) -> t
                 _ -> "(no signature in the graph — run `type_of name=" <> fqn <> "`)"
@@ -603,11 +608,11 @@ queryBrief ld lim name = case resolveDefNote ld name of
         blocks =
           [ T.stripEnd (queryLocate ld fqn)
           , section "type"             sig
-          , section "callers (direct)" (queryCallers ld False Nothing Nothing False lim FmtText fqn)
-          , section "callees (direct)" (queryCallees ld False Nothing Nothing False lim FmtText fqn)
+          , section "callers (direct)" (dropCov (queryCallers ld False Nothing Nothing False lim FmtText fqn))
+          , section "callees (direct)" (dropCov (queryCallees ld False Nothing Nothing False lim FmtText fqn))
           , section "similar bodies"   (querySimilarBodies ld 3 0.3 fqn)
           ]
-    in note <> T.intercalate "\n\n" blocks
+    in note <> T.intercalate "\n\n" blocks <> cov
 
 queryCallers :: Loaded -> Bool -> Maybe Text -> Maybe Text -> Bool -> Int -> OutFmt -> Text -> Text
 queryCallers = edgesQuery True
@@ -760,7 +765,10 @@ queryPath ld k mPrefix fromName toName =
       if defId a == defId b
       then
           "`" <> defName a <> "` and `" <> defName b <> "` are the same definition."
-      else
+      -- A path answer (found or "no path") is only as complete as the closure:
+      -- a real dependency link through an out-of-closure file would be missed,
+      -- so flag partial coverage the same as the cone tools (R17).
+      else (<> coverageFootnote ld) $
           let ix    = ldIndex ld
               allow n = maybe True (`T.isPrefixOf` defModule (defAt ix n)) mPrefix
               paths = kShortestPathsVia ix allow (defId a) (defId b) kEff

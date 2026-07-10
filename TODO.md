@@ -38,10 +38,6 @@ open items below (designs, files, verification gates) is in
   dangling refs (would let `callers`/`impact` cross into the overlay — belongs
   in the `agda-deps` repo). Consumer-side design in [Plan/FixRLess.md](Plan/FixRLess.md) §8.
 
-- [ ] **Per-answer closure-coverage beyond the cone tools** (arena R2, final
-  slice): `search`/`callers`/`callees`/`impact`/`roots` now carry the count;
-  extend to `brief`/`path` if measurement shows it helps.
-
 - [ ] **File-level option escapes** (soundness-escape, second half): surface
   `--no-positivity-check` / `--type-in-type` / `--no-termination-check` once
   `agda-deps` Phase 2 emits them as a top-level `moduleOptionEscapes` field
@@ -68,6 +64,18 @@ open items below (designs, files, verification gates) is in
 
 ## Shipped — see Changelog
 
+- [x] Live-watch staleness delta + brief/path coverage (R16 + R17) (2026-07-10)
+  — closes the two open consumer follow-ups the arena's `Requests.md` still
+  marked open. **R17:** `brief`/`path` now carry the same closure-coverage
+  footer as the cone tools (`coverageFootnote`; `brief` de-dups it out of its
+  embedded callers/callees so it shows once). **R16:** a watched-mode read
+  behind an on-disk edit the fsnotify event has not delivered yet (debounce
+  lag / missed event) now carries a `# stale: … edited Ns ago … rebuild has
+  not fired yet` footer via a new `Freshness` (`Fresh`/`Rebuilding`/
+  `BehindPending`) returned by `ensureFresh` + a TTL-cached `probeBehind`
+  source scan (watched mode only; poll/preloaded unchanged). (R18 —
+  mutually-recursive dead cycles — was already shipped in `9b69b48`; the arena
+  entry was stale.)
 - [x] Transitive soundness taint (R12 follow-on) (2026-07-09) — a reachability
   query over the adopted `unsafe` field: `AgdaGraph.Index.unsafeDeps` +
   `roots … unsafe=any` (transitive audit, witnessed) + passive
