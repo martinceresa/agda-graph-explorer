@@ -29,7 +29,7 @@ module AgdaGraph.Union
   ( unionExpandedGraphs
   ) where
 
-import           Data.List        (foldl', sortOn)
+import           Data.List        (foldl', sort, sortOn)
 import qualified Data.Map.Strict  as M
 import           Data.Maybe       (fromMaybe)
 import           Data.Text        (Text)
@@ -61,6 +61,8 @@ import           AgdaGraph.Schema (Definition (..), ExpandedGraph (..),
 --     emits @[]@.
 --   * __moduleFiles__ / __modules__ / __failedModules__ /
 --     __externalModules__ are unioned (deduped, order-stable).
+--   * __moduleOptionEscapes__ is unioned by module; a module escaping in
+--     several inputs keeps the sorted, deduped union of its escape flags.
 --   * __entryModule__ is the first input's (representative); __producer__ /
 --     __nodeKeyVersion__ are taken from the first input. The schema records
 --     a single 'egEntryModule', so it is necessarily cosmetic under a
@@ -87,6 +89,8 @@ unionExpandedGraphs gs@(g0 : _) =
     , egNodeKeyVersion   = egNodeKeyVersion g0
     , egReExports        = concatMap egReExports gs
     , egExternalsSummary = egExternalsSummary g0
+    , egModuleOptionEscapes = M.unionsWith mergeEscapes
+                                (map egModuleOptionEscapes gs)
     , egEdgeProvenance   = mergedProvenance
     , egSubtermHashes    = mergedHashes
     , egSubtermDepths    = mergedDepths
@@ -206,6 +210,13 @@ orElseSig Nothing  m = m
 betterProv :: Provenance -> Provenance -> Provenance
 betterProv ProvUnknown p = p
 betterProv p           _ = p
+
+-- | Merge two graphs' escape-flag lists for the same module: the sorted,
+-- deduped union, preserving the producer's ascending-per-module contract.
+-- The common case is identical lists (a module built the same way in every
+-- entry), where this is the input unchanged.
+mergeEscapes :: [Text] -> [Text] -> [Text]
+mergeEscapes a b = nubOrd (sort (a ++ b))
 
 -- | Pad (or truncate) a (possibly absent) list to length @n@ with a filler.
 -- A 'Nothing'/empty list pads entirely with the filler — used so a graph

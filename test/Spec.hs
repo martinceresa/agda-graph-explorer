@@ -36,7 +36,7 @@ import           AgdaInteract.GoalId
 import           AgdaInteract.Edit
 import qualified AgdaRepair.Diagnostic as RD
 import qualified AgdaRepair.Edit       as RE
-import           Data.Aeson            ( eitherDecode )
+import           Data.Aeson            ( eitherDecode, encode )
 import qualified Data.Map.Strict       as Map
 import           AgdaGraph.Schema      ( ExpandedGraph(..), Definition(..), ReExport(..)
                                        , State(..), Kind(..), Access(..) )
@@ -78,6 +78,7 @@ main = do
   sequence_ (map ($ fails) unusedDeadTests)
   sequence_ (map ($ fails) schemaFieldTests)
   sequence_ (map ($ fails) taintTests)
+  sequence_ (map ($ fails) moduleOptionEscapeTests)
   sequence_ (map ($ fails) lemmaRankTests)
   replayTests fails
   n <- readIORef fails
@@ -489,6 +490,67 @@ taintTests = case eitherDecode taintGraphJson :: Either String ExpandedGraph of
         (Just []) (depNames "Danger.loops")
     , checkEq "taint: unreachable escape (cheat) does not taint thm"
         False (fmap (elem "Danger.cheat") (depNames "Proof.thm") == Just True)
+    ]
+
+----------------------------------------------------------------------
+-- Module-level OPTIONS soundness escapes (agda-deps `moduleOptionEscapes`):
+-- the top-level object decodes into 'egModuleOptionEscapes', 'buildIndex'
+-- folds each module's escapes into the enclosed defs' 'defUnsafe' (merged
+-- with any direct escape, sorted, deduped), transitive taint ('unsafeDeps')
+-- sees them, and the encoder round-trips the object (omitting it when empty).
+
+escapeGraphJson :: BL.ByteString
+escapeGraphJson = BLC.pack $ unlines
+  [ "{ \"v\": 2, \"mode\": \"expanded\", \"schemaVersion\": 2"
+  , ", \"modules\": [\"Unsafe\", \"Proof\"]"
+  , ", \"moduleFiles\": {}"
+  , ", \"definitions\":"
+  , "  [ { \"name\": \"Unsafe.bad\",       \"module\": \"Unsafe\", \"kind\": \"function\" }"
+  , "  , { \"name\": \"Unsafe.alsoLoops\", \"module\": \"Unsafe\", \"kind\": \"function\", \"unsafe\": [\"non-terminating\"] }"
+  , "  , { \"name\": \"Proof.thm\",        \"module\": \"Proof\",  \"kind\": \"function\" }"
+  , "  , { \"name\": \"Proof.clean\",      \"module\": \"Proof\",  \"kind\": \"function\" }"
+  , "  ]"
+  , ", \"definitionEdges\": [ [\"Proof.thm\", \"Unsafe.bad\"] ]"
+  , ", \"moduleOptionEscapes\": { \"Unsafe\": [\"--no-positivity-check\", \"--type-in-type\"] }"
+  , "}"
+  ]
+
+moduleOptionEscapeTests :: [Check]
+moduleOptionEscapeTests = case eitherDecode escapeGraphJson :: Either String ExpandedGraph of
+  Left err -> [ check ("escape fixture decodes: " ++ err) False ]
+  Right g ->
+    let ix = buildIndex g
+        -- 'defUnsafe' of a def by name, via the Index (post-fold).
+        unsafeOfIx n = fmap (defUnsafe . defAt ix) (lookupId ix n)
+        depNames n = fmap (\i -> map (defName . defAt ix) (unsafeDeps ix i)) (lookupId ix n)
+        -- Byte containment of the encoded graph (for the omit-when-empty check).
+        hasField bs = T.isInfixOf "moduleOptionEscapes"
+                        (T.pack (BLC.unpack (encode (bs :: ExpandedGraph))))
+    in
+    [ checkEq "escape: moduleOptionEscapes decodes ascending per module"
+        (Just ["--no-positivity-check", "--type-in-type"])
+        (Map.lookup "Unsafe" (egModuleOptionEscapes g))
+    , checkEq "escape: escape-free module is absent from the map"
+        False (Map.member "Proof" (egModuleOptionEscapes g))
+    , checkEq "escape: buildIndex folds module escapes into an enclosed def"
+        (Just ["--no-positivity-check", "--type-in-type"]) (unsafeOfIx "Unsafe.bad")
+    , checkEq "escape: fold merges with a direct escape (sorted, deduped)"
+        (Just ["--no-positivity-check", "--type-in-type", "non-terminating"])
+        (unsafeOfIx "Unsafe.alsoLoops")
+    , checkEq "escape: a def in a clean module stays safe"
+        (Just []) (unsafeOfIx "Proof.clean")
+    , checkEq "escape: transitive taint reaches a def in an escaping module"
+        (Just ["Unsafe.bad"]) (depNames "Proof.thm")
+    , checkEq "escape: encoder round-trips the escapes object"
+        (Just ["--no-positivity-check", "--type-in-type"])
+        (case eitherDecode (encode g) :: Either String ExpandedGraph of
+           Right g' -> Map.lookup "Unsafe" (egModuleOptionEscapes g')
+           Left _   -> Nothing)
+    , check "escape: encoder emits the field when non-empty" (hasField g)
+    , check "escape: encoder omits the field when empty"
+        (case eitherDecode taintGraphJson :: Either String ExpandedGraph of
+           Right gc -> not (hasField gc)
+           Left _   -> False)
     ]
 
 ----------------------------------------------------------------------

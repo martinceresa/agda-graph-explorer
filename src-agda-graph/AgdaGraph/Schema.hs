@@ -123,9 +123,12 @@ data Definition = Definition
     -- references @primTrustMe@). Empty — and absent on the wire — for a
     -- safe def. Orthogonal to 'defState' (the 4-state kind). The producer
     -- tags only direct use; transitive taint is a reachability query the
-    -- consumer layers on the dep graph. (@--no-positivity-check@ /
-    -- @--type-in-type@ file-level escapes are pending producer-side and
-    -- will arrive as a separate top-level field.)
+    -- consumer layers on the dep graph. File-level @--no-positivity-check@ /
+    -- @--type-in-type@ escapes arrive separately in 'egModuleOptionEscapes'
+    -- (a top-level object); 'AgdaGraph.Index.buildIndex' folds them into this
+    -- list for every def in the escaping module, so as decoded from the wire
+    -- this holds only the declaration-level escapes, while an 'Index' def's
+    -- 'defUnsafe' also carries its module's option escapes.
   , defX      :: !Double
   , defY      :: !Double
   , defOrigin :: !(Maybe Text)
@@ -281,6 +284,18 @@ data ExpandedGraph = ExpandedGraph
     -- ^ 'Just' when the producer was run with @--no-externals@;
     -- 'Nothing' otherwise (older JSON, or default mode where the
     -- externals are still part of the main graph).
+  , egModuleOptionEscapes :: !(M.Map Text [Text])
+    -- ^ Per module, the file-level @{-\# OPTIONS ⋯ \#-}@ soundness escapes
+    -- the producer kept (its @safetyRelevantOptionFlags@ ∩ the module's own
+    -- pragma tokens): @--type-in-type@, @--no-positivity-check@,
+    -- @--rewriting@, … Each value is ascending; only modules with at least
+    -- one escape appear. Absent — and 'M.empty' — for an escape-free corpus
+    -- (the producer omits the @moduleOptionEscapes@ object then, so older
+    -- JSON decodes to 'mempty'). Orthogonal to the per-def 'defUnsafe' (which
+    -- carries only the /declaration/-level @NON_TERMINATING@ / @primTrustMe@
+    -- escapes): 'AgdaGraph.Index.buildIndex' folds these module-wide escapes
+    -- into every enclosed def's 'defUnsafe', so the @agda-explore@ soundness
+    -- audit (@search@ / @roots@ @unsafe=@) and transitive taint see them.
   , egEdgeProvenance   :: ![Provenance]
     -- ^ Parallel to 'egDefinitionEdges' — index @i@ in this list
     -- tags the @i@-th edge. Empty when the producer didn't emit the
@@ -339,6 +354,7 @@ instance FromJSON ExpandedGraph where
             failed <- o .:? "failedModules"    .!= []
             rxs    <- o .:? "reexports"        .!= []
             extSum <- o .:? "externals_summary"
+            mesc   <- o .:? "moduleOptionEscapes" .!= M.empty
             prov   <- o .:? "definitionEdgesProvenance" .!= []
             sths   <- o .:? "definitionSubtermHashes"   .!= []
             stds   <- o .:? "definitionSubtermDepths"   .!= []
@@ -383,6 +399,7 @@ instance FromJSON ExpandedGraph where
                 , egNodeKeyVersion   = nkv
                 , egReExports        = rxs
                 , egExternalsSummary = extSum
+                , egModuleOptionEscapes = mesc
                 , egEdgeProvenance   = prov
                 , egSubtermHashes    = sths
                 , egSubtermDepths    = stds
@@ -452,7 +469,7 @@ instance A.ToJSON ExternalsSummary where
     ]
 
 instance A.ToJSON ExpandedGraph where
-  toJSON g = A.object
+  toJSON g = A.object $
     [ "v"                         A..= (2 :: Int)
     , "schemaVersion"             A..= (2 :: Int)
     , "mode"                      A..= ("expanded" :: Text)
@@ -472,6 +489,11 @@ instance A.ToJSON ExpandedGraph where
     , "definitionSubtermHashes"   A..= egSubtermHashes g
     , "definitionSubtermDepths"   A..= egSubtermDepths g
     ]
+    -- Optional object, omitted when empty to match the producer (escape-free
+    -- corpora stay byte-identical, and the round-tripped union graph the
+    -- daemon materialises to @cfgGraphPath@ mirrors the producer exactly).
+    ++ [ "moduleOptionEscapes" A..= egModuleOptionEscapes g
+       | not (M.null (egModuleOptionEscapes g)) ]
 
 -- | Edges arrive as @[a, b]@ JSON arrays of length 2. Anything else is a
 -- producer bug; surface it as a decode error rather than a Haskell crash.

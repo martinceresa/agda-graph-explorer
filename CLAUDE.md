@@ -114,6 +114,17 @@ it) — check it first when `AgdaGraph.Schema` drifts on a decode failure.
 - **Signatures.** Under `--with-signatures`, each definition carries an
   optional `"type"` string → `Definition.defSig`, consumed by `type_of`.
 
+- **Module option escapes.** Optional top-level `moduleOptionEscapes`
+  (`{ module → [flag] }`, ascending, escaping modules only, omitted when
+  empty) → `ExpandedGraph.egModuleOptionEscapes`. Carries the file-level
+  `{-# OPTIONS #-}` soundness escapes the producer kept (`--type-in-type`,
+  `--no-positivity-check`, `--rewriting`, …). `AgdaGraph.Index.buildIndex`
+  folds each module's flags into every enclosed def's `defUnsafe`, so the
+  `search` / `roots` `unsafe=` audit (and transitive `unsafeDeps` taint)
+  treat them exactly like the per-def `NON_TERMINATING` / `primTrustMe`
+  escapes. Orthogonal to the per-def `unsafe` field and to `nodeKeyVersion`
+  (an additive optional field — no bump).
+
 ## Cross-repo runtime link
 
 Two tools shell out:

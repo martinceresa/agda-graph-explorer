@@ -163,9 +163,12 @@ stateSuffix s       = "/" <> renderState s
 originSuffix :: Definition -> Text
 originSuffix d = maybe "" (\o -> "  [external: " <> o <> "]") (defOrigin d)
 
--- | @[unsafe: non-terminating, trustme]@ tag for a def the producer flagged
--- with a direct soundness escape ('defUnsafe'); empty for a safe def. Makes
--- an @agda --safe@-relevant escape visible wherever a def is listed (R12).
+-- | @[unsafe: non-terminating, trustme]@ tag for a def carrying a soundness
+-- escape ('defUnsafe') — a direct @NON_TERMINATING@ / @primTrustMe@ escape,
+-- or a file-level OPTIONS escape ('egModuleOptionEscapes', e.g.
+-- @--type-in-type@) 'buildIndex' folded in from its module; empty for a safe
+-- def. Makes an @agda --safe@-relevant escape visible wherever a def is
+-- listed (R12).
 unsafeSuffix :: Definition -> Text
 unsafeSuffix d = case defUnsafe d of
   [] -> ""
@@ -532,8 +535,14 @@ unsafeFilterError :: Maybe Text -> Maybe Text
 unsafeFilterError Nothing  = Nothing
 unsafeFilterError (Just u)
   | u `elem` ["any", "true", "", "non-terminating", "trustme"] = Nothing
+  -- A file-level OPTIONS escape flag ('egModuleOptionEscapes', folded into
+  -- 'defUnsafe' by 'buildIndex') is any @--…@ token. Accepted structurally so
+  -- the producer can add flags without a consumer edit; one no module uses
+  -- simply matches nothing rather than erroring.
+  | "--" `T.isPrefixOf` u = Nothing
   | otherwise = Just $ "Unknown unsafe filter `" <> u
-      <> "` — use `any` (every escape) or a kind: non-terminating / trustme."
+      <> "` — use `any` (every escape), a declaration kind (non-terminating \
+      \/ trustme), or a module OPTIONS flag (e.g. --type-in-type)."
 
 -- | Module-subtree predicate: keep a definition when no prefix is given,
 -- or its module starts with it. Shared by @search@ / @callers@ /

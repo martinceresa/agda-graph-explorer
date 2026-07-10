@@ -37,8 +37,10 @@ import qualified Data.HashMap.Strict as HM
 import qualified Data.IntMap.Strict  as IM
 import qualified Data.IntSet         as IS
 import           Data.List           ( sortOn )
+import qualified Data.Map.Strict     as M
 import qualified Data.Sequence       as Seq
 import           Data.Sequence       ( Seq, ViewL(..) )
+import qualified Data.Set            as Set
 import           Data.Text           ( Text )
 import qualified Data.Text           as T
 import qualified Data.Vector         as V
@@ -172,8 +174,24 @@ buildIndex ExpandedGraph{..} =
                                 ]
         ]
 
+      -- Fold each module's file-level OPTIONS soundness escapes
+      -- ('egModuleOptionEscapes') into the enclosed defs' 'defUnsafe', so the
+      -- agda-explore soundness audit (@search@ / @roots@ @unsafe=@) and the
+      -- transitive taint ('unsafeDeps') treat a def in a @--type-in-type@ /
+      -- @--no-positivity-check@ / … module as unsafe, exactly like the
+      -- per-def @NON_TERMINATING@ / @primTrustMe@ escapes. Union + dedup +
+      -- ascending so the merged tag is deterministic; the def is returned
+      -- unchanged for an escape-free module (the common case).
+      augmentUnsafe :: Definition -> Definition
+      augmentUnsafe d
+        | null esc  = d
+        | otherwise = d { defUnsafe = Set.toAscList
+                                        (Set.fromList (defUnsafe d ++ esc)) }
+        where esc = M.findWithDefault [] (defModule d) egModuleOptionEscapes
+
       defsVec :: V.Vector Definition
-      !defsVec = V.fromListN total (realDefs ++ syntheticDefs)
+      !defsVec = V.fromListN total
+                   (map augmentUnsafe (realDefs ++ syntheticDefs))
 
       -- (4) Adjacency. Drop any edge whose endpoints we somehow can't
       -- resolve (shouldn't happen post-step-2, but be defensive).
@@ -331,14 +349,16 @@ descendants ix seeds = traverseClosure (idxForward ix) seeds
 ancestors :: Index -> IS.IntSet -> IS.IntSet
 ancestors ix seeds = traverseClosure (idxReverse ix) seeds
 
--- | Ids of directly-@unsafe@ definitions in a node's transitive
--- dependency closure (forward\/uses edges), excluding the node itself.
--- These are the soundness escapes the node transitively /rests on/ — the
--- graph-level taint the producer's per-def @unsafe@ tags (R12) enable:
--- a theorem can carry no direct escape yet reach a
--- @{-# NON_TERMINATING #-}@ helper or a @primTrustMe@ body through its
--- dependencies. Ascending id order, so callers get a deterministic
--- witness example. O(V + E) via 'descendants'.
+-- | Ids of @unsafe@ definitions in a node's transitive dependency closure
+-- (forward\/uses edges), excluding the node itself. These are the soundness
+-- escapes the node transitively /rests on/ — the graph-level taint the
+-- producer's per-def @unsafe@ tags (R12) enable: a theorem can carry no
+-- direct escape yet reach a @{-# NON_TERMINATING #-}@ helper or a
+-- @primTrustMe@ body through its dependencies. A def gains an escape either
+-- directly or by living in a module 'buildIndex' folded a file-level OPTIONS
+-- escape into (@--type-in-type@, @--no-positivity-check@, …), so both taint
+-- the cone. Ascending id order, so callers get a deterministic witness
+-- example. O(V + E) via 'descendants'.
 unsafeDeps :: Index -> Int -> [Int]
 unsafeDeps ix i =
   filter (not . null . defUnsafe . defAt ix)
