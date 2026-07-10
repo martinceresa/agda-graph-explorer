@@ -34,6 +34,9 @@ import           AgdaInteract.Guard
 import           AgdaInteract.Literate
 import           AgdaInteract.GoalId
 import           AgdaInteract.Edit
+import           AgdaInteract.Batch    ( Step(..), wildcardCheck, allGiveSteps
+                                       , checkInspectArgs, checkScratchOp
+                                       , inspectOps, scratchOps )
 import qualified AgdaRepair.Diagnostic as RD
 import qualified AgdaRepair.Edit       as RE
 import           Data.Aeson            ( eitherDecode, encode )
@@ -71,6 +74,7 @@ main = do
   sequence_ (map ($ fails) literateTests)
   sequence_ (map ($ fails) iotcmTests)
   sequence_ (map ($ fails) goalIdTests)
+  sequence_ (map ($ fails) batchTests)
   sequence_ (map ($ fails) editTests)
   sequence_ (map ($ fails) diagnosticTests)
   sequence_ (map ($ fails) repairEditTests)
@@ -753,6 +757,81 @@ goalIdTests =
        in length es == 2
             && toInteractionId gm1 (StableId 1) == Just 1
             && maximum [ s | StableId s <- map geStable es ] == 1)
+  ]
+
+----------------------------------------------------------------------
+-- Batcher dispatch logic: construct `Step` parsing + wildcard / all-give
+-- discriminators, and the inspect / scratch `op` validators. Pure — the
+-- IO runners in AgdaInteract.Tools route on exactly these decisions, so a
+-- byte-identical-to-auto_all / -to-give_many diff is a live-agda-only check.
+
+isLeft' :: Either a b -> Bool
+isLeft' (Left _) = True
+isLeft' _        = False
+
+decodeStep :: BL.ByteString -> Either String Step
+decodeStep = eitherDecode
+
+stepTriple :: Step -> (Text, Text, Maybe Text)
+stepTriple (Step op g marg) = (op, g, marg)
+
+batchTests :: [Check]
+batchTests =
+  -- Step FromJSON: the single op-arg slot collapses term/expr/var, and the
+  -- `*` wildcard goal round-trips.
+  [ checkEq "Step give parses term into the arg slot"
+      (Right ("give", "g0", Just "suc n"))
+      (stepTriple <$> decodeStep "{\"op\":\"give\",\"goal\":\"g0\",\"term\":\"suc n\"}")
+  , checkEq "Step refine parses expr into the arg slot"
+      (Right ("refine", "g1", Just "f"))
+      (stepTriple <$> decodeStep "{\"op\":\"refine\",\"goal\":\"g1\",\"expr\":\"f\"}")
+  , checkEq "Step case_split parses var into the arg slot"
+      (Right ("case_split", "g2", Just "xs ys"))
+      (stepTriple <$> decodeStep "{\"op\":\"case_split\",\"goal\":\"g2\",\"var\":\"xs ys\"}")
+  , checkEq "Step auto wildcard goal parses as \"*\" with no arg"
+      (Right ("auto", "*", Nothing))
+      (stepTriple <$> decodeStep "{\"op\":\"auto\",\"goal\":\"*\"}")
+
+  -- wildcardCheck: a lone {auto,*} is the auto_all shorthand; `*` on any other
+  -- op, or mixed with further steps, is rejected; no `*` ⇒ ordinary path.
+  , checkEq "wildcardCheck: lone {auto,*} is the auto_all shorthand"
+      (Right True)  (wildcardCheck [Step "auto" "*" Nothing])
+  , checkEq "wildcardCheck: no wildcard ⇒ ordinary construct path"
+      (Right False) (wildcardCheck [Step "give" "g0" (Just "x"), Step "auto" "g1" Nothing])
+  , check "wildcardCheck rejects `*` on give"
+      (isLeft' (wildcardCheck [Step "give" "*" (Just "x")]))
+  , check "wildcardCheck rejects `*` on refine"
+      (isLeft' (wildcardCheck [Step "refine" "*" (Just "f")]))
+  , check "wildcardCheck rejects `*` on case_split"
+      (isLeft' (wildcardCheck [Step "case_split" "*" (Just "n")]))
+  , check "wildcardCheck rejects wildcard auto mixed with another step"
+      (isLeft' (wildcardCheck [Step "auto" "*" Nothing, Step "give" "g0" (Just "x")]))
+
+  -- allGiveSteps: the single-load atomic fast-path discriminator.
+  , check "allGiveSteps true for an all-give batch"
+      (allGiveSteps [Step "give" "g0" (Just "x"), Step "give" "g1" (Just "y")])
+  , check "allGiveSteps false when any non-give step is present"
+      (not (allGiveSteps [Step "give" "g0" (Just "x"), Step "auto" "g1" Nothing]))
+
+  -- inspect: op parsing + expr requirement (infer/normalize need expr).
+  , checkEq "inspect op=type needs no expr"       (Right "type")    (checkInspectArgs (Just "type") Nothing)
+  , checkEq "inspect op=context needs no expr"    (Right "context") (checkInspectArgs (Just "context") Nothing)
+  , checkEq "inspect op=infer with expr is valid" (Right "infer")   (checkInspectArgs (Just "infer") (Just "n + 0"))
+  , check "inspect op=infer without expr is rejected"     (isLeft' (checkInspectArgs (Just "infer") Nothing))
+  , check "inspect op=normalize without expr is rejected" (isLeft' (checkInspectArgs (Just "normalize") Nothing))
+  , check "inspect rejects an unknown op"                 (isLeft' (checkInspectArgs (Just "bogus") Nothing))
+  , check "inspect requires an op"                        (isLeft' (checkInspectArgs Nothing (Just "x")))
+  , checkEq "inspectOps enumerates the four read ops"
+      ["type", "context", "infer", "normalize"] inspectOps
+
+  -- scratch: op parsing (per-op required fields are enforced by the runners).
+  , checkEq "scratch op=open is valid"    (Right "open")    (checkScratchOp (Just "open"))
+  , checkEq "scratch op=promote is valid" (Right "promote") (checkScratchOp (Just "promote"))
+  , checkEq "scratch op=discard is valid" (Right "discard") (checkScratchOp (Just "discard"))
+  , check "scratch rejects an unknown op" (isLeft' (checkScratchOp (Just "open-file")))
+  , check "scratch requires an op"        (isLeft' (checkScratchOp Nothing))
+  , checkEq "scratchOps enumerates the three lifecycle ops"
+      ["open", "promote", "discard"] scratchOps
   ]
 
 ----------------------------------------------------------------------

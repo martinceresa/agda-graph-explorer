@@ -97,10 +97,10 @@ Config: [`.agda-goals.yml`](#agda-goalsyml). (Experimental.)
 
 A long-running stdio MCP daemon that loads the expanded `graph.json`
 once and answers point queries — the questions an agent would otherwise
-approximate with `grep`. Read-side catalogue (14 tools):
+approximate with `grep`. Read-side catalogue (15 tools):
 
 ```
-locate · callers · callees · impact · path · roots · type_of ·
+brief · locate · callers · callees · impact · path · roots · type_of ·
 similar_types · similar_bodies · find_lemma · search · unused ·
 rebuild · status
 ```
@@ -124,24 +124,33 @@ Config: [`.agda-explore.yml`](#agda-exploreyml).
 **Write-side interaction bridge (opt-in).** With `--enable-interact` and
 `agda` on `$PATH`, the daemon also exposes Agda-validated authoring +
 editing tools backed by a live `agda --interaction-json` session — the
-validated alternative to a blind `Write` + `agda File`. 19 tools:
+validated alternative to a blind `Write` + `agda File`. 11 tools:
 
 ```
-load · check · goal_type · goal_context · infer · normalize · lemmas ·
-new_module · give_file · case_split · refine · give · give_many ·
-construct · auto · auto_all · stage · promote · discard
+load · goal_brief · inspect · auto · construct · scratch · check ·
+give_file · new_module · lemmas · repair
 ```
 
-Every mutator (`case_split` / `refine` / `give` / `auto` / `auto_all`) is
+Three of these are batchers that subsume the older single-op tools:
+`inspect` reads an open goal (`op` = type / context / infer / normalize),
+`construct` drives holes with a sequence of `{op, goal, …}` steps
+(`give` / `refine` / `case_split` / `auto`; a lone `{op:auto, goal:"*"}`
+runs Mimer over every open goal), and `scratch` (`op` = open / promote /
+discard) manages an isolated scratch module.
+
+Every mutator (`construct` / `auto` / `scratch` / `give_file` / `repair`) is
 Agda-validated and by default returns a unified diff **without writing**;
 pass `write:true` to apply, reload, and return the diff plus refreshed
 goals in one round-trip. A hard zero-axiom contract refuses any
 `postulate`, termination/coverage/unsafe-`OPTIONS` pragma, or escape
 hatch up front. `.lagda.md` literate sources are handled. On a no-solution
-`auto` / `auto_all` seed Mimer with the top `find_lemma` lemmas for the goal,
-closing one-lemma goals plain Mimer misses; `check` also probes remaining
-goals with Mimer inline (`--no-auto-hints` to disable). Full detail:
-[`plugin/`](plugin/README.md).
+`auto` (and `construct`'s `auto` steps) seed Mimer with the top `find_lemma`
+lemmas for the goal, closing one-lemma goals plain Mimer misses; `check` also probes remaining
+goals with Mimer inline (`--no-auto-hints` to disable). `repair` drives an
+almost-correct file to typecheck by interpreting the compiler's diagnostics
+— adding missing imports (resolved off the graph) and fixing misspelled
+references — spec-preserving and zero-axiom (see [`FixLoop.md`](FixLoop.md)).
+Full detail: [`plugin/`](plugin/README.md).
 
 ```sh
 agda-explore --project /path/to/agda/project --enable-interact

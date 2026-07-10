@@ -7,20 +7,27 @@
 -- snapshot — they reflect live on-disk file state and so deliberately
 -- bypass @ensureFresh@.
 --
--- Three families:
+-- The catalogue is folded to 11 tools: the rarely-fired single-operation
+-- mutators are consolidated behind @op@-dispatched batchers, keeping the
+-- handful agents actually reach for flat and prominent. Three families:
 --
---   * /read-only/ — @load@, @goal_type@, @goal_context@, @infer@,
---     @normalize@, @check@ (validate a file/proposed content → structured
---     errors + warnings + open goals), @lemmas@ (goal-directed lemma
---     search wired off a live goal's type).
---   * /hole-driven mutators/ — @case_split@ / @refine@ / @give@ /
---     @give_many@ / @auto@, and @construct@ (a heterogeneous batch of
---     those against one warm load). Each returns a unified diff and (with
+--   * /read-only/ — @load@, @goal_brief@ (one-call goal orientation:
+--     type + context + candidate lemmas), @inspect@ (@op@ =
+--     type|context|infer|normalize over a live goal), @check@ (validate a
+--     file/proposed content → structured errors + warnings + open goals),
+--     @lemmas@ (goal-directed lemma search wired off a live goal's type).
+--   * /hole-driven mutators/ — @auto@ (Mimer at one goal) and @construct@
+--     (a heterogeneous batch of give/refine/case_split/auto steps against
+--     one warm load; a @goal:"*"@ auto step runs Mimer over every open goal,
+--     the former @auto_all@). Each returns a unified diff and (with
 --     @write:true@) optionally applies it and reloads.
---   * /file authoring/ — @new_module@ (scaffold a validated module
+--   * /file authoring + repair/ — @new_module@ (scaffold a validated module
 --     skeleton, resolving imports off the dependency graph), @give_file@
 --     (validate whole-file or appended content under the zero-axiom
---     contract → diff), and @stage@ / @promote@ / @discard@.
+--     contract → diff), @scratch@ (@op@ = open|promote|discard staging
+--     lifecycle), and @repair@ (interpret the compiler's diagnostics to add
+--     missing imports / fix misspelled references, graph-backed and
+--     spec-preserving → diff).
 module AgdaInteract.Tools
   ( interactTools
   , closeAllSessions
@@ -32,13 +39,13 @@ import           Control.Concurrent.MVar (modifyMVar, modifyMVar_, readMVar)
 import           Control.Exception       (SomeException, try)
 import           Control.Monad           (foldM, forM, forM_, forever, when)
 import           Data.Aeson              (FromJSON (..), Value, object, withObject,
-                                          (.:), (.:?), (.=))
+                                          (.:), (.=))
 import           Data.Aeson.Types        (parseMaybe)
 import           Data.IORef              (newIORef, readIORef, writeIORef)
 import           Data.List               (isPrefixOf, nub, sortOn, stripPrefix)
 import qualified Data.Map.Strict         as M
 import           Data.Maybe              (catMaybes, fromMaybe, isJust, isNothing,
-                                          listToMaybe, mapMaybe)
+                                          mapMaybe)
 import           Data.Ord                (Down (..))
 import           Data.Text               (Text)
 import qualified Data.Text               as T
@@ -55,6 +62,7 @@ import           Text.Read               (readMaybe)
 import           AgdaGraph.Interaction.Iotcm
 import           AgdaGraph.Interaction.Protocol
 import           AgdaGraph.Schema        (Definition, defModule, defName)
+import           AgdaInteract.Batch
 import           AgdaInteract.Edit
 import           AgdaInteract.GoalId
 import           AgdaInteract.Guard
@@ -102,80 +110,28 @@ interactTools =
                  ] ["goal"])
       runGoalBrief
 
-  , Tool "goal_type"
-      "The type of an open goal plus its in-scope context — the interaction-hole \
-      \analogue of `type_of`."
-      (objSchema [ goalProp, fileProp ] ["goal"])
-      (runGoalInfo renderGoalTypeFull)
-
-  , Tool "goal_context"
-      "The in-scope context at an open goal: every visible binder and its type."
-      (objSchema [ goalProp, fileProp ] ["goal"])
-      (runGoalInfo renderContextOnly)
-
-  , Tool "infer"
-      "Infer the type of an expression in a goal's context. Read-only."
+  , Tool "inspect"
+      "Read-only live-goal query (batcher): `op` picks what to read at an open \
+      \goal — `type` (goal type + in-scope context, the interaction-hole \
+      \analogue of `type_of`), `context` (just the visible binders and their \
+      \types), `infer` (the inferred type of `expr` in the goal's context), \
+      \`normalize` (compute/normalise `expr`). `expr` is required for \
+      \infer/normalize and ignored otherwise. `load` the module first."
       (objSchema [ goalProp
-                 , ("expr", sp "The expression to infer the type of.")
+                 , ("op", ep "What to read at the goal." inspectOps)
+                 , ("expr", sp "Expression to infer/normalise (required for op=infer|normalize).")
                  , fileProp
-                 ] ["goal", "expr"])
-      (runExpr (\f iid e -> iotcmInfer f Simplified iid e))
-
-  , Tool "normalize"
-      "Normalise (compute) an expression in a goal's context. Read-only."
-      (objSchema [ goalProp
-                 , ("expr", sp "The expression to normalise.")
-                 , fileProp
-                 ] ["goal", "expr"])
-      (runExpr (\f iid e -> iotcmCompute f DefaultCompute iid e))
-
-  , Tool "case_split"
-      "Case-split a goal on one or more pattern variables; returns a diff \
-      \replacing the clause with the generated clauses."
-      (objSchema [ goalProp
-                 , ("var", sp "Variable(s) to split on, space-separated (e.g. `n` or `xs ys`).")
-                 , fileProp
-                 , ("write", writeArg)
-                 ] ["goal", "var"])
-      runCaseSplit
-
-  , Tool "refine"
-      "Refine a goal by a head symbol `f` → fill it with `f ?`, leaving fresh \
-      \subgoals (empty hint does `intro`)."
-      (objSchema [ goalProp
-                 , ("expr", sp "Head symbol / refinement hint (may be empty to intro).")
-                 , fileProp
-                 , ("write", writeArg)
-                 ] ["goal"])
-      runRefine
-
-  , Tool "give"
-      "Fill a goal with a complete term, Agda-validated: a term that doesn't \
-      \typecheck returns the localized error with the file untouched."
-      (objSchema [ goalProp
-                 , ("term", sp "The term to fill the hole with.")
-                 , fileProp
-                 , ("write", writeArg)
-                 ] ["goal", "term"])
-      runGive
-
-  , Tool "give_many"
-      "Fill SEVERAL independent goals against one load (pays the module load \
-      \once) → one atomic diff; if any term is rejected nothing applies and the \
-      \error names the offending goal. For dependent fills use the single-goal tools."
-      (objSchema [ ("gives", givesSchema)
-                 , fileProp
-                 , ("write", writeArg)
-                 ] ["gives"])
-      runGiveMany
+                 ] ["goal", "op"])
+      runInspect
 
   , Tool "auto"
       "Mimer proof search for one goal; returns a diff filling the hole, or a \
-      \'no solution' note (guide it with `refine`/`give`). Plain Mimer often \
-      \misses a one-lemma goal, so on failure this seeds Mimer with the top \
-      \graph-ranked lemmas for the goal type (the `find_lemma` machinery) and \
-      \retries — closing goals like `n + 0 ≡ n` via `+-identityʳ`. For every \
-      \goal at once use `auto_all`."
+      \'no solution' note (guide it with `construct` refine/give steps). Plain \
+      \Mimer often misses a one-lemma goal, so on failure this seeds Mimer with \
+      \the top graph-ranked lemmas for the goal type (the `find_lemma` \
+      \machinery) and retries — closing goals like `n + 0 ≡ n` via `+-identityʳ`. \
+      \For every goal at once use `construct` with a single `{op:auto, goal:\"*\"}` \
+      \step."
       (objSchema [ goalProp
                  , fileProp
                  , ("timeout", ip "Mimer budget in seconds (default 5).")
@@ -184,41 +140,36 @@ interactTools =
                  ] ["goal"])
       runAuto
 
-  , Tool "auto_all"
-      "Run Mimer over EVERY open goal in one call (no goal ids to manage) → one \
-      \combined diff for the solved goals plus the survivors. Each goal gets the \
-      \same lemma-hint-guided retry as `auto`. Cheap to try whenever a `check` \
-      \leaves goals open."
-      (objSchema [ fileProp
-                 , ("timeout", ip "Mimer budget per goal in seconds (default 5).")
-                 , ("hints", ip "Max lemma hints to try per goal (default 6; 0 = plain Mimer).")
+  , Tool "construct"
+      "Drive holes with a SEQUENCE of steps against one warm load — the primary \
+      \hole-filling interface. `steps` is a list of {op, goal, …} with op = give \
+      \(needs `term`) / refine (needs `expr`) / case_split (needs `var`) / auto. \
+      \One combined diff; each step targets an ORIGINAL-load goal (won't fill \
+      \holes an earlier step introduced); a rejected step aborts naming the \
+      \offender. A single `{op:auto, goal:\"*\"}` step runs Mimer over EVERY open \
+      \goal; the `*` wildcard is valid for `auto` only."
+      (objSchema [ ("steps", stepsSchema)
+                 , fileProp
                  , ("write", writeArg)
-                 ] [])
-      runAutoAll
+                 ] ["steps"])
+      runConstruct
 
-  , Tool "stage"
-      "Open an ephemeral SCRATCH module (under .agda-explore/scratch/) to build \
-      \a NEW definition in isolation — the real module isn't left half-written \
-      \and each re-check is tiny. Returns the scratch path; construct with the \
-      \usual tools, then `promote` (or `discard`)."
-      (objSchema [ ("target", sp "Real module to seed imports from + the eventual promote destination (optional).") ] [])
-      runStage
-
-  , Tool "promote"
-      "Splice the def(s) built in a `stage` scratch into a real target module \
-      \(merging imports), then re-validate the WHOLE target — the one expensive \
-      \real-module recheck. Returns a diff, or the localized error if it doesn't \
-      \typecheck in the target's scope."
-      (objSchema [ ("scratch", sp "The scratch file path returned by `stage`.")
-                 , ("target", sp "The real module file to splice into.")
+  , Tool "scratch"
+      "Scratch-module lifecycle (batcher): `op:open` opens an ephemeral SCRATCH \
+      \module (under .agda-explore/scratch/) to build a NEW definition in \
+      \isolation — the real module isn't left half-written and each re-check is \
+      \tiny (optional `target` seeds imports + names the eventual destination); \
+      \`op:promote` splices the scratch's def(s) into the real `target` (merging \
+      \imports) and re-validates the WHOLE target (needs `scratch` + `target`, \
+      \honours `write`); `op:discard` closes the session and deletes the scratch \
+      \(needs `scratch`). Build inside the scratch with the usual tools, then \
+      \promote or discard."
+      (objSchema [ ("op", ep "Lifecycle step." scratchOps)
+                 , ("target", sp "Real module: for op=open seeds imports + the promote destination (optional); for op=promote the splice destination (required).")
+                 , ("scratch", sp "Scratch file path returned by op=open (required for op=promote|discard).")
                  , ("write", writeArg)
-                 ] ["scratch", "target"])
-      runPromote
-
-  , Tool "discard"
-      "Drop a `stage` scratch: close its session and delete the scratch file."
-      (objSchema [ ("scratch", sp "The scratch file path returned by `stage`.") ] ["scratch"])
-      runDiscard
+                 ] ["op"])
+      runScratch
 
   , Tool "check"
       "[prove] Type-check a module in the live session → ✓/✗, every error and warning, \
@@ -226,8 +177,8 @@ interactTools =
       \them with Mimer and reports ready-made solutions inline. Pass `content` \
       \to dry-run proposed text without writing. Use instead of `agda <file>`. \
       \When a goal is stuck, reach for `lemmas` (find a reusable lemma), `auto` \
-      \(Mimer with graph-ranked hints), or `case_split` BEFORE writing the term \
-      \by hand — that is exactly when these tools pay off."
+      \(Mimer with graph-ranked hints), or a `construct` case_split/refine step \
+      \BEFORE writing the term by hand — that is exactly when these tools pay off."
       (objSchema [ ("file", sp "Path to the .agda / .lagda.md module (relative to the project root, or absolute).")
                  , ("content", sp "Proposed full file text to validate instead of the on-disk file (dry-run; nothing is written).")
                  ] ["file"])
@@ -258,22 +209,11 @@ interactTools =
                  ] ["path"])
       runNewModule
 
-  , Tool "construct"
-      "Run a SEQUENCE of hole-driven steps against one warm load (heterogeneous \
-      \sibling of `give_many`): `steps` is a list of {op, goal, …} with op = \
-      \give/refine/case_split/auto. One combined diff; each step targets an \
-      \ORIGINAL-load goal (won't fill holes an earlier step introduced); a \
-      \rejected step aborts naming the offender."
-      (objSchema [ ("steps", stepsSchema)
-                 , fileProp
-                 , ("write", writeArg)
-                 ] ["steps"])
-      runConstruct
-
   , Tool "lemmas"
       "Goal-directed lemma search for a LIVE goal: reads the goal's type and \
-      \finds definitions whose conclusion resembles it, to `give`/`refine` with \
-      \instead of re-deriving. The live-goal front-end to `find_lemma`."
+      \finds definitions whose conclusion resembles it, to fill via a \
+      \`construct` give/refine step instead of re-deriving. The live-goal \
+      \front-end to `find_lemma`."
       (objSchema [ goalProp, fileProp
                  , ("kind", sp "Restrict candidates to a kind: function|projection|datatype|record|constructor|postulate|primitive|other.")
                  , ("module_prefix", sp "Only candidates whose module starts with this prefix.")
@@ -342,12 +282,14 @@ stepsSchema = object
   [ "type"        .= ("array" :: Text)
   , "description" .= ("Ordered steps. Each is {\"op\":..., \"goal\":\"g0\", …}: \
                       \op `give` takes `term`, `refine` takes `expr`, \
-                      \`case_split` takes `var`, `auto` takes nothing." :: Text)
+                      \`case_split` takes `var`, `auto` takes nothing. Use \
+                      \`goal`:\"*\" with op `auto` (only) as the sole step to run \
+                      \Mimer over every open goal." :: Text)
   , "items" .= object
       [ "type"       .= ("object" :: Text)
       , "properties" .= object
           [ "op"   .= sp "give | refine | case_split | auto."
-          , "goal" .= sp "Stable goal id, e.g. g0."
+          , "goal" .= sp "Stable goal id, e.g. g0 (or \"*\" = every open goal, op=auto only)."
           , "term" .= sp "Term to give (op=give)."
           , "expr" .= sp "Refinement hint (op=refine)."
           , "var"  .= sp "Variable(s) to split on (op=case_split)." ]
@@ -397,16 +339,16 @@ emitEdit ss file old diff =
   emitInspect (ssInspect ss) $ EvEdit
     { evFile = T.pack file, evContent = old, evDiff = T.pack diff }
 
--- | Read-only goal-info tools (goal_type / goal_context): resolve the
--- session + goal, run @Cmd_goal_type_context@, render with the supplied
+-- | Read-only goal-info renderers (inspect op=type / op=context): resolve
+-- the session + goal, run @Cmd_goal_type_context@, render with the supplied
 -- function.
 runGoalInfo :: (GoalInfo -> Text) -> ToolRunner
 runGoalInfo render ss a =
   withGoal ss a $ \sess file _e iid ->
     runCmd sess (iotcmGoalTypeContext file Simplified iid) (fmap render . firstGoalInfo)
 
--- | Expression tools (infer / normalize): resolve session + goal, run the
--- supplied command with the goal's context, render the goal info.
+-- | Expression readers (inspect op=infer / op=normalize): resolve session +
+-- goal, run the supplied command with the goal's context, render the reply.
 runExpr :: (FilePath -> Int -> String -> String) -> ToolRunner
 runExpr mkCmd ss a = case argText a "expr" of
   Nothing   -> pure (Left "this tool requires an `expr` argument.")
@@ -414,60 +356,27 @@ runExpr mkCmd ss a = case argText a "expr" of
     withGoal ss a $ \sess file _e iid ->
       runCmd sess (mkCmd file iid (T.unpack expr)) (fmap renderGoalInfoExpr . firstGoalInfo)
 
--- ---------------------------------------------------------------------
--- Mutating tools (case_split / refine / give)
--- ---------------------------------------------------------------------
-
-runGive :: ToolRunner
-runGive ss a = withGoal ss a $ \sess file e iid ->
-  case argText a "term" of
-    Nothing   -> pure (Left "give requires a `term` argument.")
-    Just term -> case checkGiveInput term of
-      Rejected why -> pure (Left ("give refused: " <> why))
-      Allowed      -> do
-        out <- runRaw sess (iotcmGive file iid (T.unpack term))
-        mutateFromGive ss (writeFlag a) file e (Just term) out
-
-runRefine :: ToolRunner
-runRefine ss a = withGoal ss a $ \sess file e iid -> do
-  let hint = fromMaybe "" (argText a "expr")
-  case checkGiveInput hint of
-    Rejected why -> pure (Left ("refine refused: " <> why))
-    Allowed      -> do
-      out <- runRaw sess (iotcmRefineOrIntro file iid (T.unpack hint))
-      mutateFromGive ss (writeFlag a) file e (Just hint) out
-
-runCaseSplit :: ToolRunner
-runCaseSplit ss a = withGoal ss a $ \sess file e iid ->
-  case argText a "var" of
-    Nothing  -> pure (Left "case_split requires a `var` argument (the variable to split on).")
-    Just var -> do
-      out <- runRaw sess (iotcmMakeCase file iid (T.unpack var))
-      mutateFromMakeCase ss (writeFlag a) file e out
+-- | Read-only live-goal query batcher: dispatch @op@ to the existing goal-info
+-- / expression readers (folds the former goal_type / goal_context / infer /
+-- normalize tools).
+runInspect :: ToolRunner
+runInspect ss a = case checkInspectArgs (argText a "op") (argText a "expr") of
+  Left err -> pure (Left err)
+  Right op -> case op of
+    "type"    -> runGoalInfo renderGoalTypeFull ss a
+    "context" -> runGoalInfo renderContextOnly ss a
+    "infer"   -> runExpr (\f iid e -> iotcmInfer f Simplified iid e) ss a
+    _         -> runExpr (\f iid e -> iotcmCompute f DefaultCompute iid e) ss a  -- normalize
 
 -- | The @write@ boolean off a tool's arguments (default false).
 writeFlag :: Value -> Bool
 writeFlag a = argBool a "write" False
 
--- | One @{goal, term}@ fill request for 'runGiveMany'.
+-- | One @{goal, term}@ fill request for 'runGiveMany' (also the shape the
+-- all-@give@ 'construct' fast path synthesises).
 data GiveSpec = GiveSpec !Text !Text
 instance FromJSON GiveSpec where
   parseJSON = withObject "give" $ \o -> GiveSpec <$> o .: "goal" <*> o .: "term"
-
--- | JSON schema for the @gives@ array argument.
-givesSchema :: Value
-givesSchema = object
-  [ "type"        .= ("array" :: Text)
-  , "description" .= ("Goals to fill, in order — a list of \
-                      \{\"goal\":\"g0\",\"term\":\"…\"} objects." :: Text)
-  , "items" .= object
-      [ "type"       .= ("object" :: Text)
-      , "properties" .= object
-          [ "goal" .= sp "Stable goal id, e.g. g0."
-          , "term" .= sp "Term to fill that goal with." ]
-      , "required" .= (["goal", "term"] :: [Text])
-      ]
-  ]
 
 -- | Fill several goals in one live session. Agda keeps a session's
 -- surviving interaction ids stable across gives (no reload between them),
@@ -570,8 +479,8 @@ runAuto ss a = withGoal ss a $ \sess file e iid -> do
         <> (if null hs then ""
             else " (tried lemma hints: "
                    <> T.intercalate ", " [ "`" <> h <> "`" | h <- hs ] <> ")")
-        <> " — guide it with `case_split goal=…`, `refine`, `lemmas goal=…`, \
-           \or `give` an explicit term."
+        <> " — guide it with a `construct` case_split/refine step, `lemmas goal=…`, \
+           \or `construct` an explicit give."
 
 -- | Footer flagging graph-ranked hints Mimer could not try because they are
 -- out of the file's import scope (R19). Names the defining module's
@@ -679,7 +588,7 @@ runAutoAll ss a = do
                         | otherwise =
                             "\nMimer found nothing for: "
                               <> T.intercalate ", " (map (renderStableId . geStable) unsolved)
-                              <> " — try `refine`, `lemmas goal=…`, or `give` an explicit term."
+                              <> " — try a `construct` refine step, `lemmas goal=…`, or `construct` an explicit give."
                               <> oosBlock
                   if null edits
                     then pure (Right ("Mimer solved none of the " <> showT (length es)
@@ -716,8 +625,18 @@ autoAllLoop sess file cb secs = go [] [] [] []
       _ -> go eds ok (e : bad) oos rest
 
 -- ---------------------------------------------------------------------
--- Scratch / staging buffer (stage / promote / discard)
+-- Scratch / staging buffer (op = open / promote / discard)
 -- ---------------------------------------------------------------------
+
+-- | Scratch-module lifecycle batcher: dispatch @op@ to the existing staging
+-- runners (folds the former stage / promote / discard tools).
+runScratch :: ToolRunner
+runScratch ss a = case checkScratchOp (argText a "op") of
+  Left err  -> pure (Left err)
+  Right op  -> case op of
+    "open"    -> runStage ss a
+    "promote" -> runPromote ss a
+    _         -> runDiscard ss a  -- discard
 
 -- | Absolute scratch directory. @cfgOutDir@ can be relative (e.g. the
 -- default ".agda-explore" in preloaded mode), so anchor it under the
@@ -772,9 +691,9 @@ runStage ss a = do
     Left e  -> Left ("could not create scratch module: " <> T.pack (show e))
     Right _ -> Right ("Staged scratch module:\n  " <> T.pack file
                         <> "\n\nAdd your `sig : T` + `def = ?`, `load` this file, and \
-                           \build with goal_type / case_split / refine / give. When it \
-                           \type-checks, `promote` it into a real module (scratch=" <> T.pack file
-                        <> ", target=<module>), or `discard` it.")
+                           \build with `inspect` / `construct`. When it type-checks, \
+                           \`scratch op=promote` it into a real module (scratch=" <> T.pack file
+                        <> ", target=<module>), or `scratch op=discard` it.")
 
 -- | Marker line written into a fresh scratch so the user knows where to type
 -- (and 'scratchDefBody' can drop it).
@@ -924,39 +843,6 @@ validateCandidate ss targetFile candidate = do
   pure $ case r of
     Left e    -> Left e
     Right out -> either Left (const (Right ())) (interpretLoad out)
-
--- | Turn a give\/refine reply burst into an edit diff. An Error means the
--- term was rejected and the file is untouched; a GiveAction carries the
--- replacement (either an explicit string, or the user's input optionally
--- parenthesised).
-mutateFromGive :: ServerState -> Bool -> FilePath -> GoalEntry -> Maybe Text -> Either Text [Reply] -> IO (Either Text Text)
-mutateFromGive _  _     _    _ _      (Left err) = pure (Left err)
-mutateFromGive ss write file e mInput (Right rs) = case firstError rs of
-  Just m  -> pure (Left ("agda rejected the term — file unchanged:\n" <> m))
-  Nothing -> case [gr | ReplyGiveAction _ gr <- rs] of
-    (gr:_) ->
-      let repl = giveReplacement gr (fromMaybe "" mInput)
-      in applyHoleEdit ss write file e repl
-    [] -> pure (Left "agda returned no give action (unexpected protocol shape).")
-
--- | Turn a make_case reply into a diff that replaces the clause line with
--- the generated clauses, re-indented to the clause's column.
-mutateFromMakeCase :: ServerState -> Bool -> FilePath -> GoalEntry -> Either Text [Reply] -> IO (Either Text Text)
-mutateFromMakeCase _  _     _    _ (Left err) = pure (Left err)
-mutateFromMakeCase ss write file e (Right rs) = case firstError rs of
-  Just m  -> pure (Left m)
-  Nothing -> case [cs | ReplyMakeCase _ _ cs <- rs] of
-      (clauses:_) -> case geRange e of
-        Nothing               -> pure (Left "goal has no source range; cannot edit.")
-        Just (GoalRange s _)  -> withSourceGuarded file (rpPos s) $ \old -> do
-          let holePos          = rpPos s
-              (lineStart, nlP)  = lineSpanAt old holePos
-              indent            = lineIndentAt old holePos
-              contentStart      = lineStart + indent
-              replTxt           = renderClausesAt (indent + 1) clauses
-              new               = spliceRange old contentStart nlP replTxt
-          applyOrDiff ss write file old new
-      [] -> pure (Left "agda returned no clauses (is the variable in a pattern position?).")
 
 -- | Splice @repl@ over the hole's range, guarding that the hole is inside a
 -- code block. Marks the session dirty (its in-memory state has diverged
@@ -1310,9 +1196,9 @@ goalsFooter []      = ""
 goalsFooter (e : _) =
   let g = renderStableId (geStable e)
   in "→ next: `auto goal=" <> g <> " write:true` (Mimer proof search) · \
-     \`auto_all` (Mimer on every goal) · `goal_type goal=" <> g <> "` \
-     \(type + context) · `case_split goal=" <> g <> " var=<x>` · \
-     \`give goal=" <> g <> " term=<t>` · `lemmas goal=" <> g
+     \`construct steps=[{op:auto,goal:\"*\"}]` (Mimer on every goal) · \
+     \`inspect op=type goal=" <> g <> "` (type + context) · a `construct` \
+     \case_split/give step · `lemmas goal=" <> g
      <> "` (find a reusable lemma)."
 
 posNote :: GoalEntry -> Text
@@ -1438,7 +1324,7 @@ renderCheckLive file co es hints =
       _        ->
         "Mimer already finds terms for " <> showT (length hints) <> " of these:\n"
           <> T.unlines [ "  " <> renderStableId (geStable e) <> " ← " <> t | (e, t) <- hints ]
-          <> "Accept them in one call with `auto_all write:true`.\n"
+          <> "Accept them in one call with `construct steps=[{op:auto,goal:\"*\"}] write:true`.\n"
 
 -- | @check content=…@: a dry-run has no stable-goal map (the text isn't
 -- loaded as the real module), so goals are shown by raw index + position
@@ -1578,7 +1464,7 @@ diagName = fromMaybe "?" . scopeName
 refusalMsgs :: [RD.Diagnostic] -> [Text]
 refusalMsgs diags =
   [ "refused [" <> tag <> "] — semantic/unknown class, left untouched" | RD.DRefuse tag _ <- diags ]
-  ++ [ "incomplete pattern match — run `case_split` on the scrutinee" | RD.DIncomplete <- diags ]
+  ++ [ "incomplete pattern match — `construct` a case_split step on the scrutinee" | RD.DIncomplete <- diags ]
 
 -- | Try each candidate for each actionable diagnostic; return the first that
 -- is accepted (its text, a description, and the 'CheckOutcome' the acceptance
@@ -1648,8 +1534,8 @@ renderRepairReport rr =
     -- must not fabricate a proof) — route to the goal-driven tools.
     goalFooter
       | null (rrGoals rr) = ""
-      | otherwise = "→ open goal(s) remain: fill with `auto_all` (Mimer) / \
-                    \`lemmas goal=…` (reuse a lemma) / `case_split goal=…`."
+      | otherwise = "→ open goal(s) remain: fill with `construct steps=[{op:auto,goal:\"*\"}]` \
+                    \(Mimer) / `lemmas goal=…` (reuse a lemma) / a `construct` case_split step."
 
 -- ---------------------------------------------------------------------
 -- give_file  (validated whole-file / append authoring)
@@ -1837,56 +1723,70 @@ buildModuleContent lit modName imps defs =
 -- ---------------------------------------------------------------------
 -- construct  (heterogeneous batch of steps against one warm load)
 -- ---------------------------------------------------------------------
+-- The 'Step' shape and its wildcard / all-@give@ discriminators
+-- ('wildcardCheck', 'allGiveSteps') are the pure logic in 'AgdaInteract.Batch'.
 
--- | One construct step: an op (@give@/@refine@/@case_split@/@auto@), the
--- target goal id, and the op's optional argument (term\/expr\/var).
-data Step = Step !Text !Text !(Maybe Text)
-instance FromJSON Step where
-  parseJSON = withObject "step" $ \o -> do
-    op <- o .:  "op"
-    g  <- o .:  "goal"
-    mt <- o .:? "term"
-    me <- o .:? "expr"
-    mv <- o .:? "var"
-    pure (Step op g (listToMaybe (catMaybes [mt, me, mv])))
-
-stepLabel :: Step -> Text
-stepLabel (Step op g _) = op <> " " <> g
-
-stepGoal :: Step -> Text
-stepGoal (Step _ g _) = g
-
--- | Run a sequence of hole-driven steps against one warm load, accumulating
--- one combined diff. See the tool description for the (deliberate) limits.
+-- | Drive holes with a SEQUENCE of steps against one warm load, accumulating
+-- one combined diff. Two shortcuts route to the existing single-load paths:
+-- a lone @{op:auto, goal:"*"}@ delegates to @auto_all@ (Mimer over every
+-- goal), and an all-@give@ batch delegates to @give_many@ (one load, atomic).
+-- Anything else runs 'constructLoop' (per-step reload). See the tool
+-- description for the (deliberate) limits.
 runConstruct :: ToolRunner
 runConstruct ss a = case argLookup a "steps" >>= parseMaybe parseJSON of
-  Nothing    -> pure (Left "construct requires a `steps` array of {op, goal, …} objects (op = give|refine|case_split|auto).")
+  Nothing    -> pure (Left "construct requires a `steps` array of {op, goal, …} objects \
+                           \(op = give|refine|case_split|auto; goal \"*\" = every open goal, auto only).")
   Just []    -> pure (Left "construct: `steps` is empty.")
-  Just steps ->
-    -- Fail fast: guard give/refine terms before touching agda.
-    case [ (stepLabel s, why) | s@(Step op _ marg) <- steps
-                              , op `elem` ["give", "refine"]
-                              , Just t <- [marg]
-                              , Rejected why <- [checkGiveInput t] ] of
-      ((lbl, why):_) -> pure (Left ("construct refused " <> lbl <> ": " <> why))
-      [] -> do
-        r0 <- resolveLoaded ss (argText a "file")
-        case r0 of
-          Left err           -> pure (Left err)
-          Right (file, _, _) -> do
-            eold <- readFileSafe file
-            case eold of
-              Left e     -> pure (Left e)
-              Right orig -> do
-                res <- constructLoop ss file orig (codeBlocksFor file orig) steps []
-                markSessionDirty ss file
-                case res of
-                  Left err    -> pure (Left err)
-                  Right edits -> case spliceRanges orig edits of
-                    Left ov   -> pure (Left ov)
-                    Right new -> do
-                      r <- applyOrDiff ss (writeFlag a) file orig new
-                      pure (fmap (("Ran " <> showT (length edits) <> " construct step(s).\n\n") <>) r)
+  Just steps -> case wildcardCheck steps of
+    Left err   -> pure (Left err)
+    Right True -> runAutoAll ss a                       -- {op:auto, goal:"*"} ≡ auto_all
+    Right False
+      | allGiveSteps steps -> allGiveFastPath ss a steps
+      | otherwise          -> constructMany ss a steps
+
+-- | All steps are @give@: route through @give_many@'s single-load atomic path
+-- (one module load for N gives) rather than 'constructLoop's per-step reload,
+-- which only structural steps (case_split/refine) need. Synthesises the
+-- @gives@ argument @give_many@ expects, so its guard + diff are reused verbatim.
+allGiveFastPath :: ServerState -> Value -> [Step] -> IO (Either Text Text)
+allGiveFastPath ss a steps =
+  case [ stepLabel s | s@(Step _ _ marg) <- steps, isNothing marg ] of
+    (lbl:_) -> pure (Left ("construct: " <> lbl <> ": give needs a `term`."))
+    []      -> runGiveMany ss givesArg
+  where
+    givesArg = object $
+      ("gives" .= [ object ["goal" .= g, "term" .= t] | Step _ g (Just t) <- steps ])
+        : ("write" .= writeFlag a)
+        : [ "file" .= f | Just f <- [argText a "file"] ]
+
+-- | The general construct path: guard give/refine terms, then run every step
+-- against a warm load via 'constructLoop', merging the edits into one diff.
+constructMany :: ServerState -> Value -> [Step] -> IO (Either Text Text)
+constructMany ss a steps =
+  -- Fail fast: guard give/refine terms before touching agda.
+  case [ (stepLabel s, why) | s@(Step op _ marg) <- steps
+                            , op `elem` ["give", "refine"]
+                            , Just t <- [marg]
+                            , Rejected why <- [checkGiveInput t] ] of
+    ((lbl, why):_) -> pure (Left ("construct refused " <> lbl <> ": " <> why))
+    [] -> do
+      r0 <- resolveLoaded ss (argText a "file")
+      case r0 of
+        Left err           -> pure (Left err)
+        Right (file, _, _) -> do
+          eold <- readFileSafe file
+          case eold of
+            Left e     -> pure (Left e)
+            Right orig -> do
+              res <- constructLoop ss file orig (codeBlocksFor file orig) steps []
+              markSessionDirty ss file
+              case res of
+                Left err    -> pure (Left err)
+                Right edits -> case spliceRanges orig edits of
+                  Left ov   -> pure (Left ov)
+                  Right new -> do
+                    r <- applyOrDiff ss (writeFlag a) file orig new
+                    pure (fmap (("Ran " <> showT (length edits) <> " construct step(s).\n\n") <>) r)
 
 -- | Run each step against a fresh reload of the (unchanged-on-disk)
 -- original, collecting one @(start, end, replacement)@ edit per step in
@@ -1987,7 +1887,7 @@ runLemmas ss a = withGoal ss a $ \sess file e iid -> do
           out    = queryFindLemma ld (argInt a "limit" 10) (argDouble a "min_sim" 0.3)
                      (argText a "kind") (argText a "module_prefix") (Just goalTy) Nothing ctxTypes
       in pure (Right ("Goal " <> renderStableId (geStable e) <> "  : " <> goalTy <> "\n\n" <> out
-                       <> "\n\n(Reuse a candidate with `give`/`refine`. Recall-first name/shape \
+                       <> "\n\n(Reuse a candidate with a `construct` give/refine step. Recall-first name/shape \
                           \overlap — a suggestion, not a proof it applies; for WL type-shape \
                           \matching pass an `anchor` to the read-side `find_lemma`.)"))
 
@@ -2004,9 +1904,9 @@ ctxTypesOf sess file iid = do
     _        -> []
 
 -- | Orientation bundle for a live goal: its live type + context (as
--- `goal_type`) then the top reusable lemmas (as `lemmas`) — the write-side
--- analogue of `brief`. Resolves the session/goal once; read-only. The lemma
--- search uses the goal's cached type ('geType'), matching `lemmas`.
+-- `inspect op=type`) then the top reusable lemmas (as `lemmas`) — the
+-- write-side analogue of `brief`. Resolves the session/goal once; read-only.
+-- The lemma search uses the goal's cached type ('geType'), matching `lemmas`.
 runGoalBrief :: ToolRunner
 runGoalBrief ss a = withGoal ss a $ \sess file e iid -> do
   eRaw <- runRaw sess (iotcmGoalTypeContext file Simplified iid)
@@ -2026,7 +1926,7 @@ runGoalBrief ss a = withGoal ss a $ \sess file e iid -> do
       pure (Right (T.stripEnd info
                     <> "\n\n── candidate lemmas ──\n" <> T.stripEnd lemmaBlock
                     <> "\n\n(Fill with `auto goal=" <> renderStableId (geStable e)
-                    <> " write:true`, or `give`/`refine` a candidate above.)"))
+                    <> " write:true`, or a `construct` give/refine step from a candidate above.)"))
 
 showT :: Show a => a -> Text
 showT = T.pack . show

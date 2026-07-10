@@ -2,6 +2,48 @@
 
 ## Unreleased
 
+### Write-tool catalogue reduction: constructor-style batchers (21 → 11) (2026-07-10)
+
+Folded the `--enable-interact` write-side tool catalogue from 21 tools to 11 by
+generalizing the `construct` step-batch shape (`AgdaInteract.Tools`), so agents
+scan a shorter, more selectable surface. No capability lost — every folded
+operation reaches the same runner through its batcher. `cabal build` clean;
+`interaction-spec` passes with 26 new offline assertions (`batchTests`); a live
+`tools/list` confirms exactly the 11 interact tools and none of the 12 removed
+names.
+
+- **`construct` — now the primary hole-driving interface.** Subsumes the former
+  `give` / `refine` / `case_split` / `give_many` / `auto_all`. A lone
+  `{op:auto, goal:"*"}` step runs Mimer over every open goal (the old
+  `auto_all`, delegating to `runAutoAll`; the `*` wildcard is valid for `auto`
+  only). An all-`give` batch takes `give_many`'s single-load atomic path
+  (`runGiveMany`) rather than the per-step reload; a heterogeneous batch keeps
+  the `constructLoop` per-step-reload path so a structural step can't invalidate
+  a later step's interaction id.
+- **`inspect` (new) — read-only live-goal query batcher.** `{goal, op, expr?}`
+  with `op ∈ type|context|infer|normalize`, subsuming `goal_type` /
+  `goal_context` / `infer` / `normalize`; dispatches to the same `runGoalInfo` /
+  `runExpr` runners (`expr` required for infer/normalize).
+- **`scratch` (new) — staging-lifecycle batcher.** `{op, target?, scratch?,
+  write?}` with `op ∈ open|promote|discard`, subsuming `stage` / `promote` /
+  `discard` (dispatches to `runStage` / `runPromote` / `runDiscard`, their
+  required-field diagnostics unchanged).
+- **Kept standalone:** `load`, `goal_brief` (still first), `auto`, `check`,
+  `give_file`, `new_module`, `lemmas`, `repair`. `auto` stays a one-liner (the
+  recommended when-stuck Mimer tool) even though `construct` can express it.
+- **New pure module `AgdaInteract.Batch`** holds the batcher vocabulary (the
+  `Step` shape, wildcard / all-give discriminators, and the inspect/scratch `op`
+  enums + validators) so the offline suite covers the routing agda-free; the
+  `op` lists are the single source for both the schema enums and runner dispatch.
+- **Zero-axiom contract + `markSessionDirty`-after-Mimer** behaviour is inherited
+  unchanged — the batchers route through the existing guarded runners.
+- **Docs** synced: `README.md`, `CLAUDE.md` (enumeration + module map + the two
+  Mimer/session gotchas), and the plugin bundle (`plugin/README.md`, the skill,
+  both agents, and the PostToolUse hook's suggestion string).
+- **Minor:** the `{op:auto, goal:"*"}` path uses default Mimer timeout/hints; the
+  old `auto_all`'s per-call `timeout`/`hints` knobs aren't exposed through
+  `construct` (standalone `auto` still takes them).
+
 ### Arena-feedback round 4: live-watch staleness delta + brief/path coverage (R16 + R17) (2026-07-10)
 
 The two open consumer follow-ups from the 2026-07-09 arena verification

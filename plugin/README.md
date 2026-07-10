@@ -83,6 +83,7 @@ export AGDA_EXPLORE_GRAPH=/abs/path/to/deps.json
 
 | Tool             | Question it answers                                            |
 |------------------|---------------------------------------------------------------|
+| `brief`          | Orient on `X` in one call: location + type + callers + callees + structural twins (one-call bundle; drill in with the individual tools). |
 | `locate`         | Where is `X` defined? (module, file:line, kind, owner, blast radius) |
 | `callers`        | Who uses `X`? (`transitive`; `module_prefix` / `provenance` / `by_module`) |
 | `callees`        | What does `X` depend on? (same filters as `callers`) |
@@ -107,24 +108,16 @@ Start with **`--enable-interact`** (or `enable-interact: true` in `.agda-explore
 | Tool           | Question / action |
 |----------------|-------------------|
 | `load`         | Open a module; list goals (`g0, g1, …`) + positions. Re-`load` after edits — diffs can renumber goals. |
+| `goal_brief`   | One-call orientation on an open goal: its type + in-scope context + the top reusable lemmas whose conclusion resembles it. Lead with this after `load`. |
+| `inspect`      | Read-only live-goal query (batcher): `op=type` (goal type + in-scope context) / `op=context` (just the binders + types) / `op=infer` / `op=normalize` (of `expr`) → the live-hole analogue of `type_of`. `load` first. |
+| `auto`         | Mimer proof search on one goal → a fill diff, or a "no solution" note. On failure it retries seeded with the top `find_lemma` lemmas for the goal, so one-lemma goals close (`timeout` / `hints` tune). The recommended when-stuck move. |
+| `construct`    | Primary hole-filling interface: drive holes with a SEQUENCE of `{op, goal, …}` steps against one warm load — `give` (`term`) / `refine` (`expr`) / `case_split` (`var`) / `auto` → one combined diff. A single `{op:auto, goal:"*"}` step runs Mimer over EVERY open goal. |
+| `scratch`      | Scratch-module lifecycle (batcher): `op:open` opens an ephemeral scratch module (optional `target` seeds imports) to build a new def in isolation; `op:promote` splices its def(s) into the real `target`, merges imports, re-validates the whole target (honours `write`); `op:discard` drops it. |
 | `check`        | Type-check a module (on-disk or `content` dry-run) → ✓/✗ + every error/warning + open goals. On the live path it also probes remaining goals with Mimer and reports ready-made solutions inline (`--no-auto-hints` disables; `--auto-hints-limit` / `--auto-hints-timeout` tune). |
-| `goal_type`    | A hole's goal type + in-scope context. |
-| `goal_context` | Just the in-scope binders and their types. |
-| `infer`        | Infer the type of an expression in a goal's context. |
-| `normalize`    | Normalise (compute) an expression in a goal's context. |
-| `lemmas`       | Goal-directed lemma search off a live goal's type → candidates to `give`/`refine`. |
-| `new_module`   | Scaffold a NEW validated module: header, literate fences, imports resolved off the graph, a hole per `{name,type}` stub. |
 | `give_file`    | Author a whole file (`content`) or append a block (`append`), guarded + type-checked → diff (or `write:true`). |
-| `case_split`   | Split a goal on a variable → diff of the generated clauses. |
-| `refine`       | Refine a goal by a head symbol (`f ?`) → diff. |
-| `give`         | Fill a goal with a complete term, Agda-validated → diff (or the localized type error). |
-| `give_many`    | Fill several goals in one load → one combined, atomic diff. |
-| `construct`    | Run a planned batch of `give`/`refine`/`case_split`/`auto` steps against one warm load → one combined diff. |
-| `auto`         | Mimer proof search → a fill diff, or a "no solution" note. On failure it retries seeded with the top `find_lemma` lemmas for the goal, so one-lemma goals close (`timeout` / `hints` tune). |
-| `auto_all`     | Mimer over EVERY open goal in one call (per-goal `timeout`), same lemma-hint retry as `auto` → one combined diff for the solved ones + the survivors. No goal ids to manage. |
-| `stage`        | Open an ephemeral scratch module (seeded with a target's imports) to build a new def in isolation. |
-| `promote`      | Splice a `stage` def into a real target: merge imports, re-validate the whole target → diff (or error, nothing changed). |
-| `discard`      | Drop a `stage` scratch buffer. |
+| `new_module`   | Scaffold a NEW validated module: header, literate fences, imports resolved off the graph, a hole per `{name,type}` stub. |
+| `lemmas`       | Goal-directed lemma search off a live goal's type → candidates to feed a `construct` `give`/`refine` step. |
+| `repair`       | Drive an almost-correct file to typecheck by interpreting the compiler's diagnostics: add missing imports (resolved off the graph — operators/constructors included) and fix misspelled references. Spec-preserving + zero-axiom; semantic errors refused, not faked → report + diff (or `write:true`). |
 
 By default each mutator **returns a diff and does not write** — apply it yourself, then `load` again. **`write:true`** instead applies the edit, reloads, and returns the diff plus refreshed goals. A bad term fails locally (file never left broken). Any `postulate` / termination / coverage / unsafe-`OPTIONS` pragma / escape hatch is rejected before Agda sees it (a hard zero-axiom contract, enforced over whole-file content too). `.lagda.md` edits land inside the ```` ```agda ```` fence, never the prose. To turn the bridge on for the plugin, add `enable-interact: true` to the project's `.agda-explore.yml`.
 

@@ -91,16 +91,18 @@ naturally would, just land it through the bridge:
 - **After editing as text** → `check file=<f>` (not `agda <f>`): a ✓/✗ verdict
   with every error, warning, and remaining open goal, over the warm session —
   plus any goals Mimer can already solve, reported inline.
-- **Drive the holes** → `goal_type` / `goal_context` to read; `case_split` /
-  `refine` / `give` to fill (`write:true` applies + reloads in one step,
-  returning fresh goals); `auto` for Mimer on one goal, `auto_all` for Mimer
-  on every open goal in one call (the cheap first move); `give_many` for
-  several independent holes in one load; `construct` for a planned batch.
-  When unsure what term a goal wants, `lemmas goal=g0` searches the project
-  for a lemma matching the goal — reuse beats re-deriving.
-- `stage` → `promote` still builds a def in an isolated scratch module when you
-  want each `load` to re-check only its tiny closure; `discard` drops a dead
-  end. For most definitions `give_file` / `new_module` are more direct.
+- **Drive the holes** → `inspect op=type` / `inspect op=context` to read;
+  `construct` to fill — a batch of `{op, goal, …}` steps (`give` / `refine` /
+  `case_split` / `auto`) against one warm load, one combined diff (`write:true`
+  applies + reloads in one step, returning fresh goals). `auto` runs Mimer on
+  one goal; `construct steps=[{op:auto, goal:"*"}]` runs it over every open
+  goal in one call (the cheap first move). When unsure what term a goal wants,
+  `lemmas goal=g0` searches the project for a lemma matching the goal — reuse
+  beats re-deriving.
+- `scratch op:open` → `op:promote` still builds a def in an isolated scratch
+  module when you want each `load` to re-check only its tiny closure;
+  `op:discard` drops a dead end. For most definitions `give_file` /
+  `new_module` are more direct.
 
 ## Seek clarification when
 

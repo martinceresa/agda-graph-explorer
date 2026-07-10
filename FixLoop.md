@@ -49,8 +49,8 @@ The classifier keys on Agda's bracketed tags and is lenient (unknown → refuse)
 | `NotInScope` | add an import, else rename to a near-match |
 | `NoParseForApplication` (missing operator, e.g. `_×_`) | add the operator's import |
 | `NoParseForLHS` (missing constructor in a pattern) | add the constructor's import |
-| `IncompletePatternMatching` / `CoverageIssue` | report — run `case_split` |
-| open goal (no error) | report — run `auto_all` / `lemmas` |
+| `IncompletePatternMatching` / `CoverageIssue` | report — run `construct` (a `case_split` step) |
+| open goal (no error) | report — run `construct` (`{op:auto, goal:"*"}`) / `lemmas` |
 | `UnequalTerms` / `TerminationIssue` / unknown | **refuse**, file untouched |
 
 ## Invariants

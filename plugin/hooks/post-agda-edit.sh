@@ -66,5 +66,5 @@ fi
 touch "$sentinel" 2>/dev/null
 
 jq -n --arg f "$file" '{hookSpecificOutput:{hookEventName:"PostToolUse",
-  additionalContext:("You edited \($f) as text. Validate it now with the agda-explore bridge before further edits: `check file=\($f)` (warm session; returns ✓/✗ plus every error, warning, and open goal — and any goals Mimer can already solve). Do not run `agda` directly — the bridge session is already warm. If goals remain, `auto_all` tries Mimer on all of them in one call.")}}'
+  additionalContext:("You edited \($f) as text. Validate it now with the agda-explore bridge before further edits: `check file=\($f)` (warm session; returns ✓/✗ plus every error, warning, and open goal — and any goals Mimer can already solve). Do not run `agda` directly — the bridge session is already warm. If goals remain, `construct steps=[{op:auto, goal:\"*\"}]` tries Mimer on all of them in one call.")}}'
 exit 0

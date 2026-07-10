@@ -125,6 +125,7 @@ executable agda-explore
                        AgdaInteract.Guard
                        AgdaInteract.Literate
                        AgdaInteract.Edit
+                       AgdaInteract.Batch
                        AgdaInteract.Tools
                        AgdaRepair.Diagnostic
                        AgdaRepair.Strategy
@@ -161,6 +162,7 @@ test-suite interaction-spec
                        AgdaInteract.Literate
                        AgdaInteract.GoalId
                        AgdaInteract.Edit
+                       AgdaInteract.Batch
                        AgdaRepair.Diagnostic
                        AgdaRepair.Edit
                        AgdaUnused.Analysis

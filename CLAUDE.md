@@ -41,11 +41,14 @@ One shared library and four executables:
   entry's closure. A one-shot `agda-explore query <tool> key=value…` CLI
   dispatches through the same read-tool table without a daemon. Under
   `--enable-interact` it also exposes a **write-side
-  interaction bridge** (`load` / `goal_brief` / `check` / `goal_type` / `goal_context` /
-  `infer` / `normalize` / `case_split` / `refine` / `give` / `give_many` /
-  `auto` / `auto_all` / `construct` / `give_file` / `new_module` / `lemmas` /
-  `repair` / `stage` / `promote` / `discard`; `goal_brief` is the hole-side
-  orientation bundle, and `repair` interprets the compiler's diagnostics to add
+  interaction bridge** (`load` / `goal_brief` / `inspect` / `auto` /
+  `construct` / `scratch` / `check` / `give_file` / `new_module` / `lemmas` /
+  `repair`; `goal_brief` is the hole-side orientation bundle, `inspect` reads a
+  goal (`op` = type/context/infer/normalize), `construct` drives holes with a
+  sequence of `{op, goal, …}` steps (give/refine/case_split/auto; a lone
+  `{op:auto, goal:"*"}` runs Mimer over every open goal), `scratch`
+  (`op` = open/promote/discard) manages an isolated scratch module,
+  and `repair` interprets the compiler's diagnostics to add
   missing imports and fix misspelled references — graph-backed, spec-preserving,
   refusing semantic errors, see `FixLoop.md`) over a long-lived
   `agda --interaction-json`
@@ -244,20 +247,29 @@ src/
                                 splice guard.
     Edit.hs                     splice / multi-range splice / clause re-indent
                                 / unified-diff helpers (Data.Text char offsets).
+    Batch.hs                    pure batcher vocabulary: construct's Step shape
+                                + wildcard/all-give discriminators + the
+                                inspect/scratch op enums + validators. Extracted
+                                so the offline suite tests routing agda-free.
     Tools.hs                    interaction tool runners + session registry +
-                                interactTools list. give_many fills N goals
-                                against one live session → one atomic diff.
-                                stage/promote/discard build a def in an
-                                ephemeral .agda-explore/scratch/ module, then
-                                splice + re-validate the whole real target
+                                interactTools list (11 tools). `construct` is
+                                the hole-driving batcher: a step batch
+                                (give/refine/case_split/auto) merged into one
+                                diff; all-give steps take the single-load atomic
+                                path (runGiveMany), `{op:auto, goal:"*"}` the
+                                auto-all path (runAutoAll). `inspect`
+                                (runGoalInfo/runExpr) reads a goal. `scratch`
+                                (runStage/runPromote/runDiscard) builds a def in
+                                an ephemeral .agda-explore/scratch/ module, then
+                                splices + re-validates the whole real target
                                 (promote validates a renamed temp copy to dodge
                                 AmbiguousTopLevelModuleName). applyOrDiff is the
                                 shared finisher (write:true → write + reload +
                                 refreshed goals, else diff). check reports full
                                 diagnostics; give_file authors whole-file/append
                                 content; new_module scaffolds + resolves imports
-                                off the index; construct runs a step batch;
-                                lemmas runs queryFindLemma off a live goal type.
+                                off the index; lemmas runs queryFindLemma off a
+                                live goal type.
                                 Also hosts the `repair` loop driver (runRepair /
                                 repairLoop / firstWorking / accepts) so it can
                                 reuse loadRenamedTemp/applyOrDiff/interpretCheck
@@ -402,8 +414,8 @@ plugin/                         Claude Code plugin: agda-explore MCP server +
   mandatory (omit it and Agda "cannot read"); the trailing string carries
   Mimer options (`-t <secs>` bounds the search, verified on Agda 2.9) **and
   lemma hints** as space-separated identifiers. Plain Mimer won't try an
-  in-scope lemma at any budget, so `auto`/`auto_all` seed the top
-  `find_lemma` candidates (`Query.goalHintNames`) as hints. An
+  in-scope lemma at any budget, so `auto` (+ `construct` auto steps) seed the
+  top `find_lemma` candidates (`Query.goalHintNames`) as hints. An
   unknown/out-of-scope or *qualified* hint aborts the whole call (Agda 2.9),
   so hints must be in-scope short names tried ONE AT A TIME — scope
   resolution is instant, so a bad hint fails before searching. Don't batch.
@@ -422,12 +434,13 @@ plugin/                         Claude Code plugin: agda-explore MCP server +
 
 - **A successful Mimer probe solves the meta in Agda's *session* state, so
   anything that runs `Cmd_autoOne` without writing must mark the session
-  dirty.** Both the check-time `auto-hints` probe and `auto_all` do this
+  dirty.** Both the check-time `auto-hints` probe and the auto-all path
+  (`runAutoAll`, now `construct`'s `{op:auto, goal:"*"}`) do this
   (the next interaction reloads from unchanged disk); dropping the
   `markSessionDirty` makes later goal queries disagree with the file.
-  `auto_all` accumulates its edits in ORIGINAL-text offsets (in-session
-  gives never move the disk file), merged by `spliceRanges` like
-  `give_many`/`construct`.
+  `runAutoAll` accumulates its edits in ORIGINAL-text offsets (in-session
+  gives never move the disk file), merged by `spliceRanges` like the
+  give-many/`construct` paths.
 
 - **`agda-goals` and the bridge share one session driver
   (`AgdaInteract.Session`), which must stay goal-id-free.** Per-session

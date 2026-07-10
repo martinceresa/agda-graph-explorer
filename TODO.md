@@ -12,8 +12,30 @@ open items below (designs, files, verification gates) is in
 - [x] Reduce MCP tools: group the most used tools so agents know what to call.
   (2026-07-09: category tags `[orient]`/`[find]`/`[trace]`/`[reuse]`/`[audit]`
   on the read tools + `[prove]` and a when-stuck routing note on `check`.
-  Full catalogue *reduction* still open, gated on the uptake-when-stuck
-  measurement — see the VerinaAgda re-run below.)
+  2026-07-10: catalogue *reduction* shipped — write tools folded 21 → 11 via
+  the constructor-style batchers below.)
+
+- [x] **Constructor-style batchers: fold the write-tool catalogue 21 → 11.**
+  (2026-07-10, shipped — see Changelog.) Generalized the `construct` step-batch
+  shape to swallow the single-operation write tools. A full *replace* (not the
+  "additive aliases first" the original gate hedged — the VerinaAgda re-run now
+  measures the reduced surface directly). Removed 12 singletons, added 2
+  batchers, keeping 11:
+    - `construct` (extended → the primary hole-driving interface) subsumes
+      `give`/`refine`/`case_split`/`give_many`/`auto_all`: a lone
+      `{op:auto, goal:"*"}` step runs Mimer over every open goal (delegates to
+      `runAutoAll`); an all-`give` batch takes the single-load atomic path
+      (`runGiveMany`); otherwise the per-step-reload `constructLoop`.
+    - `inspect { goal, op:type|context|infer|normalize, expr? }` subsumes
+      `goal_type`/`goal_context`/`infer`/`normalize` (same `runGoalInfo`/`runExpr`).
+    - `scratch { op:open|promote|discard, target?, scratch?, write? }` subsumes
+      `stage`/`promote`/`discard`.
+  Standalone (kept): `load`, `goal_brief` (still first), `auto`, `check`,
+  `give_file`, `new_module`, `lemmas`, `repair`. Pure routing vocabulary
+  extracted to `AgdaInteract.Batch` (Step/wildcard/all-give + inspect/scratch op
+  validators); 26 offline assertions in `test/Spec.hs`; docs synced across
+  README/CLAUDE/plugin. Minor: the `{op:auto, goal:"*"}` path uses default Mimer
+  timeout/hints (standalone `auto` keeps those knobs).
 
 ## Open
 

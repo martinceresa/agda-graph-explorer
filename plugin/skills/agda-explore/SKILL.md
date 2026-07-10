@@ -9,10 +9,12 @@ description: >-
   code. If the server is started with --enable-interact, also use it to
   WRITE Agda under a zero-axiom contract: scaffold a new validated module
   (new_module), author a whole file or definition (give_file), type-check a
-  file and get structured errors + remaining goals (check), drive holes
-  goal-by-goal (case_split / refine / give / auto, optionally writing +
-  reloading in one step), batch several fills (construct), and find a
-  reusable lemma for a goal (lemmas) — all Agda-validated. Backed by the
+  file and get structured errors + remaining goals (check), drive holes with
+  a batch of steps (construct: give / refine / case_split / auto, optionally
+  writing + reloading in one step), run Mimer proof search on a goal (auto),
+  inspect a live goal's type or context (inspect), repair an almost-correct
+  file so it typechecks (repair), and find a reusable lemma for a goal
+  (lemmas) — all Agda-validated. Backed by the
   `agda-explore` MCP server (from the agda-explore plugin).
 ---
 
@@ -123,19 +125,15 @@ hatches), and returns a diff plus remaining goals.
 | Open a module and see its open goals (ids + positions) | `load`         |
 | **Orient on a goal in one call** (type + context + candidate lemmas) | **`goal_brief`** |
 | Type-check a file → errors + warnings + open goals     | `check`        |
-| Read a goal's type + in-scope context                  | `goal_type` / `goal_context` |
-| Infer / normalise an expression in a goal's context    | `infer` / `normalize` |
+| Read a goal's type / context, or infer / normalise an expr | `inspect` (`op=type`/`context`/`infer`/`normalize`) |
 | Find an existing lemma matching a goal                 | `lemmas`       |
 | Scaffold a NEW validated module (header, imports, holes) | `new_module` |
 | Author a whole file / a new definition (validated)     | `give_file`    |
-| Case-split a goal on a variable                        | `case_split`   |
-| Refine a goal by a head symbol (`f ?`)                 | `refine`       |
-| Fill a goal with a complete term (type-checked)        | `give`         |
-| Fill SEVERAL independent goals in one load (one diff)  | `give_many`    |
-| Run a planned batch of give/refine/case_split/auto     | `construct`    |
+| Drive holes: a SEQUENCE of give/refine/case_split/auto steps in one load (one diff) | `construct` |
 | Run Mimer proof search to solve a goal                 | `auto`         |
-| Run Mimer over EVERY open goal in one call             | `auto_all`     |
-| Build a NEW def in isolation, then splice it in        | `stage` → `promote` (or `discard`) |
+| Run Mimer over EVERY open goal in one call             | `construct steps=[{op:auto, goal:"*"}]` |
+| Build a NEW def in isolation, then splice it in        | `scratch` (`op:open` → `op:promote`, or `op:discard`) |
+| Fix an almost-correct file (missing imports / typos) so it typechecks | `repair` |
 
 **Authoring files (validated):**
 - New module → `new_module path=<file>`: writes the `module … where` header,
@@ -146,33 +144,46 @@ hatches), and returns a diff plus remaining goals.
 - After editing as text → `check file=<f>` (not `agda <f>`): reuses the warm
   session, returns ✓/✗ + every error/warning + open goals — and probes the
   remaining goals with Mimer, reporting any ready-made solutions inline
-  (accept one with `auto goal=gN write:true`, or all with `auto_all
-  write:true`). `content` dry-runs proposed text without writing.
+  (accept one with `auto goal=gN write:true`, or all with `construct
+  steps=[{op:auto, goal:"*"}] write:true`). `content` dry-runs proposed text
+  without writing.
+- Almost-correct file (unresolved names / typos, not a wrong proof) →
+  `repair file=<f>`: interprets the diagnostics to add missing imports
+  (resolved off the graph, operators/constructors included) and fix
+  misspelled references, driving it to typecheck. Spec-preserving (never
+  edits a signature) and zero-axiom; semantic errors are refused, not faked.
+  Returns a report + diff (`write:true` applies + reloads). Import repair
+  needs a graph covering the file's deps (e.g. `--overlay-graph` for stdlib).
 
 **Driving holes:**
 - `load <file>` first → goals as `g0, g1, …` with `(line:col)`; pass an id.
 - Then lead with `goal_brief goal=g0`: its type + context + the top reusable
-  lemmas in one call. Reach for `goal_type` / `lemmas` individually to go deeper.
-- Default `case_split`/`refine`/`give` return a diff without writing; **pass
-  `write:true`** to apply + reload in one step and get the refreshed goals.
+  lemmas in one call. Reach for `inspect op=type` / `lemmas` individually to
+  go deeper.
+- `construct` is the primary hole-filling interface: a SEQUENCE of
+  `{op, goal, …}` steps against one warm load — `give` (needs `term`) /
+  `refine` (needs `expr`) / `case_split` (needs `var`) / `auto` → one combined
+  diff. Each step targets an ORIGINAL-load goal; a rejected step aborts naming
+  the offender (re-run for holes a split introduces).
+- By default `construct` returns a diff without writing; **pass `write:true`**
+  to apply + reload in one step and get the refreshed goals.
 - Ids renumber after an edit — re-`load` (or use `write:true`) and re-select
   on `(line:col)`; never cache an id across an edit you applied yourself.
-- A `give` that doesn't typecheck returns the localized error, file untouched.
-- `give_many` fills several independent holes against one load (one atomic
-  diff). `construct` runs a planned heterogeneous sequence against one warm
-  load (re-run for holes a split introduces).
-- `auto` runs Mimer on one goal; `auto_all` tries EVERY open goal in one
-  call (per-goal `timeout`, default 5s) and returns one combined diff for
-  the solved ones plus the survivors — the cheapest first move whenever a
-  `check`/`load` leaves goals open. On a no-solution both retry seeded with
-  the top `find_lemma` lemmas for the goal (so one-lemma goals close); if it
-  still fails, guide it with `case_split`/`refine`/`give`.
-- Stuck? `lemmas goal=g0` finds a lemma matching the goal, then
-  `give`/`refine` with it.
+- A step whose term doesn't typecheck aborts the batch, file untouched.
+- `auto` runs Mimer on one goal (`timeout` / `hints` tune);
+  `construct steps=[{op:auto, goal:"*"}]` tries EVERY open goal in one call
+  (default Mimer budget) and returns one combined diff for the solved ones
+  plus the survivors — the cheapest first move whenever a `check`/`load`
+  leaves goals open. On a no-solution `auto` retries seeded with the top
+  `find_lemma` lemmas for the goal (so one-lemma goals close); if it still
+  fails, guide it with a `construct` `case_split`/`refine`/`give` step.
+- Stuck? `lemmas goal=g0` finds a lemma matching the goal, then a `construct`
+  `give`/`refine` step uses it.
 - `.lagda.md` works; edits stay inside the code fence.
-- `stage` → `promote` builds a def in an isolated scratch module (faster
-  re-check) then splices + re-validates the target; `discard` drops a dead
-  end. For most new defs, `give_file` / `new_module` are more direct.
+- `scratch op:open` (optionally `target=<file>` to seed imports) builds a def
+  in an isolated scratch module (faster re-check), then `scratch op:promote`
+  splices + re-validates the target; `scratch op:discard` drops a dead end.
+  For most new defs, `give_file` / `new_module` are more direct.
 
 ## Good habits
 
@@ -183,6 +194,6 @@ hatches), and returns a diff plus remaining goals.
 - Fall back to reading/grepping only for the *prose* around a definition or to
   verify an `unused` finding.
 - When writing, prefer the bridge over `Write` + `agda File`: `new_module` /
-  `give_file` to author, `check` to validate text edits, `case_split` /
-  `refine` / `give` / `auto` (`write:true` to apply + reload) or `construct`
-  to drive holes, `lemmas` when unsure what a goal needs.
+  `give_file` to author, `check` to validate text edits, `construct`
+  (give / refine / case_split / auto steps, `write:true` to apply + reload) or
+  `auto` to drive holes, `lemmas` when unsure what a goal needs.

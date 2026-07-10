@@ -84,11 +84,11 @@ When the `agda-explore` MCP tools are available, use them over grepping:
 5. Apply incrementally, re-checking after each meaningful change (`check`, or a
    mutator's `write:true` reload); revert anything that breaks or obscures.
    When the bridge is on, prefer its Agda-validated edits over blind text edits:
-   `give`/`refine`/`case_split` with `write:true` apply + reload in one step,
-   `construct` runs a planned batch, and `give_file` re-authors a whole
-   definition under the zero-axiom contract (so a simplification can't silently
-   introduce a postulate). `lemmas`/`similar_bodies` surface the existing lemma
-   a duplicated body should collapse into.
+   `construct` runs a batch of `give`/`refine`/`case_split`/`auto` steps against
+   one warm load (`write:true` applies + reloads in one step), and `give_file`
+   re-authors a whole definition under the zero-axiom contract (so a
+   simplification can't silently introduce a postulate). `lemmas`/`similar_bodies`
+   surface the existing lemma a duplicated body should collapse into.
 6. Report concisely: what changed, why, any signature that moved (justified),
    and before/after line counts.
 
