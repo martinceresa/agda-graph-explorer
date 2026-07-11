@@ -42,7 +42,8 @@ import qualified Data.Text        as T
 -- 'coGoals' rather than classifying them.)
 data Diagnostic
   = DScope !Text        -- ^ an identifier / operator reported not-in-scope;
-                        --   resolve by adding an import or renaming a typo.
+                        --   resolve by adding an import (import-only — R25;
+                        --   a typo is reported, never renamed).
   | DParse !Text        -- ^ a candidate operator / constructor from a
                         --   @NoParseFor*@ error (import-only; no rename).
   | DIncomplete         -- ^ incomplete pattern matching — recommend @case_split@.

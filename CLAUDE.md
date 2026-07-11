@@ -285,12 +285,13 @@ src/
     Strategy.hs                 PURE candidate generation off a base-name index
                                 (Env) built once from ldRealDefs: imports via
                                 defModule (constructor → datatype-parent module;
-                                defOrigin flags external overlay defs); typos via
-                                edit distance over in-scope + graph names. No
-                                graph → typo-only.
-    Edit.hs                     PURE comment/string/signature-safe edits
-                                (EAddImport / ERename); `signatures` gives the
-                                spec-preservation invariant the loop asserts.
+                                defOrigin flags external overlay defs).
+                                Import-only (R25); nearMissSuggestions offers a
+                                spelling hint (never an edit) when no import
+                                fixes a typo. No graph → no import candidates.
+    Edit.hs                     PURE import-only edit (EAddImport); `signatures`
+                                gives the spec-preservation invariant the loop
+                                asserts as a backstop.
 
 src-agda-graph/AgdaGraph/       Shared library.
   Interaction/Protocol.hs       FromJSON mirror of the --interaction-json reply
@@ -421,10 +422,13 @@ plugin/                         Claude Code plugin: agda-explore MCP server +
   resolution is instant, so a bad hint fails before searching. Don't batch.
 
 - **`repair`'s three invariants are enforced structurally — don't relax them**
-  (see `FixLoop.md`). (1) *Spec preservation*: `AgdaRepair.Edit.renameInBody`
-  never edits a signature/import/module line or a comment/string, and
-  `firstWorking` rejects any candidate whose `signatures` set changed — so a
-  repair can't rewrite a theorem. (2) *Zero axioms*: every candidate goes through
+  (see `FixLoop.md`). (1) *Spec preservation*: repair is __import-only__ — the
+  sole edit inserts an `open import` line (renames were removed in R25 because a
+  rename can rewrite a theorem's meaning to silence a scope error, e.g. `ℕ` →
+  `_#_`), so it structurally cannot touch existing code, and `firstWorking`
+  still asserts the `AgdaRepair.Edit.signatures` set is unchanged as a backstop.
+  A misspelling no import fixes is reported with a `nearMissSuggestions`
+  spelling hint, never rewritten. (2) *Zero axioms*: every candidate goes through
   `checkFileInput` first. (3) *Monotone termination*: `accepts` takes a candidate
   only if it resolves the targeted name without raising the error count — imports
   only grow scope, so it can't oscillate. Semantic errors and open goals are

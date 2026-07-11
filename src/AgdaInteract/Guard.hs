@@ -154,7 +154,7 @@ tokens = filter (not . T.null) . T.split isDelim
     isDelim c = c `elem` (" \t\r\n(){};.@\"" :: String)
 
 -- | The text the guard scans, made source-region aware in one left-to-right
--- pass (modelled on "AgdaRepair.Edit"@.renameInBody@'s scanner):
+-- comment/string-aware pass:
 --
 --   * @{-# … #-}@ pragma blocks at comment-depth 0 are copied __verbatim__
 --     (a @--@ inside a pragma must not start a comment, and the pragma scan

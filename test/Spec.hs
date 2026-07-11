@@ -1020,22 +1020,7 @@ diagnosticTests =
 
 repairEditTests :: [Check]
 repairEditTests =
-  [ checkEq "renameInBody rewrites a body reference"
-      "g : Nat\ng = refl\n"
-      (RE.renameInBody "g : Nat\ng = ref\n" "ref" "refl")
-  , checkEq "renameInBody never touches a signature line"
-      "ref : Nat\nx = refl\n"
-      (RE.renameInBody "ref : Nat\nx = ref\n" "ref" "refl")
-  , checkEq "renameInBody leaves a line comment alone"
-      "x = refl  -- ref here\n"
-      (RE.renameInBody "x = ref  -- ref here\n" "ref" "refl")
-  , checkEq "renameInBody leaves a string literal alone"
-      "x = g \"ref\"\n"
-      (RE.renameInBody "x = g \"ref\"\n" "ref" "refl")
-  , checkEq "renameInBody matches whole tokens only"
-      "y = prefix\n"
-      (RE.renameInBody "y = prefix\n" "ref" "refl")
-  , check "insertImport places the line after the last import"
+  [ check "insertImport places the line after the last import"
       ("open import A\nopen import B" `T.isInfixOf`
          RE.insertImport "module M where\nopen import A\nf = x\n" "open import B")
   , checkEq "insertImport is a no-op when the import is already present"

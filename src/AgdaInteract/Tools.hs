@@ -1580,9 +1580,17 @@ repairLoop ss file env maxIter orig = do
                    Just (text', desc, co') ->
                      go (iter + 1) (compiles + dc) (applied ++ [desc]) text' co'
                    Nothing ->
-                     pure (text, mkReport False iter (compiles + dc) applied
-                             ["no candidate resolved: " <> T.intercalate ", " (map diagName actionable)]
-                             (Just co))
+                     let names   = map diagName actionable
+                         suggFor n = RS.nearMissSuggestions env text n
+                         suggMsgs = [ n <> " (did you mean: " <> T.intercalate ", " s <> "?)"
+                                    | n <- names, let s = suggFor n, not (null s) ]
+                         note = if null suggMsgs then ""
+                                else " — closest existing names: " <> T.intercalate "; " suggMsgs
+                                       <> " (repair does not rename; fix the spelling, or add the \
+                                          \missing import/definition by hand)"
+                     in pure (text, mkReport False iter (compiles + dc) applied
+                                ["no candidate resolved: " <> T.intercalate ", " names <> note]
+                                (Just co))
 
     mkReport done iter compiles applied refused mco = RepairReport
       { rrApplied   = applied
@@ -1659,7 +1667,6 @@ describeEdits :: [RE.Edit] -> Text
 describeEdits = T.intercalate " + " . map one
   where
     one (RE.EAddImport l) = "added `" <> l <> "`"
-    one (RE.ERename o n)  = "renamed `" <> o <> "` → `" <> n <> "`"
 
 renderRepairReport :: RepairReport -> Text
 renderRepairReport rr =

@@ -17,13 +17,14 @@ module AgdaRepair.Strategy
   , Env
   , buildEnv
   , candidatesFor
+  , nearMissSuggestions
   , inScopeNames
   , importCandidates
   , importLineFor
   ) where
 
 import           Data.Char        (isDigit)
-import           Data.List        (sortOn)
+import           Data.List        (nub, sortOn)
 import qualified Data.Map.Strict  as M
 import           Data.Map.Strict  (Map)
 import           Data.Maybe       (mapMaybe)
@@ -55,25 +56,27 @@ buildEnv Nothing   = Env M.empty
 buildEnv (Just ld) = Env (M.fromListWith (++)
   [ (stripUnderscores (baseName d), [d]) | d <- ldRealDefs ld ])
 
--- | Ranked candidates for one diagnostic. Import candidates come first (the
--- safe, common fix); renames follow (guarded to close-by-edit-distance names,
--- and paired with an import when the target isn't already in scope).
+-- | Ranked candidates for one diagnostic. Import-only (R25): a scope or
+-- parse error is resolved by bringing the missing name into scope, never by
+-- renaming — a rename can rewrite a theorem's meaning to silence a scope
+-- error (e.g. @ℕ@ → @_#_@). A misspelling that no import can fix is reported
+-- with 'nearMissSuggestions' instead of silently rewritten.
 candidatesFor :: Env -> Text -> Diagnostic -> [Candidate]
 candidatesFor env src d = case d of
-  DScope name -> imports name ++ renames name
+  DScope name -> imports name
   DParse name -> imports name                       -- operator/ctor: import only
   _           -> []                                 -- goals/incomplete/refuse: loop-handled
   where
-    scope   = inScopeNames src
     imports = map (\l -> [EAddImport l]) . importCandidates env src
-    -- rename to a near-match already in scope, else a graph name + its import.
-    renames name =
-      let inScope = [ [ERename name r]
-                    | r <- nearMatches name (Set.toList scope) ]
-          viaGraph = [ [ERename name (baseName g), EAddImport (importLineFor g)]
-                     | g <- take 3 (graphNearMatches env name)
-                     , baseName g `Set.notMember` scope ]
-      in inScope ++ viaGraph
+
+-- | Closest existing names to a not-in-scope token — reported (never applied)
+-- when no import resolves it, so a genuine typo still gets a hint without
+-- repair ever rewriting code. Draws from the file's in-scope names and the
+-- graph's names, nearest first, capped.
+nearMissSuggestions :: Env -> Text -> Text -> [Text]
+nearMissSuggestions env src name =
+  take 3 (nub (nearMatches name (Set.toList (inScopeNames src))
+                 ++ map baseName (graphNearMatches env name)))
 
 -- | Import lines that would bring @name@ into scope, ranked. Exposed for
 -- reuse by the operator/constructor ('DParse') path. Empty without a graph.

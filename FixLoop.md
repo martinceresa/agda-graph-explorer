@@ -46,7 +46,7 @@ The classifier keys on Agda's bracketed tags and is lenient (unknown → refuse)
 
 | Diagnostic | Strategy |
 |---|---|
-| `NotInScope` | add an import, else rename to a near-match |
+| `NotInScope` | add an import (import-only; a typo that no import fixes is reported with a spelling suggestion, never renamed — R25) |
 | `NoParseForApplication` (missing operator, e.g. `_×_`) | add the operator's import |
 | `NoParseForLHS` (missing constructor in a pattern) | add the constructor's import |
 | `IncompletePatternMatching` / `CoverageIssue` | report — run `construct` (a `case_split` step) |
@@ -55,15 +55,17 @@ The classifier keys on Agda's bracketed tags and is lenient (unknown → refuse)
 
 ## Invariants
 
-1. **Spec preservation.** `AgdaRepair.Edit.renameInBody` never edits a
-   signature / import / module line, nor a token inside a comment or string; and
-   `firstWorking` rejects any candidate whose signature set changed. A repair
-   can rewrite proof terms but never a theorem statement.
+1. **Spec preservation.** Repair is __import-only__: the sole edit inserts an
+   `open import` line (renames were removed — R25 — because a rename can rewrite
+   a theorem's meaning to silence a scope error, e.g. `ℕ` → `_#_`). So a repair
+   structurally cannot touch existing code, and `firstWorking` still asserts the
+   `AgdaRepair.Edit.signatures` set is unchanged as a backstop.
 2. **Zero axioms.** Every candidate passes `AgdaInteract.Guard.checkFileInput`
    (no `postulate` / `primTrustMe` / termination-coverage pragmas).
 3. **Monotone termination.** A candidate is accepted only if it resolves the
-   targeted name without raising the error count. Imports only grow scope and a
-   rename removes an unresolved token, so the loop can't oscillate.
+   targeted name without raising the error count. Imports only grow scope, so
+   each accepted round adds a new distinct import line and the loop can't
+   oscillate.
 4. **Diff by default.** No write unless `write:true` (then `applyOrDiff` applies
    + reloads). `content` is always a dry run.
 
@@ -79,9 +81,14 @@ ground truth), Agda 2.9, stdlib overlay:
 
 | injected fault | repaired | semantic drift | spec edits |
 |---|---|---|---|
-| typo (misspelled reference) | 20/22 (91%) | 0 | 0 |
+| typo (misspelled reference) | reported with a spelling suggestion, not auto-fixed (import-only since R25) | 0 | 0 |
 | drop-import (missing import) | 34/39 (87%) | 0 | 0 |
 | real semantic failures | correctly refused | — | 0 |
+
+(Pre-R25 the loop renamed typos to a near-match — 20/22 (91%) with 0 drift —
+but a rename is a spec edit in disguise, so R25 replaced it with a
+non-mutating suggestion. Re-measure the drop-import row after the R24 alias
+work lands.)
 
 Cost is a few `agda` recompiles per fix (no model tokens). The strategic point:
 a strong LLM+`check` agent already clears mechanical errors itself, so `repair`
@@ -102,7 +109,7 @@ agents.
 
 - `AgdaRepair.Diagnostic` — pure classifier over the rendered error text.
 - `AgdaRepair.Strategy` — pure, graph-backed candidate generation.
-- `AgdaRepair.Edit` — pure, comment/string/signature-safe text edits.
+- `AgdaRepair.Edit` — pure, import-only text edits + the signature invariant.
 - driver (`runRepair` / `repairLoop` / `firstWorking` / `accepts`) in
   `AgdaInteract.Tools`, so it reuses the bridge's session/validation helpers.
 
