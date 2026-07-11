@@ -19,6 +19,7 @@ module AgdaInteract.Literate
   , scanCodeBlocks
   , wholeFileCode
   , isInsideCode
+  , codeSlices
   ) where
 
 import           Data.Text ( Text )
@@ -72,3 +73,13 @@ scanCodeBlocks txt = CodeBlocks (merge (go 0 False (T.splitOn "\n" txt) []))
 -- | Is the 1-based character offset inside a code block?
 isInsideCode :: CodeBlocks -> Int -> Bool
 isInsideCode (CodeBlocks spans) pos = any (\(s, e) -> pos >= s && pos < e) spans
+
+-- | The code-region text of a file, one 'Text' per span in order (1-based,
+-- end-exclusive char indexing). For a plain @.agda@ file that is the whole
+-- file as a singleton; for a literate file it is one slice per code line
+-- (spans are per-line — see 'scanCodeBlocks'), so a caller rejoins with
+-- @"\n"@ to reconstruct multi-line pragmas\/comments faithfully. Used by the
+-- guard to scan only a literate file's Agda code, never its prose.
+codeSlices :: CodeBlocks -> Text -> [Text]
+codeSlices (CodeBlocks spans) txt =
+  [ T.take (e - s) (T.drop (s - 1) txt) | (s, e) <- spans ]

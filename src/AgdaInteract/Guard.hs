@@ -16,12 +16,15 @@ module AgdaInteract.Guard
   ( GuardVerdict(..)
   , checkGiveInput
   , checkFileInput
+  , checkFileInputFor
   , forbiddenIdentifiers
-  , stripComments
+  , guardScrub
   ) where
 
 import           Data.Text ( Text )
 import qualified Data.Text as T
+
+import           AgdaInteract.Literate ( codeBlocksFor, codeSlices )
 
 -- | Verdict for one piece of give\/refine input.
 data GuardVerdict
@@ -46,12 +49,12 @@ forbiddenIdentifiers =
 --     carries one, and @TERMINATING@ \/ @NON_TERMINATING@ \/
 --     @NO_TERMINATION_CHECK@ \/ @NON_COVERING@ \/ @OPTIONS@ pragmas all
 --     disable a soundness check.
---   * Any 'forbiddenIdentifiers' token (after stripping comments, so a
+--   * Any 'forbiddenIdentifiers' token (after 'guardScrub', so a
 --     @-- postulate@ note is not a false positive, and a @postulate@
 --     hidden after a comment is still caught).
 checkGiveInput :: Text -> GuardVerdict
 checkGiveInput input
-  | "{-#" `T.isInfixOf` input =
+  | "{-#" `T.isInfixOf` v =
       Rejected "input contains a pragma ({-# … #-}); the bridge refuses \
                \pragmas in hole terms (they can disable termination, \
                \coverage, or --safe)."
@@ -61,7 +64,8 @@ checkGiveInput input
                      \contract.")
   | otherwise = Allowed
   where
-    hits = filter (`elem` forbiddenIdentifiers) (tokens (stripComments input))
+    v    = guardScrub input
+    hits = filter (`elem` forbiddenIdentifiers) (tokens v)
 
 -- | Whole-file / whole-definition variant of 'checkGiveInput', for the
 -- file-authoring tools (@give_file@ / @new_module@ / @promote@). Unlike
@@ -71,7 +75,7 @@ checkGiveInput input
 -- ones:
 --
 --   * any 'forbiddenIdentifiers' token (postulate \/ primTrustMe \/ …),
---     after comment stripping;
+--     after 'guardScrub';
 --   * a termination\/coverage-disabling pragma (TERMINATING \/
 --     NON_TERMINATING \/ NO_TERMINATION_CHECK \/ NON_COVERING);
 --   * an @OPTIONS@ pragma carrying a known unsafe flag (@--type-in-type@,
@@ -90,8 +94,22 @@ checkFileInput input
                   <> "'. The bridge enforces a zero-postulate / fixed-axiom contract.")
   | otherwise = Allowed
   where
-    hits       = filter (`elem` forbiddenIdentifiers) (tokens (stripComments input))
-    badPragmas = filter isBadPragma (pragmaContents input)
+    v          = guardScrub input
+    hits       = filter (`elem` forbiddenIdentifiers) (tokens v)
+    badPragmas = filter isBadPragma (pragmaContents v)
+
+-- | Literate-aware 'checkFileInput': for a @.lagda*@ file only the fenced
+-- Agda code blocks are guarded, so a literate module whose /prose/ merely
+-- mentions @postulate@ or quotes a @{-# TERMINATING #-}@ pragma is not
+-- refused (the R21 false positive). For a plain @.agda@ file the whole file
+-- is code, so this is exactly 'checkFileInput'. Code slices are rejoined with
+-- newlines so a multi-line pragma\/comment inside a fence is scanned intact.
+-- (Every fenced block is treated as Agda code — see "AgdaInteract.Literate" —
+-- so a token in a @```text@ block is still refused; conservative by design,
+-- and @--safe@ on the session is the backstop.)
+checkFileInputFor :: FilePath -> Text -> GuardVerdict
+checkFileInputFor fp txt =
+  checkFileInput (T.intercalate "\n" (codeSlices (codeBlocksFor fp txt) txt))
 
 -- | The trimmed contents of each @{-# … #-}@ pragma block in the text
 -- (the bytes between the delimiters). An unterminated @{-#@ yields the
@@ -135,23 +153,52 @@ tokens = filter (not . T.null) . T.split isDelim
   where
     isDelim c = c `elem` (" \t\r\n(){};.@\"" :: String)
 
--- | Remove Agda line comments (@-- … EOL@) and (nested) block comments
--- (@{- … -}@). Pragmas are handled separately by 'checkGiveInput' before
--- this runs, so stripping only ever removes inert text — a @postulate@
--- in active code is not inside a comment and survives.
-stripComments :: Text -> Text
-stripComments = T.pack . go . T.unpack
+-- | The text the guard scans, made source-region aware in one left-to-right
+-- pass (modelled on "AgdaRepair.Edit"@.renameInBody@'s scanner):
+--
+--   * @{-# … #-}@ pragma blocks at comment-depth 0 are copied __verbatim__
+--     (a @--@ inside a pragma must not start a comment, and the pragma scan
+--     needs its body) — so a real pragma still reaches 'pragmaContents';
+--   * @-- … EOL@ line comments and (nested) @{- … -}@ block comments are
+--     removed, so a pragma\/keyword quoted in a comment is inert
+--     (a commented-out @{- {-# TERMINATING #-} -}@ balances as one block);
+--   * string-literal contents are blanked (the quotes kept, bounded at EOL —
+--     Agda strings are single-line) so a quoted @"postulate"@ \/ @"{-#"@ is
+--     inert __and__ a stray @"@ can no longer open a phantom comment that
+--     swallows following real code (a guard bypass this closes).
+--
+-- Only ever removes\/blanks inert text: a @postulate@ in active code is
+-- outside every comment\/string and survives to the token scan.
+guardScrub :: Text -> Text
+guardScrub = T.pack . go . T.unpack
   where
+    -- depth-0: real code, scanning for comment/string/pragma openers.
     go [] = []
-    go ('-':'-':rest) = go (dropLine rest)
-    go ('{':'-':rest) = go (dropBlock (1 :: Int) rest)
-    go (c:rest)       = c : go rest
+    go ('{':'-':'#':rest) = '{':'-':'#': pragma rest    -- preserve pragma verbatim
+    go ('-':'-':rest)     = go (skipToNL rest)          -- line comment (keep the \n)
+    go ('{':'-':rest)     = go (dropBlock (1 :: Int) rest)
+    go ('"':rest)         = '"' : blankStr rest          -- string literal
+    go (c:rest)           = c : go rest
 
-    dropLine = drop 1 . dropWhile (/= '\n')
+    -- inside a pragma block: copy through the closing #-} (or to EOF).
+    pragma ('#':'-':'}':rest) = '#':'-':'}': go rest
+    pragma (c:rest)           = c : pragma rest
+    pragma []                 = []
+
+    skipToNL = dropWhile (/= '\n')
+
+    -- blank a string's contents; keep the delimiting quotes; an escape blanks
+    -- both chars (so an escaped @\"@ can't close early); a bare newline ends
+    -- an unterminated literal (Agda strings are single-line).
+    blankStr ('\\':_:rest) = ' ' : ' ' : blankStr rest
+    blankStr ('"':rest)    = '"' : go rest
+    blankStr ('\n':rest)   = '\n' : go rest
+    blankStr (_:rest)      = ' ' : blankStr rest
+    blankStr []            = []
 
     dropBlock _ [] = []
     dropBlock n ('{':'-':rest) = dropBlock (n + 1) rest
     dropBlock n ('-':'}':rest)
-      | n <= 1    = rest
+      | n <= 1    = go rest
       | otherwise = dropBlock (n - 1) rest
     dropBlock n (_:rest) = dropBlock n rest

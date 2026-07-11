@@ -1483,7 +1483,7 @@ firstWorking ss file env co text diags = go 0 flat
         Nothing    -> go dc rest                            -- no-op edit
         Just text'
           | RE.signatures text' /= sigs0 -> go dc rest      -- would change a signature: refuse
-          | otherwise -> case checkFileInput text' of
+          | otherwise -> case checkFileInputFor file text' of
               Rejected _ -> go dc rest                      -- zero-axiom guard
               Allowed    -> do
                 r <- validateText ss file text'
@@ -1566,7 +1566,7 @@ runGiveFile ss a = case argText a "file" of
 
 -- | Guard, validate, then diff/apply a fully-formed candidate file body.
 proceedGiveFile :: ServerState -> Bool -> FilePath -> Text -> IO (Either Text Text)
-proceedGiveFile ss write file candidate = case checkFileInput candidate of
+proceedGiveFile ss write file candidate = case checkFileInputFor file candidate of
   Rejected why -> pure (Left ("give_file refused: " <> why))
   Allowed      -> do
     v <- loadRenamedTemp ss file candidate
@@ -1627,7 +1627,7 @@ runNewModule ss a = case argText a "path" of
     mld <- either (const Nothing) (Just . fst) <$> ensureFresh ss
     let (impLines, unresolved) = resolveImports mld openImp imports
         content                = buildModuleContent lit modName impLines defs
-    case checkFileInput content of
+    case checkFileInputFor file content of
       Rejected why -> pure (Left ("new_module refused: " <> why))
       Allowed      -> do
         v <- loadRenamedTemp ss file content

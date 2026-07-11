@@ -113,7 +113,21 @@ guardTests =
       (not (isRejected (checkGiveInput "f {- postulate -}")))
   , check "guard catches postulate after a comment"
       (isRejected (checkGiveInput "{- ok -} postulate q : A"))
-  , checkEq "stripComments removes block comment" "f  g" (stripComments "f {- x -} g")
+  -- R21: pragma tokens in inert regions are false positives; a pragma in
+  -- active code (or a token blanking must not expose) still fires.
+  , check "guard allows a pragma quoted in a line comment"
+      (not (isRejected (checkGiveInput "f -- note: {-# TERMINATING #-}\n")))
+  , check "guard allows a pragma quoted in a block comment"
+      (not (isRejected (checkGiveInput "f {- {-# OPTIONS --type-in-type #-} -}")))
+  , check "guard allows a string-quoted postulate"
+      (not (isRejected (checkGiveInput "show \"postulate\"")))
+  , check "guard: a stray quote must not hide following code"
+      (isRejected (checkGiveInput "g = \"{-\"\npostulate x : A"))
+  , checkEq "guardScrub removes a block comment" "f  g" (guardScrub "f {- x -} g")
+  , checkEq "guardScrub preserves a pragma verbatim"
+      "{-# TERMINATING #-}" (guardScrub "{-# TERMINATING #-}")
+  , checkEq "guardScrub blanks string contents, keeps the quotes"
+      "\"  \"" (guardScrub "\"ab\"")
   ]
 
 -- | The whole-file guard ('checkFileInput', used by give_file / new_module
@@ -141,7 +155,33 @@ fileGuardTests =
       (not (isRejected (checkFileInput "module M where\n-- postulate is discussed here\nfoo = 0\n")))
   , check "file guard rejects primTrustMe in a body"
       (isRejected (checkFileInput "module M where\nf = primTrustMe\n"))
+  -- R21: a pragma quoted in a comment or string is inert, not a refusal.
+  , check "file guard allows a pragma in a line comment"
+      (not (isRejected (checkFileInput "module M where\n-- {-# TERMINATING #-}\nfoo = 0\n")))
+  , check "file guard allows a commented-out pragma block"
+      (not (isRejected (checkFileInput "{- {-# TERMINATING #-} -}\nmodule M where\n")))
+  , check "file guard allows a string-quoted pragma"
+      (not (isRejected (checkFileInput "module M where\ns = \"{-# NON_TERMINATING #-}\"\n")))
+  -- R21 literate: only fenced Agda code is guarded; prose is not.
+  , check "literate guard allows a pragma/postulate mentioned in prose"
+      (not (isRejected (checkFileInputFor "Doc.lagda.md" litProseMention)))
+  , check "literate guard rejects postulate inside a code fence"
+      (isRejected (checkFileInputFor "Doc.lagda.md" litFencePostulate))
+  , check "literate guard allows {-# OPTIONS --safe #-} inside a code fence"
+      (not (isRejected (checkFileInputFor "Doc.lagda.md" litFenceSafe)))
+  , checkEq "checkFileInputFor on a plain .agda equals checkFileInput"
+      (checkFileInput plainMod) (checkFileInputFor "M.agda" plainMod)
   ]
+  where
+    plainMod = "module M where\nfoo : Nat\nfoo = 0\n"
+    litProseMention = T.unlines
+      [ "# Doc", "This mentions postulate and {-# TERMINATING #-} in prose."
+      , "```agda", "module M where", "foo : Nat", "foo = 0", "```" ]
+    litFencePostulate = T.unlines
+      [ "# Doc", "prose", "```agda", "module M where", "postulate bad : A", "```" ]
+    litFenceSafe = T.unlines
+      [ "# Doc", "prose", "```agda", "{-# OPTIONS --safe #-}"
+      , "module M where", "foo = 0", "```" ]
 
 ----------------------------------------------------------------------
 -- GoalCanon: find_lemma match-oriented tokens + algebraic shape.
@@ -215,6 +255,9 @@ literateTests =
       (isInsideCode lit litHolePos)
   , check "literate: prose pos 10 is NOT inside code"
       (not (isInsideCode lit 10))
+  , checkEq "codeSlices extracts fenced code lines, drops prose + fences"
+      ["module Lit where", "open import Agda.Builtin.Nat", "triple : Nat → Nat", "triple n = {!!}"]
+      (codeSlices lit litFixture)
   ]
   where
     sample = "module X where\nfoo = 1\n"
