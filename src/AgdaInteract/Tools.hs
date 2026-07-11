@@ -51,6 +51,7 @@ import           Data.Text               (Text)
 import qualified Data.Text               as T
 import qualified Data.Text.IO            as TIO
 import           Data.Time.Clock         (diffUTCTime, getCurrentTime)
+import           Data.Word               (Word64)
 import           System.Directory        (createDirectoryIfMissing,
                                           listDirectory, removePathForcibly)
 import           System.FilePath         (dropExtension, dropExtensions, isAbsolute,
@@ -399,7 +400,7 @@ runGiveMany ss a = case argLookup a "gives" >>= parseMaybe parseJSON of
         case r of
           Left err -> pure (Left err)
           Right (file, sess, gm) -> do
-            ef <- readFileSafe file
+            ef <- readSourceStamped ss file
             case ef of
               Left e     -> pure (Left e)
               Right orig -> do
@@ -561,7 +562,7 @@ runAutoAll ss a = do
           | null es   -> pure (Right ("Loaded " <> T.pack file
                                         <> " — no open goals; nothing for Mimer to try."))
           | otherwise -> do
-              ef <- readFileSafe file
+              ef <- readSourceStamped ss file
               case ef of
                 Left e     -> pure (Left e)
                 Right orig -> do
@@ -850,7 +851,7 @@ validateCandidate ss targetFile candidate = do
 applyHoleEdit :: ServerState -> Bool -> FilePath -> GoalEntry -> Text -> IO (Either Text Text)
 applyHoleEdit ss write file e repl = case geRange e of
   Nothing              -> pure (Left "goal has no source range; cannot edit.")
-  Just (GoalRange s en) -> withSourceGuarded file (rpPos s) $ \old -> do
+  Just (GoalRange s en) -> withSourceGuarded ss file (rpPos s) $ \old -> do
     let new = spliceRange old (rpPos s) (rpPos en) repl
     applyOrDiff ss write file old new
 
@@ -872,17 +873,31 @@ applyOrDiff ss write file old new
       if not write
         then markSessionDirty ss file >> pure (Right (diffMsg d))
         else do
-          w <- try (TIO.writeFile file new) :: IO (Either SomeException ())
-          case w of
-            Left e   -> pure (Left ("could not write " <> T.pack file <> ": " <> showT e))
-            Right () -> do
-              r <- doLoad ss file
-              case r of
-                Left err            ->
-                  pure (Right (wroteMsg file d <> "\n\n⚠ reloaded with a problem: " <> err))
-                Right (_, _, es, fp) -> do
-                  emitGoals ss fp es
-                  pure (Right (wroteMsg file d <> "\n\n" <> renderGoals fp es))
+          -- Write-time recheck: the edit was computed against @old@; if disk
+          -- moved since (an external edit, or a slow validate/promote phase),
+          -- refuse rather than clobber it (R22). An unreadable file with a
+          -- non-empty @old@ is the same hazard; @old == ""@ is the legitimate
+          -- new-file creation path (give_file).
+          nowTxt <- readFileSafe file
+          case nowTxt of
+            Right cur | contentStamp cur /= contentStamp old ->
+              pure (Left "the file changed on disk while the edit was being prepared — \
+                          \nothing written; re-run the tool.")
+            Left _ | not (T.null old) ->
+              pure (Left "the file became unreadable while the edit was being prepared — \
+                          \nothing written; re-run the tool.")
+            _ -> do
+              w <- try (TIO.writeFile file new) :: IO (Either SomeException ())
+              case w of
+                Left e   -> pure (Left ("could not write " <> T.pack file <> ": " <> showT e))
+                Right () -> do
+                  r <- doLoadAfterWrite ss (contentStamp new) file
+                  case r of
+                    Left err            ->
+                      pure (Right (wroteMsg file d <> "\n\n⚠ reloaded with a problem: " <> err))
+                    Right (_, _, es, fp) -> do
+                      emitGoals ss fp es
+                      pure (Right (wroteMsg file d <> "\n\n" <> renderGoals fp es))
   where
     d = unifiedDiff file old new
 
@@ -892,9 +907,9 @@ wroteMsg file d =
 
 -- | Read the source and run the edit only if the target offset is inside
 -- an Agda code block (a no-op for plain @.agda@; a guard for @.lagda.md@).
-withSourceGuarded :: FilePath -> Int -> (Text -> IO (Either Text Text)) -> IO (Either Text Text)
-withSourceGuarded file pos act = do
-  efile <- readFileSafe file
+withSourceGuarded :: ServerState -> FilePath -> Int -> (Text -> IO (Either Text Text)) -> IO (Either Text Text)
+withSourceGuarded ss file pos act = do
+  efile <- readSourceStamped ss file
   case efile of
     Left err  -> pure (Left err)
     Right old
@@ -915,6 +930,43 @@ readFileSafe :: FilePath -> IO (Either Text Text)
 readFileSafe fp = do
   r <- try (TIO.readFile fp) :: IO (Either SomeException Text)
   pure (either (Left . ("cannot read source: " <>) . T.pack . show) Right r)
+
+-- | 'contentStamp' of a file's current on-disk content, or 'Nothing' if it
+-- cannot be read.
+stampOf :: FilePath -> IO (Maybe Word64)
+stampOf fp = either (const Nothing) (Just . contentStamp) <$> readFileSafe fp
+
+-- | Read a mutation's source file and refuse when it no longer matches the
+-- session's load stamp — an external edit since the goals were computed, so
+-- the cached hole offsets no longer describe this content (R22). A file with
+-- no registered session (e.g. @give_file@ on an unloaded path) is read
+-- as-is. An unknown load stamp (file changed while loading) also refuses.
+readSourceStamped :: ServerState -> FilePath -> IO (Either Text Text)
+readSourceStamped ss file = do
+  eTxt <- readFileSafe file
+  case eTxt of
+    Left err  -> pure (Left err)
+    Right txt -> do
+      m <- readMVar (ssSessions ss)
+      pure $ case M.lookup file m of
+        Nothing -> Right txt
+        Just e  -> case seLoadHash e of
+          Just h | h == contentStamp txt -> Right txt
+          Just _  -> Left staleDiskMsg
+          Nothing -> Left "the file was changing on disk while it was loaded — \
+                          \re-run `load file=…` before mutating it."
+
+-- | The current load stamp of a registered file (for a mid-batch re-check).
+currentStamp :: ServerState -> FilePath -> IO (Maybe Word64)
+currentStamp ss file = do
+  m <- readMVar (ssSessions ss)
+  pure (M.lookup file m >>= seLoadHash)
+
+staleDiskMsg :: Text
+staleDiskMsg =
+  "the file changed on disk since this session's last load — re-run \
+  \`load file=…` and pick goals from the fresh list (ids may have been \
+  \renumbered); nothing was changed."
 
 -- | Send one command to an already-resolved session and return its reply
 -- burst, or a session-level error.
@@ -946,32 +998,56 @@ absFile ss t =
 -- reconciled; 'doLoad' and 'runCheck' read different things off it. On a
 -- load that yields goals the stable-goal map is re-synced; on a load error
 -- the prior map is preserved (so a transient error doesn't drop stable ids).
-loadAndSync :: ServerState -> FilePath -> IO (Either Text (Session, GoalMap, [GoalEntry], SendOutcome))
-loadAndSync ss file = modifyMVar (ssSessions ss) $ \m -> do
+loadAndSync :: ServerState -> Maybe Word64 -> FilePath
+            -> IO (Either Text (Session, GoalMap, [GoalEntry], SendOutcome))
+loadAndSync ss mExpect file = modifyMVar (ssSessions ss) $ \m -> do
   eSess <- getLiveSession ss m file
   case eSess of
     Left err   -> pure (m, Left err)
     Right sess -> do
-      let gm0 = maybe emptyGoalMap seGoalMap (M.lookup file m)
-      out <- sendIotcm sess (iotcmLoad file (loadIncludes ss file))
-      now <- getCurrentTime
+      let mPrev = M.lookup file m
+          gm0   = maybe emptyGoalMap seGoalMap mPrev
+      -- Bracket Cmd_load with two reads: read-before is fail-safe against an
+      -- edit landing after our read; read-after alone would be unsound (an
+      -- edit between Agda's read and ours would falsely match). A change
+      -- during the load makes the bracket unstable → stamp unknown → the
+      -- entry is dirty and mutators refuse until a clean reload (R22).
+      preH  <- stampOf file
+      out   <- sendIotcm sess (iotcmLoad file (loadIncludes ss file))
+      postH <- stampOf file
+      now   <- getCurrentTime
       -- Reuse the existing last-used cell when reloading a known file (so its
       -- idle clock is reset, not orphaned); otherwise mint a fresh one.
       luRef <- maybe (newIORef now) (\e -> seLastUsed e <$ writeIORef (seLastUsed e) now)
-                     (M.lookup file m)
-      let (gm1, es) = case interpretLoad out of
-                        Right goals -> syncGoals gm0 goals
-                        Left _      -> (gm0, [])
-          m1        = M.insert file (SessionEntry sess gm1 False luRef) m
+                     mPrev
+      let stamp     = if preH == postH then preH else Nothing
+          gmBase    = if shouldKeepGoalIds mExpect (seLoadHash =<< mPrev) stamp
+                        then gm0 else dropEntriesKeepNext gm0
+          (gm1, es) = case interpretLoad out of
+                        Right goals -> syncGoals gmBase goals
+                        Left _      -> (gmBase, [])
+          m1        = M.insert file (SessionEntry sess gm1 (isNothing stamp) luRef stamp) m
       m2 <- capSessions (cfgMaxSessions (ssConfig ss)) file m1
       pure (m2, Right (sess, gm1, es, out))
 
 -- | (Re)load a module, returning the session, the new goal map, the goal
 -- entries, and the file path — or the load error. Wraps 'loadAndSync',
--- returning 'Left' on a load error.
+-- returning 'Left' on a load error. Offset-keyed goal ids are reset unless
+-- the content is unchanged since the prior load.
 doLoad :: ServerState -> FilePath -> IO (Either Text (Session, GoalMap, [GoalEntry], FilePath))
-doLoad ss file = do
-  r <- loadAndSync ss file
+doLoad ss = doLoadWith ss Nothing
+
+-- | 'doLoad' after a bridge-initiated write of content hashing to @h@: since
+-- the bridge knows the exact new layout, offset-keyed goal-id reuse stays
+-- allowed as long as disk still matches what was written.
+doLoadAfterWrite :: ServerState -> Word64 -> FilePath
+                 -> IO (Either Text (Session, GoalMap, [GoalEntry], FilePath))
+doLoadAfterWrite ss h = doLoadWith ss (Just h)
+
+doLoadWith :: ServerState -> Maybe Word64 -> FilePath
+           -> IO (Either Text (Session, GoalMap, [GoalEntry], FilePath))
+doLoadWith ss mExpect file = do
+  r <- loadAndSync ss mExpect file
   pure $ case r of
     Left err                  -> Left err
     Right (sess, gm, es, out) -> case interpretLoad out of
@@ -1085,7 +1161,8 @@ withGoal ss a act = case argScalarText a "goal" of
         Right (file, sess, gm) -> case lookupStable gm sid of
           Just e | Just iid <- geIid e -> act sess file e iid
           _ -> pure (Left (renderStableId sid <> " is not an open goal (it may have been \
-                            \solved, or the module needs `load`)."))
+                            \solved, the file may have changed on disk and ids were \
+                            \renumbered, or the module needs `load`)."))
 
 -- | Pick the session to use (by explicit @file@, or the sole loaded one),
 -- reloading it when dirty/dead so a query after a source edit just works.
@@ -1253,7 +1330,7 @@ runCheck ss a = case argText a "file" of
           Left err  -> Left err
           Right out -> Right (renderCheckDry file (interpretCheck out))
       Nothing -> do
-        r <- loadAndSync ss file
+        r <- loadAndSync ss Nothing file
         case r of
           Left err                 -> pure (Left err)
           Right (sess, _, es, out) -> do
@@ -1651,7 +1728,7 @@ runNewModule ss a = case argText a "path" of
                 -- (the kick), so it is queryable the moment this call
                 -- returns instead of only after the async watcher rebuild.
                 kickRebuild ss file
-                r <- doLoad ss file
+                r <- doLoadAfterWrite ss (contentStamp content) file
                 case r of
                   Left err             ->
                     pure (Right ("Created " <> T.pack file <> " (module " <> modName <> ").\n"
@@ -1774,11 +1851,11 @@ constructMany ss a steps =
       case r0 of
         Left err           -> pure (Left err)
         Right (file, _, _) -> do
-          eold <- readFileSafe file
+          eold <- readSourceStamped ss file
           case eold of
             Left e     -> pure (Left e)
             Right orig -> do
-              res <- constructLoop ss file orig (codeBlocksFor file orig) steps []
+              res <- constructLoop ss file orig (contentStamp orig) (codeBlocksFor file orig) steps []
               markSessionDirty ss file
               case res of
                 Left err    -> pure (Left err)
@@ -1794,26 +1871,32 @@ constructMany ss a steps =
 -- so a structural step (case_split\/refine) never invalidates a later
 -- step's interaction id, and every edit is computed against pristine goals
 -- — 'spliceRanges' then merges them (and rejects overlaps).
-constructLoop :: ServerState -> FilePath -> Text -> CodeBlocks -> [Step]
+constructLoop :: ServerState -> FilePath -> Text -> Word64 -> CodeBlocks -> [Step]
               -> [(Int, Int, Text)] -> IO (Either Text [(Int, Int, Text)])
-constructLoop _  _    _    _  []       acc = pure (Right (reverse acc))
-constructLoop ss file orig cb (s:rest) acc = do
+constructLoop _  _    _    _        _  []       acc = pure (Right (reverse acc))
+constructLoop ss file orig origStamp cb (s:rest) acc = do
   r <- doLoad ss file
   case r of
     Left err -> pure (Left ("construct: " <> stepLabel s <> ": load failed: " <> err))
-    Right (sess, gm, _, _) ->
-      case parseStableId (stepGoal s) >>= \sid -> (,) sid <$> lookupStable gm sid of
-        Nothing     -> pure (Left ("construct: " <> stepLabel s <> ": not an open goal id: " <> stepGoal s))
-        Just (_, e) -> case (geIid e, geRange e) of
-          (Just iid, Just (GoalRange gs ge))
-            | not (isInsideCode cb (rpPos gs)) ->
-                pure (Left (stepLabel s <> ": the hole is not inside an Agda code block."))
-            | otherwise -> do
-                stepE <- runStepEdit sess file orig iid (rpPos gs) (rpPos ge) s
-                case stepE of
-                  Left err -> pure (Left err)
-                  Right ed -> constructLoop ss file orig cb rest (ed : acc)
-          _ -> pure (Left (stepLabel s <> ": not an open goal."))
+    Right (sess, gm, _, _) -> do
+      -- The per-step reload re-stamps to disk; if that no longer matches the
+      -- text the edits are computed against, an external edit landed mid-batch
+      -- — abort rather than splice ORIGINAL-offset edits into new content (R22).
+      cur <- currentStamp ss file
+      if cur /= Just origStamp
+        then pure (Left "construct: the file changed on disk mid-batch — nothing applied; re-run load.")
+        else case parseStableId (stepGoal s) >>= \sid -> (,) sid <$> lookupStable gm sid of
+          Nothing     -> pure (Left ("construct: " <> stepLabel s <> ": not an open goal id: " <> stepGoal s))
+          Just (_, e) -> case (geIid e, geRange e) of
+            (Just iid, Just (GoalRange gs ge))
+              | not (isInsideCode cb (rpPos gs)) ->
+                  pure (Left (stepLabel s <> ": the hole is not inside an Agda code block."))
+              | otherwise -> do
+                  stepE <- runStepEdit sess file orig iid (rpPos gs) (rpPos ge) s
+                  case stepE of
+                    Left err -> pure (Left err)
+                    Right ed -> constructLoop ss file orig origStamp cb rest (ed : acc)
+            _ -> pure (Left (stepLabel s <> ": not an open goal."))
 
 -- | Execute one construct step against the live session, returning its edit
 -- in ORIGINAL-text offsets: give\/refine\/auto replace the hole range;

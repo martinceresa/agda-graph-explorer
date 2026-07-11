@@ -14,7 +14,10 @@
 -- identity that survives arbitrary edits; clients should re-read the goal
 -- list after applying an edit (selecting by @(line:col)@) rather than
 -- caching an id across one. The win over raw Agda ids is the within-load
--- and unchanged-hole-across-reload cases.
+-- and unchanged-hole-across-reload cases. And when a reload observes that
+-- the file changed on disk since the last load, the map is reset
+-- ('dropEntriesKeepNext') — the counter is kept so a stale cached id fails
+-- loudly rather than retargeting a different hole (R22).
 --
 -- A 'GoalMap' lives per session ('AgdaInteract.Session'): interaction
 -- ids are per-load, so the map is rebuilt each time 'syncGoals' runs
@@ -24,6 +27,7 @@ module AgdaInteract.GoalId
   , GoalEntry(..)
   , GoalMap
   , emptyGoalMap
+  , dropEntriesKeepNext
   , syncGoals
   , toInteractionId
   , lookupStable
@@ -61,6 +65,15 @@ data GoalMap = GoalMap
 
 emptyGoalMap :: GoalMap
 emptyGoalMap = GoalMap { gmNext = 0, gmByStable = M.empty }
+
+-- | Drop every current entry but __keep__ the id counter (unlike
+-- 'emptyGoalMap', which resets it to 0). Used when a reload observes an
+-- external on-disk change (R22): a client's cached @g0@ must resolve to
+-- "not an open goal" (loud) rather than silently retargeting the new first
+-- hole — which is exactly what reusing @g0@ would do. See the "Scope of
+-- stability" note above.
+dropEntriesKeepNext :: GoalMap -> GoalMap
+dropEntriesKeepNext gm = gm { gmByStable = M.empty }
 
 -- | The start character offset that identifies a hole across reloads.
 goalStartPos :: Goal -> Maybe Int

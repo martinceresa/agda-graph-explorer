@@ -33,6 +33,7 @@ import           AgdaGraph.LemmaRank   ( RankEnv(..), rankLemmaCandidates
 import           AgdaInteract.Guard
 import           AgdaInteract.Literate
 import           AgdaInteract.GoalId
+import           AgdaInteract.Registry ( contentStamp, shouldKeepGoalIds )
 import           AgdaInteract.Edit
 import           AgdaInteract.Batch    ( Step(..), wildcardCheck, allGiveSteps
                                        , checkInspectArgs, checkScratchOp
@@ -74,6 +75,7 @@ main = do
   sequence_ (map ($ fails) literateTests)
   sequence_ (map ($ fails) iotcmTests)
   sequence_ (map ($ fails) goalIdTests)
+  sequence_ (map ($ fails) stampTests)
   sequence_ (map ($ fails) batchTests)
   sequence_ (map ($ fails) editTests)
   sequence_ (map ($ fails) diagnosticTests)
@@ -800,6 +802,40 @@ goalIdTests =
        in length es == 2
             && toInteractionId gm1 (StableId 1) == Just 1
             && maximum [ s | StableId s <- map geStable es ] == 1)
+  ]
+
+----------------------------------------------------------------------
+-- R22: content stamps + external-change goal-id reset.
+
+stampTests :: [Check]
+stampTests =
+  [ check "contentStamp: identical text hashes equal"
+      (contentStamp "module M where\nfoo = 0\n" == contentStamp "module M where\nfoo = 0\n")
+  , check "contentStamp: a one-char change differs"
+      (contentStamp "foo = 0\n" /= contentStamp "foo = 1\n")
+  , check "contentStamp: unicode is distinguished from its ascii spelling"
+      (contentStamp "n → n" /= contentStamp "n -> n")
+  -- shouldKeepGoalIds (expected-write) (prev-stamp) (new-stamp)
+  , check "keep: a bridge write whose disk matches what we wrote"
+      (shouldKeepGoalIds (Just 7) (Just 3) (Just 7))
+  , check "reset: a bridge write whose disk no longer matches"
+      (not (shouldKeepGoalIds (Just 7) (Just 3) (Just 9)))
+  , check "keep: a plain reload of unchanged content"
+      (shouldKeepGoalIds Nothing (Just 3) (Just 3))
+  , check "reset: a plain reload of changed content"
+      (not (shouldKeepGoalIds Nothing (Just 3) (Just 9)))
+  , check "reset: an unknown new stamp (unreadable / changed mid-load)"
+      (not (shouldKeepGoalIds Nothing (Just 3) Nothing))
+  , check "reset: a first load (no prior stamp, no expectation)"
+      (not (shouldKeepGoalIds Nothing Nothing (Just 3)))
+  -- dropEntriesKeepNext: a stale id fails, and new holes get FRESH ids.
+  , check "external change: dropEntriesKeepNext + re-sync mints fresh ids, old id gone"
+      (let (gm0, _)  = syncGoals emptyGoalMap [mkGoal 0 81 "Nat", mkGoal 1 127 "Nat"]
+           gmReset   = dropEntriesKeepNext gm0
+           (gm1, es) = syncGoals gmReset [mkGoal 0 81 "Nat", mkGoal 1 127 "Nat"]
+       in map geStable es == [StableId 2, StableId 3]     -- counter preserved
+            && toInteractionId gm1 (StableId 0) == Nothing  -- stale g0 fails loudly
+            && toInteractionId gm1 (StableId 2) == Just 0)
   ]
 
 ----------------------------------------------------------------------

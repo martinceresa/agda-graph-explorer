@@ -161,6 +161,8 @@ test-suite interaction-spec
   other-modules:       AgdaInteract.Guard
                        AgdaInteract.Literate
                        AgdaInteract.GoalId
+                       AgdaInteract.Registry
+                       AgdaInteract.Session
                        AgdaInteract.Edit
                        AgdaInteract.Batch
                        AgdaRepair.Diagnostic
@@ -175,7 +177,9 @@ test-suite interaction-spec
                        containers,
                        deepseq,
                        parallel,
-                       text
+                       process,
+                       text,
+                       time
   default-language:    Haskell2010
 
 executable agda-optimization
