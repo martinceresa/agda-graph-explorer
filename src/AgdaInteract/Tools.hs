@@ -1632,7 +1632,11 @@ firstWorking :: ServerState -> FilePath -> RS.Env -> CheckOutcome -> Text
 firstWorking ss file env co text diags = go 0 flat
   where
     sigs0 = RE.signatures text
-    flat  = [ (d, cand) | d <- diags, cand <- RS.candidatesFor env text d ]
+    -- Bound the per-round work: a parse dump can over-collect names, and each
+    -- candidate costs a full throwaway-agda validate. Symbolic-first ordering
+    -- (from parseErrorNames) means the cap bites the speculative alphabetic
+    -- tail; Env-miss tokens already contribute no candidates (R26).
+    flat  = take 16 [ (d, cand) | d <- diags, cand <- RS.candidatesFor env text d ]
     go dc [] = pure (Nothing, dc)
     go dc ((d, cand) : rest) =
       case RE.applyEdits text cand of
@@ -1650,16 +1654,19 @@ firstWorking ss file env co text diags = go 0 flat
                             | otherwise        -> go dc' rest
 
 -- | Accept a candidate iff it compiles clean, or it resolves the targeted
--- name without raising the error count. Because imports only grow scope and a
--- rename replaces an unresolved token with a resolved one, this is monotone —
--- the loop cannot oscillate.
+-- name without raising the error count. Because imports only grow scope
+-- (repair is import-only, R25), each accepted round adds a new distinct import
+-- line, so this is monotone — the loop cannot oscillate. @stillMissing@ comes
+-- from the shared 'RD.stillMissingNames', which subtracts in-scope grammar
+-- operators, so an operator that framed a parse error but is itself in scope
+-- doesn't keep 'targetResolved' false (R26).
 accepts :: CheckOutcome -> CheckOutcome -> RD.Diagnostic -> Bool
 accepts co co' d
   | null (coErrors co') = True
   | otherwise           = targetResolved && length (coErrors co') <= length (coErrors co)
   where
     joined = T.intercalate "\n" (coErrors co')
-    stillMissing = RD.notInScopeNames joined ++ RD.parseErrorNames joined
+    stillMissing = RD.stillMissingNames joined
     targetResolved =
       maybe True (\n -> not (any (`elem` stillMissing) (RD.nameKeys n))) (scopeName d)
 

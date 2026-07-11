@@ -17,6 +17,7 @@ import           Control.Monad        ( unless )
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Lazy.Char8 as BLC
 import           Data.IORef
+import           Data.List            ( elemIndex )
 import           Data.Maybe           ( listToMaybe, mapMaybe )
 import           Data.Text            ( Text )
 import qualified Data.Text            as T
@@ -1042,6 +1043,30 @@ missingSigMsg = T.intercalate "\n"
   , "when scope checking the declaration"
   , "  fin nums [] = 0" ]
 
+-- Real Agda 2.9 [NoParseForLHS] renderings (captured), for R26.
+-- A missing constructor in a pattern surfaces as an alphabetic token in the
+-- "Problematic expression" (not a symbolic one), and a missing _,_ as a bare
+-- comma — both dropped by the pre-R26 extractor.
+parseLhsCtorMsg :: Text
+parseLhsCtorMsg = T.intercalate "\n"
+  [ "/tmp/x/CtorParse.agda:6.1-11: error: [NoParseForLHS]"
+  , "Could not parse the left-hand side f (just x)"
+  , "Problematic expression: (just x)"
+  , "Operators used in the grammar:"
+  , "  None"
+  , "when scope checking the left-hand side f (just x) in the definition"
+  , "of f" ]
+
+parseLhsCommaMsg :: Text
+parseLhsCommaMsg = T.intercalate "\n"
+  [ "/tmp/x/CommaPat.agda:9.1-10: error: [NoParseForLHS]"
+  , "Could not parse the left-hand side f (a , b)"
+  , "Problematic expression: ((a ,) b)"
+  , "Operators used in the grammar:"
+  , "  None"
+  , "when scope checking the left-hand side f (a , b) in the definition"
+  , "of f" ]
+
 diagnosticTests :: [Check]
 diagnosticTests =
   [ checkEq "notInScopeNames extracts the reported operator/name"
@@ -1049,11 +1074,37 @@ diagnosticTests =
   , check "notInScopeNames drops the stopword in 'when scope checking the declaration'"
       ("the" `notElem` RD.notInScopeNames missingSigMsg)
   , check "parseErrorNames pulls the dropped operator out of a NoParseForApplication"
-      ("_\8804_" `elem` RD.parseErrorNames parseAppMsg
-         && "\215" `elem` RD.parseErrorNames parseAppMsg)
-  , check "parseErrorNames excludes the alphabetic non-operator tokens"
-      ("AllPairs" `notElem` RD.parseErrorNames parseAppMsg
-         && "result"  `notElem` RD.parseErrorNames parseAppMsg)
+      ("_\8804_" `elem` RD.parseErrorNames parseAppMsg)
+  , check "parseErrorNames subtracts an in-grammar (in-scope) operator (× is listed)"
+      ("\215" `notElem` RD.parseErrorNames parseAppMsg)
+  -- R26: alphabetic tokens ARE now collected (a bare constructor name), but
+  -- ordered AFTER the symbolic ones and bounded by classify's cap + the Env
+  -- hit filter — so a `just`/`AllPairs` is a candidate, not silently dropped.
+  , check "parseErrorNames now collects alphabetic tokens too, ordered after symbolic ones"
+      (let ns = RD.parseErrorNames parseAppMsg
+       in "AllPairs" `elem` ns
+            && case (elemIndex "_\8804_" ns, elemIndex "AllPairs" ns) of
+                 (Just i, Just j) -> i < j
+                 _                -> False)
+  -- R26 (constructor): a missing constructor is an alphabetic Problematic token.
+  , check "parseErrorNames extracts a missing constructor (just) from a NoParseForLHS"
+      ("just" `elem` RD.parseErrorNames parseLhsCtorMsg)
+  , check "parseErrorNames drops the 1-char pattern var (x)"
+      ("x" `notElem` RD.parseErrorNames parseLhsCtorMsg)
+  -- R26 (comma): a missing _,_ is a bare comma the old delimiter set discarded.
+  , check "parseErrorNames keeps a bare comma (a missing _,_)"
+      ("," `elem` RD.parseErrorNames parseLhsCommaMsg)
+  , check "nameKeys maps a bare comma onto its mixfix _,_"
+      ("_,_" `elem` RD.nameKeys ",")
+  , checkEq "grammarOperators reads the in-scope operators list"
+      ["\215"] (RD.grammarOperators parseAppMsg)
+  , check "grammarOperators is empty when the section says None"
+      (null (RD.grammarOperators parseLhsCtorMsg))
+  , checkEq "classify caps the DParse frontier at 6"
+      6 (length [ () | RD.DParse _ <- RD.classify [parseAppMsg] ])
+  , check "stillMissingNames unions scope + parse names, minus grammar operators"
+      (let ns = RD.stillMissingNames parseAppMsg
+       in "_\8804_" `elem` ns && "\215" `notElem` ns)
   , checkEq "errorTags reads the bracketed class"
       ["NotInScope"] (RD.errorTags notInScopeMsg)
   , checkEq "classify routes a not-in-scope error to DScope"

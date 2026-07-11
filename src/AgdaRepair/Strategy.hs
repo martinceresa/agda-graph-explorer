@@ -99,9 +99,15 @@ splitHostAlias qkey =
 candidatesFor :: Env -> Text -> Diagnostic -> [Candidate]
 candidatesFor env src d = case d of
   DScope name -> imports name
-  DParse name -> imports name                       -- operator/ctor: import only
+  -- A parse-error token that is already in scope (the file's own def or a var
+  -- over-collected from the dump) needs no import; skip it so a full validate
+  -- isn't wasted (R26).
+  DParse name
+    | name `Set.member` scope -> []
+    | otherwise               -> imports name
   _           -> []                                 -- goals/incomplete/refuse: loop-handled
   where
+    scope     = inScopeNames src
     segs      = fileCarrierSegments env src
     imports n = [ [EAddImport l] | l <- importCandidates env segs src n ]
 

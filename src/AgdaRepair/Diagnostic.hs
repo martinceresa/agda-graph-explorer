@@ -22,6 +22,8 @@ module AgdaRepair.Diagnostic
   , errorTags
   , notInScopeNames
   , parseErrorNames
+  , grammarOperators
+  , stillMissingNames
   , stopWords
   , stripUnderscores
   , nameKeys
@@ -29,8 +31,8 @@ module AgdaRepair.Diagnostic
   , hintOutOfScope
   ) where
 
-import           Data.Char        (isAlphaNum)
-import           Data.List        (nub, sort)
+import           Data.Char        (isAlphaNum, isDigit)
+import           Data.List        (nub, partition, sort)
 import           Data.Maybe       (mapMaybe)
 import           Data.Text        (Text)
 import qualified Data.Text        as T
@@ -59,6 +61,15 @@ stopWords =
   [ "the","left-hand","side","application","of","in","definition","expression"
   , "declaration","operator","operators","used","grammar","none","problematic"
   , "when","scope","checking","at","not","a","an","type","checking" ]
+
+-- | Agda keywords that can appear in a parse-error expression dump where an
+-- identifier would (a @with@ / @where@ clause, a @λ@) but are never a missing
+-- import. Separate from 'stopWords' (which 'notInScopeNames' also consumes).
+agdaKeywords :: [Text]
+agdaKeywords =
+  [ "with","where","rewrite","let","in","do","open","import","module","record"
+  , "data","field","abstract","mutual","primitive","postulate","syntax"
+  , "\955","forall","Set","Prop" ]
 
 -- | Error-class tags the loop refuses outright: semantic mismatches and the
 -- soundness-escaping classes (a hole-fill can never legitimately silence
@@ -150,16 +161,28 @@ notInScopeNames txt = dedup (fromTrailer ++ fromBlock)
 
 -- | Candidate missing names from a @NoParseFor*@ error: dropping an operator
 -- or constructor import breaks parsing, not scope, so the culprit is in the
--- unparseable expression. Over-collect symbolic / mixfix tokens from the
--- @Could not parse …@ and @Problematic expression:@ lines; the loop's
--- recompile step filters wrong guesses.
+-- unparseable expression. Collects from the @Could not parse …@ and
+-- @Problematic expression:@ lines both symbolic/mixfix tokens (@×@, @,@ — R26:
+-- @,@ is not a delimiter here, so @_,_@ survives) __and__ alphabetic
+-- identifiers ≥2 chars (@just@, @nothing@ — R26: a bare constructor name).
+-- Operators already listed under @Operators used in the grammar@ are in scope,
+-- so they are subtracted (a @NoParseForApplication@ often names the in-scope
+-- operator that framed the unparseable part). Symbolic tokens come first
+-- (most-likely the missing import); the loop's recompile step + the @Env@-hit
+-- filter drop wrong guesses. __Uncapped__ — 'classify' caps the DParse list,
+-- but 'accepts' consumes the full set as its still-missing oracle, so a cap
+-- here could fake progress.
 parseErrorNames :: Text -> [Text]
-parseErrorNames txt = dedup (go (T.lines txt))
+parseErrorNames txt =
+  let names   = dedupStable (go (T.lines txt))
+      grammar = concatMap nameKeys (grammarOperators txt)
+      kept    = [ t | t <- names, not (any (`elem` grammar) (nameKeys t)) ]
+      (syms, alphas) = partition symbolic kept
+  in syms ++ alphas
   where
-    -- A @Could not parse …@ header is followed by the unparseable expression on
-    -- the next line(s), up to the @Operators used@ / @Problematic@ / @when@
-    -- trailer — collect those; a @Problematic expression:@ line carries it
-    -- inline after the colon.
+    -- A @Could not parse …@ header carries the unparseable expression inline
+    -- and/or on the next line(s), up to the @Operators used@ / @Problematic@ /
+    -- @when@ trailer; a @Problematic expression:@ line carries it after the colon.
     go [] = []
     go (l : ls)
       | Just rest <- T.stripPrefix "Could not parse" s =
@@ -171,13 +194,56 @@ parseErrorNames txt = dedup (go (T.lines txt))
       where s = T.strip l
     notStop l = let t = T.strip l
                 in not (T.null t) && not (any (`T.isPrefixOf` t) ["Operator", "Problematic", "when "])
-    pick seg = [ t | t <- tokens seg
-                   , t /= "_"
+    pick seg = [ t | t <- exprTokens seg
                    , T.toLower t `notElem` stopWords
-                   , T.any (\c -> c == '_' || not (isAlphaNum c)) t ]
+                   , t `notElem` agdaKeywords
+                   , symbolic t || T.length t >= 2 ]
+
+-- | A token carrying a mixfix/operator character (@_@ or a non-alphanumeric),
+-- as opposed to a plain alphabetic identifier.
+symbolic :: Text -> Bool
+symbolic t = T.any (\c -> c == '_' || not (isAlphaNum c)) t
+
+-- | Tokeniser for a parse-error expression dump: splits on whitespace and
+-- bracketing, but __not__ on @,@ or @.@ — a bare @,@ is the reported form of a
+-- missing @_,_@ (R26), and a qualified name keeps its dots. Strips surrounding
+-- dots and drops pure-number / bare-@.@ tokens.
+exprTokens :: Text -> [Text]
+exprTokens = mapMaybe clean . filter (not . T.null) . T.split isDelim
+  where
+    isDelim c = c `elem` (" \t\r\n(){}[];|" :: String)
+    clean t = let t' = T.dropAround (== '.') t
+              in if T.null t' || t' == "_" || T.all isDigit t' then Nothing else Just t'
+
+-- | Operators Agda lists under @Operators used in the grammar:@ — these are
+-- __in scope__ (they parsed), so they are not missing imports. The first token
+-- of each indented line under that header (excluding @None@).
+grammarOperators :: Text -> [Text]
+grammarOperators txt = go (dropWhile (not . isHeader) (T.lines txt))
+  where
+    isHeader l = "Operators used in the grammar" `T.isPrefixOf` T.strip l
+    go []       = []
+    go (_ : ls) = [ tok | l <- takeWhile indented ls
+                        , tok : _ <- [tokens (T.strip l)]
+                        , tok /= "None" ]
+    indented l = case T.uncons l of
+      Just (c, _) -> c == ' ' || c == '\t'
+      Nothing     -> False
+
+-- | The full set of names a failing load still reports as unresolved —
+-- not-in-scope names plus parse-error candidates (grammar operators already
+-- subtracted). The oracle @accepts@ uses to decide a candidate made progress;
+-- keeping it in one place means the loop and the tests agree by construction.
+stillMissingNames :: Text -> [Text]
+stillMissingNames txt = dedup (notInScopeNames txt ++ parseErrorNames txt)
 
 dedup :: [Text] -> [Text]
 dedup = nub . sort
+
+-- | 'nub' preserving first-appearance order (parse candidates are ordered
+-- symbolic-first, so stable dedup keeps that intent).
+dedupStable :: [Text] -> [Text]
+dedupStable = nub
 
 -- | Classify a module's error messages into an ordered diagnostic list: scope
 -- names first (the incremental repair frontier), then parse-error candidates,
@@ -188,7 +254,10 @@ classify :: [Text] -> [Diagnostic]
 classify errs =
   let joined  = T.intercalate "\n" errs
       scope   = map DScope (notInScopeNames joined)
-      parses  = if null scope then map DParse (parseErrorNames joined) else []
+      -- Cap the DParse frontier (a parse dump over-collects); the loop tries
+      -- them symbolic-first and each costs a validate. parseErrorNames itself
+      -- stays uncapped — 'accepts' reads the full set as its missing oracle.
+      parses  = if null scope then map DParse (take 6 (parseErrorNames joined)) else []
       tags    = errorTags joined
       incompl = [ DIncomplete | any ("IncompletePatternMatching" ==) tags
                              || any ("CoverageIssue" ==) tags ]
