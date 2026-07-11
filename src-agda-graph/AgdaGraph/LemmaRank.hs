@@ -31,6 +31,9 @@ module AgdaGraph.LemmaRank
   , LemmaScore
   , rankLemmaCandidates
   , goalCarrierSegments
+  , carrierSegmentsFor
+  , carrierMap
+  , envVocab
   , moduleSegments
   , genericSegments
   ) where
@@ -93,11 +96,17 @@ rankLemmaCandidates env candKeep minSim goal ctxTypes =
 -- module @Agda.Builtin.Nat@ → segment @Nat@. Empty when no carrier token
 -- resolves. Exposed for the renderer (the @[carrier: …]@ marker) and tests.
 goalCarrierSegments :: RankEnv -> Text -> [Text] -> Set Text
-goalCarrierSegments env goal ctxTypes =
+goalCarrierSegments env = carrierSegmentsFor (carrierMap env) (envVocab env)
+
+-- | 'goalCarrierSegments' with the (expensive) carrier map and vocab passed
+-- in, so a caller that ranks many names against one graph builds them once.
+-- The write-side resolvers ('AgdaRepair.Strategy') reuse this so a bare
+-- @ℕ@/@+-comm@ resolves to its carrier module.
+carrierSegmentsFor :: Map Text (Set Text) -> Set Text -> Text -> [Text] -> Set Text
+carrierSegmentsFor cmap vocab goal ctxTypes =
   Set.unions [ segsFor tok | tok <- Set.toList carrierToks ]
   where
-    cmap        = carrierMap env
-    keep t      = t `Set.member` envVocab env
+    keep t      = t `Set.member` vocab
     -- carrier tokens: vocab-kept, NON-operator identifiers of the goal
     -- conclusion plus each context type. shapeTokens are deliberately
     -- excluded (a `RightIdentity` combinator must not drive the carrier).

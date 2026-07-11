@@ -1,29 +1,36 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- | Graph-backed candidate generation: a 'Diagnostic' plus the dependency graph
--- become a ranked list of 'Candidate' edit bundles for the loop to validate.
--- Every scope question is a lookup over the graph's defs, not a text search:
+-- become a ranked list of 'Candidate' import bundles for the loop to validate.
+-- Every scope question is a lookup over the graph's defs (and its @renaming@
+-- re-export aliases), not a text search:
 --
---   * which module exports @X@ — look up the base name, read 'defModule'
---     ('defOrigin' marks an overlay def needing an @open import@). Resolves the
---     re-export cases a source scan cannot (e.g. @ℤ@, re-exported as @Int@);
---   * closest name to a typo — edit distance over the file's in-scope names and
---     the graph's names (which double as import targets).
+--   * which module exports @X@ — look up the underscore-stripped base name,
+--     read the def's 'defModule' (a constructor resolves to its datatype-parent
+--     module; 'defOrigin' marks an overlay def) __or__ an alias's host module,
+--     so a name in scope only via @open import M public renaming (a to b)@
+--     resolves too (R24, e.g. @combine@ → @Reexports@, @ℕ@ → @Data.Nat.Base@);
+--   * closest name to a typo — edit distance over in-scope + graph names, used
+--     only to /suggest/ (repair never renames — R25).
 --
--- Candidates are ranked (already-imported module first, then shorter/less
--- exotic paths), but correctness rests on the loop's recompile-validate, so
--- over-generation is safe.
+-- Candidates are ranked (already-imported module first, carrier-affinity next
+-- so a bare @ℕ@/@+-comm@ prefers its carrier module, then shorter/less-exotic
+-- paths), but correctness rests on the loop's recompile-validate, so
+-- over-generation is safe. This module is State-free (plain defs + alias map in,
+-- no @AgdaMcp.State@) so the offline suite can exercise it.
 module AgdaRepair.Strategy
   ( Candidate
   , Env
+  , EnvEntry(..)
   , buildEnv
   , candidatesFor
   , nearMissSuggestions
   , inScopeNames
   , importCandidates
+  , resolveImportModules
   , importLineFor
   ) where
 
-import           Data.Char        (isDigit)
+import           Data.Char        (isDigit, isSpace)
 import           Data.List        (nub, sortOn)
 import qualified Data.Map.Strict  as M
 import           Data.Map.Strict  (Map)
@@ -34,40 +41,69 @@ import qualified Data.Set         as Set
 import           Data.Text        (Text)
 import qualified Data.Text        as T
 
-import           AgdaGraph.Schema (Access (..), Definition (..), Kind (..))
-import           AgdaMcp.State    (Loaded (..))
+import           AgdaGraph.Schema     (Access (..), Definition (..), Kind (..))
+import qualified AgdaGraph.LemmaRank  as LR
 
 import           AgdaRepair.Diagnostic (Diagnostic (..), stripUnderscores)
 import           AgdaRepair.Edit       (Edit (..))
 
--- | A candidate is a bundle of edits validated together (e.g. a rename plus
--- the import that brings the corrected name into scope).
+-- | A candidate is a bundle of edits validated together. Import-only (R25).
 type Candidate = [Edit]
 
--- | Loop-invariant scope oracle: the graph's real defs indexed by
--- underscore-stripped base name (so a bare @×@ finds @_×_@). Built once per
--- repair run — 'candidatesFor' is then an O(1) keyed lookup, not a scan of the
--- whole federated def set on every missing name. Empty without a graph, which
--- degrades to typo-only repair (imports need the graph).
-newtype Env = Env (Map Text [Definition])
+-- | One thing that could bring a name into scope: either a real graph def, or
+-- a @renaming@ re-export alias (its in-scope short name + the host module that
+-- re-exports it). An alias never fabricates a 'Definition' — its host is where
+-- the name is actually in scope, which is all the import line needs.
+data EnvEntry
+  = EntryDef   !Definition   -- ^ a real graph def
+  | EntryAlias !Text !Text   -- ^ (alias short name, host module) e.g. (@combine@, @Reexports@)
+  deriving (Show)
 
-buildEnv :: Maybe Loaded -> Env
-buildEnv Nothing   = Env M.empty
-buildEnv (Just ld) = Env (M.fromListWith (++)
-  [ (stripUnderscores (baseName d), [d]) | d <- ldRealDefs ld ])
+-- | Loop-invariant scope oracle: entries indexed by underscore-stripped base
+-- name (so a bare @×@ finds @_×_@ and a bare @ℕ@ finds an alias @ℕ@), plus the
+-- carrier map / vocab (lazily built once, forced only when carrier ranking is
+-- used). Empty without a graph → no import candidates (imports need the graph).
+data Env = Env
+  { envByBase     :: !(Map Text [EnvEntry])
+  , envCarrierMap :: Map Text (Set Text)   -- ^ lazy (LemmaRank carrier map)
+  , envVocab      :: Set Text              -- ^ lazy (LemmaRank vocab)
+  }
 
--- | Ranked candidates for one diagnostic. Import-only (R25): a scope or
--- parse error is resolved by bringing the missing name into scope, never by
--- renaming — a rename can rewrite a theorem's meaning to silence a scope
--- error (e.g. @ℕ@ → @_#_@). A misspelling that no import can fix is reported
--- with 'nearMissSuggestions' instead of silently rewritten.
+-- | Build the oracle from the snapshot's real defs and its @renaming@ alias
+-- map (@ldRealDefs@ + @ldAliases@; the latter keyed @Host.alias@ → canonical).
+buildEnv :: [Definition] -> Map Text Text -> Env
+buildEnv defs aliases = Env
+  { envByBase     = M.fromListWith (++) (defEntries ++ aliasEntries)
+  , envCarrierMap = LR.carrierMap rankEnv
+  , envVocab      = LR.envVocab rankEnv
+  }
+  where
+    rankEnv      = LR.RankEnv defs aliases
+    defEntries   = [ (stripUnderscores (baseName d), [EntryDef d]) | d <- defs ]
+    aliasEntries = [ (stripUnderscores alias, [EntryAlias alias host])
+                   | qkey <- M.keys aliases, let (alias, host) = splitHostAlias qkey ]
+
+-- | Split a host-qualified alias key @Host.alias@ into (@alias@, @Host@). The
+-- alias short name is the final dotted component (may itself be mixfix, e.g.
+-- @Host._∔_@ → (@_∔_@, @Host@)); the host is everything before it.
+splitHostAlias :: Text -> (Text, Text)
+splitHostAlias qkey =
+  let (pre, alias) = T.breakOnEnd "." qkey
+  in (alias, if T.null pre then "" else T.dropEnd 1 pre)
+
+-- | Ranked candidates for one diagnostic. Import-only (R25): a scope or parse
+-- error is resolved by bringing the missing name into scope, never by renaming
+-- — a rename can rewrite a theorem's meaning to silence a scope error (e.g.
+-- @ℕ@ → @_#_@). A misspelling that no import fixes is reported with
+-- 'nearMissSuggestions' instead of silently rewritten.
 candidatesFor :: Env -> Text -> Diagnostic -> [Candidate]
 candidatesFor env src d = case d of
   DScope name -> imports name
   DParse name -> imports name                       -- operator/ctor: import only
   _           -> []                                 -- goals/incomplete/refuse: loop-handled
   where
-    imports = map (\l -> [EAddImport l]) . importCandidates env src
+    segs      = fileCarrierSegments env src
+    imports n = [ [EAddImport l] | l <- importCandidates env segs src n ]
 
 -- | Closest existing names to a not-in-scope token — reported (never applied)
 -- when no import resolves it, so a genuine typo still gets a hint without
@@ -76,38 +112,109 @@ candidatesFor env src d = case d of
 nearMissSuggestions :: Env -> Text -> Text -> [Text]
 nearMissSuggestions env src name =
   take 3 (nub (nearMatches name (Set.toList (inScopeNames src))
-                 ++ map baseName (graphNearMatches env name)))
+                 ++ map entryBaseName (graphNearMatches env name)))
 
--- | Import lines that would bring @name@ into scope, ranked. Exposed for
--- reuse by the operator/constructor ('DParse') path. Empty without a graph.
-importCandidates :: Env -> Text -> Text -> [Text]
-importCandidates (Env byBase) src name =
-  take 6 . dedupKeep . concatMap importLinesFor . sortOn rank $ defs
+-- | Import lines that would bring @name@ into scope, ranked. @segs@ are the
+-- carrier-affinity segments of the surrounding context (empty to disable it).
+-- Empty without a graph.
+importCandidates :: Env -> Set Text -> Text -> Text -> [Text]
+importCandidates env segs src name =
+  take 6 . dedupKeep . concatMap entryImportLines . sortOn (rankEntry segs already) $ entries
   where
-    defs    = M.findWithDefault [] (stripUnderscores name) byBase
+    entries = M.findWithDefault [] (stripUnderscores name) (envByBase env)
     already = importedModules src
-    -- prefer: a module the file already imports; public over private; shorter,
-    -- less-exotic module paths.
-    rank d =
-      ( Down (defModule d `elem` already)
-      , defAccess d == Private
-      , exotic (defModule d)
-      , T.length (defModule d) )
-    exotic m = any (`T.isPrefixOf` m)
-                 ["Codata", "Algebra.Solver", "Relation.Binary.Construct", "Tactic"]
     dedupKeep = go []
       where go _ [] = []
             go seen (x:xs) | x `elem` seen = go seen xs
                            | otherwise     = x : go (x : seen) xs
 
--- | Candidate import lines for a definition. For a constructor — namespaced by
--- the producer under its datatype (@Agda.Builtin.Nat.Nat.suc@ ⇒ module
--- @Agda.Builtin.Nat.Nat@) — the importable module is the /parent/, so we offer
--- both the parent and the raw module; the recompile step picks the one that
--- works. Uses the def's own mixfix base name (so @_×_@ imports as @_×_@, not
--- the bare @×@ the error reported).
-importLinesFor :: Definition -> [Text]
-importLinesFor d = [ "open import " <> m <> " using (" <> baseName d <> ")" | m <- moduleCandidates d ]
+-- | Modules that would bring @name@ into scope, ranked most-likely first — for
+-- @new_module@'s bare-name import resolution (which emits @open import M@, no
+-- @using@). Carrier hints (@stub-type strings@) break ties toward the carrier
+-- module. A constructor's parent module ranks ahead of its raw module (so a
+-- type @ℕ → ℕ@ never resolves to a broken @open import Agda.Builtin.Nat.Nat@).
+resolveImportModules :: Env -> [Text] -> Text -> [Text]
+resolveImportModules env hints name =
+  take 6 . nub . concatMap entryModules . sortOn (rankEntry segs []) $ entries
+  where
+    entries = M.findWithDefault [] (stripUnderscores name) (envByBase env)
+    segs    = carrierSegmentsFromTypes env hints
+
+-- | Ranking key shared by both resolvers: prefer an already-imported module,
+-- then public over private, then higher carrier affinity, then a
+-- less-exotic / shorter module path.
+rankEntry :: Set Text -> [Text] -> EnvEntry -> (Down Bool, Bool, Down Int, Bool, Int)
+rankEntry segs already e =
+  ( Down (m `elem` already)
+  , entryPrivate e
+  , Down (Set.size (Set.intersection segs (LR.moduleSegments m)))
+  , exotic m
+  , T.length m )
+  where
+    m = entryModule e
+    exotic mod' = any (`T.isPrefixOf` mod')
+                    ["Codata", "Algebra.Solver", "Relation.Binary.Construct", "Tactic"]
+
+-- ---------------------------------------------------------------------
+-- EnvEntry accessors
+-- ---------------------------------------------------------------------
+
+-- | The name as written in a @using (…)@ list (mixfix form: @_×_@, @ℕ@, @combine@).
+entryBaseName :: EnvEntry -> Text
+entryBaseName (EntryDef d)     = baseName d
+entryBaseName (EntryAlias a _) = a
+
+-- | Modules that could bring the entry into scope, most-likely first. A
+-- constructor offers its datatype-parent module then its raw module; an alias
+-- is in scope only via its host.
+entryModules :: EnvEntry -> [Text]
+entryModules (EntryDef d)        = moduleCandidates d
+entryModules (EntryAlias _ host) = [host]
+
+-- | The primary (first-ranked) module of an entry.
+entryModule :: EnvEntry -> Text
+entryModule e = case entryModules e of { (m:_) -> m; [] -> "" }
+
+-- | Import lines for an entry (one per candidate module).
+entryImportLines :: EnvEntry -> [Text]
+entryImportLines e =
+  [ "open import " <> m <> " using (" <> entryBaseName e <> ")" | m <- entryModules e ]
+
+-- | An entry whose import can't work because the def is private. A re-export
+-- alias is public by construction.
+entryPrivate :: EnvEntry -> Bool
+entryPrivate (EntryDef d)     = defAccess d == Private
+entryPrivate (EntryAlias _ _) = False
+
+-- ---------------------------------------------------------------------
+-- Carrier affinity (R25b): a bare `ℕ` / `+-comm` prefers its carrier module.
+-- ---------------------------------------------------------------------
+
+-- | Carrier segments implied by a file's top-level signature types (repair):
+-- e.g. a file with @f : ℕ → ℕ@ yields segment @Nat@, so an import of @+-comm@
+-- prefers @Data.Nat.Properties@ over @Data.Integer.Properties@.
+fileCarrierSegments :: Env -> Text -> Set Text
+fileCarrierSegments env = carrierSegmentsFromTypes env . sigTypeStrings
+
+-- | Carrier segments implied by a list of type strings (the ctxTypes slot of
+-- the shared ranker). Used by both resolvers.
+carrierSegmentsFromTypes :: Env -> [Text] -> Set Text
+carrierSegmentsFromTypes env =
+  LR.carrierSegmentsFor (envCarrierMap env) (envVocab env) ""
+
+-- | The type (RHS of @:@) of each top-level @name : Type@ line.
+sigTypeStrings :: Text -> [Text]
+sigTypeStrings src =
+  [ T.drop 1 rhs
+  | l <- T.lines src
+  , not (T.null l), not (isSpace (T.head l))          -- column 0
+  , let (lhs, rhs) = T.breakOn ":" l
+  , not (T.null rhs)
+  , length (T.words lhs) == 1 ]
+
+-- ---------------------------------------------------------------------
+-- Definition helpers (import line for a Definition — used by oosNote too)
+-- ---------------------------------------------------------------------
 
 importLineFor :: Definition -> Text
 importLineFor d = "open import " <> primaryModule d <> " using (" <> baseName d <> ")"
@@ -144,25 +251,26 @@ stripLineTag t = case T.breakOnEnd "@" t of
   _          -> t
 
 -- ---------------------------------------------------------------------
--- Near-match (typo) helpers
+-- Near-match (typo) helpers — suggestion-only (repair never renames, R25)
 -- ---------------------------------------------------------------------
 
 -- | In-scope names within edit distance ≤ 2 of a not-in-scope token, closest
--- first — the safe rename targets (no import needed).
+-- first.
 nearMatches :: Text -> [Text] -> [Text]
 nearMatches name = map snd . sortOn fst . mapMaybe score
   where
     score c = let dcost = lev name c
               in if c /= name && dcost <= 2 then Just (dcost, c) else Nothing
 
--- | Graph definitions whose base name is a near-match — rename targets that
--- also need an import. Ranges over the index's (deduped) base-name keys, so the
--- edit-distance scan is over distinct names, not every def; one representative
--- def per key. Empty without a graph.
-graphNearMatches :: Env -> Text -> [Definition]
-graphNearMatches (Env byBase) name =
-  [ d | k <- sortOn (lev name) nearKeys, d <- take 1 (M.findWithDefault [] k byBase) ]
-  where nearKeys = [ k | k <- M.keys byBase, k /= name, lev name k <= 2 ]
+-- | Graph entries whose base name is a near-match. Ranges over the (deduped)
+-- base-name keys, so the edit-distance scan is over distinct names; one
+-- representative entry per key. Empty without a graph.
+graphNearMatches :: Env -> Text -> [EnvEntry]
+graphNearMatches env name =
+  [ e | k <- sortOn (lev name) nearKeys, e <- take 1 (M.findWithDefault [] k byBase) ]
+  where
+    byBase   = envByBase env
+    nearKeys = [ k | k <- M.keys byBase, k /= name, lev name k <= 2 ]
 
 -- | Levenshtein distance, short-circuited when the length gap alone exceeds 2
 -- (all the near-match threshold needs).

@@ -17,7 +17,7 @@ import           Control.Monad        ( unless )
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Lazy.Char8 as BLC
 import           Data.IORef
-import           Data.Maybe           ( mapMaybe )
+import           Data.Maybe           ( listToMaybe, mapMaybe )
 import           Data.Text            ( Text )
 import qualified Data.Text            as T
 import           System.Exit          ( exitFailure, exitSuccess )
@@ -41,6 +41,7 @@ import           AgdaInteract.Batch    ( Step(..), wildcardCheck, allGiveSteps
                                        , inspectOps, scratchOps )
 import qualified AgdaRepair.Diagnostic as RD
 import qualified AgdaRepair.Edit       as RE
+import qualified AgdaRepair.Strategy   as RS
 import           Data.Aeson            ( eitherDecode, encode )
 import qualified Data.Map.Strict       as Map
 import           AgdaGraph.Schema      ( ExpandedGraph(..), Definition(..), ReExport(..)
@@ -88,6 +89,7 @@ main = do
   sequence_ (map ($ fails) taintTests)
   sequence_ (map ($ fails) moduleOptionEscapeTests)
   sequence_ (map ($ fails) lemmaRankTests)
+  sequence_ (map ($ fails) strategyTests)
   replayTests fails
   n <- readIORef fails
   if n == 0
@@ -668,6 +670,65 @@ lemmaRankTests =
       ] Map.empty
     natEnv   = RankEnv [ mkDef "Data.Nat.Base.\8469" "Data.Nat.Base" KDatatype Nothing ] Map.empty
     aliasEnv = RankEnv [] (Map.singleton "Data.Nat.Base.\8469" "Agda.Builtin.Nat.Nat")
+
+----------------------------------------------------------------------
+-- R24 / R25b: alias-aware, carrier-ranked, import-only write-side resolvers.
+
+strategyTests :: [Check]
+strategyTests =
+  [ -- Plain def: a bare `×` finds `_×_` and imports it under its mixfix name.
+    check "importCandidates: bare × resolves to _×_'s module"
+      ("open import Data.Product using (_\215_)"
+         `elem` RS.importCandidates prodEnv Set.empty "" "\215")
+  -- R24: a name in scope only via a renaming re-export resolves to its host.
+  , check "importCandidates: a renaming alias resolves to its host module"
+      ("open import Reexports using (combine)"
+         `elem` RS.importCandidates combineEnv Set.empty "" "combine")
+  , check "importCandidates: ℕ (a renaming alias) resolves to its host, not a broken node"
+      ("open import Data.Nat.Base using (\8469)"
+         `elem` RS.importCandidates natAliasEnv Set.empty "" "\8469")
+  , check "importCandidates: a mixfix alias _∔_ resolves under the bare ∔"
+      ("open import Host using (_\8724_)"
+         `elem` RS.importCandidates mixAliasEnv Set.empty "" "\8724")
+  , check "importCandidates: an alias and a real def of the same name are both offered"
+      (let cs = RS.importCandidates collideEnv Set.empty "" "combine"
+       in "open import Reexports using (combine)" `elem` cs
+            && "open import Some.Mod using (combine)" `elem` cs)
+  -- R25 (new_module half): a constructor resolves to its PARENT module, not the
+  -- raw datatype-namespaced module (which yields a broken import).
+  , checkEq "resolveImportModules: a constructor resolves to its parent module"
+      (Just "Agda.Builtin.Nat")
+      (listToMaybe (RS.resolveImportModules zeroEnv [] "zero"))
+  -- R25b: carrier affinity picks the right module among same-named exporters.
+  , checkEq "resolveImportModules: a ℕ-typed stub prefers Data.Nat.Base for +"
+      (Just "Data.Nat.Base")
+      (listToMaybe (RS.resolveImportModules plusEnv ["\8469 \8594 \8469"] "+"))
+  , checkEq "resolveImportModules: a ℤ-typed stub flips the choice to Data.Integer.Base"
+      (Just "Data.Integer.Base")
+      (listToMaybe (RS.resolveImportModules plusEnv ["\8484 \8594 \8484"] "+"))
+  -- R25: candidatesFor is import-only — every candidate is a single EAddImport.
+  , check "candidatesFor: DScope yields only import edits (never a rename)"
+      (let cs = RS.candidatesFor combineEnv "" (RD.DScope "combine")
+       in not (null cs)
+            && all (\c -> case c of [RE.EAddImport _] -> True; _ -> False) cs)
+  -- R25a: a typo no import fixes is only SUGGESTED, never applied.
+  , check "nearMissSuggestions: a typo of an alias is suggested"
+      ("combine" `elem` RS.nearMissSuggestions combineEnv "" "combin")
+  ]
+  where
+    prodEnv     = RS.buildEnv [ mkDef "Data.Product._\215_" "Data.Product" KFunction Nothing ] Map.empty
+    combineEnv  = RS.buildEnv [] (Map.singleton "Reexports.combine" "Core.Base.merge")
+    natAliasEnv = RS.buildEnv [] (Map.singleton "Data.Nat.Base.\8469" "Agda.Builtin.Nat.Nat")
+    mixAliasEnv = RS.buildEnv [] (Map.singleton "Host._\8724_" "X.plus")
+    collideEnv  = RS.buildEnv [ mkDef "Some.Mod.combine" "Some.Mod" KFunction Nothing ]
+                              (Map.singleton "Reexports.combine" "Core.Base.merge")
+    zeroEnv     = RS.buildEnv [ mkDef "Agda.Builtin.Nat.Nat.zero" "Agda.Builtin.Nat.Nat" KConstructor Nothing ] Map.empty
+    plusEnv     = RS.buildEnv
+      [ mkDef "Data.Nat.Base._+_"     "Data.Nat.Base"     KFunction Nothing
+      , mkDef "Data.Integer.Base._+_" "Data.Integer.Base" KFunction Nothing
+      , mkDef "Data.Nat.Base.\8469"     "Data.Nat.Base"     KDatatype Nothing
+      , mkDef "Data.Integer.Base.\8484" "Data.Integer.Base" KDatatype Nothing
+      ] Map.empty
 
 ----------------------------------------------------------------------
 -- Fixture replay — the protocol-skew tripwire.

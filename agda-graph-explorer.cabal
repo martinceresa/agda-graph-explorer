@@ -167,6 +167,7 @@ test-suite interaction-spec
                        AgdaInteract.Batch
                        AgdaRepair.Diagnostic
                        AgdaRepair.Edit
+                       AgdaRepair.Strategy
                        AgdaUnused.Analysis
                        AgdaUnused.Json
                        AgdaUnused.Source

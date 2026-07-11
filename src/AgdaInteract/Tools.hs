@@ -46,7 +46,6 @@ import           Data.List               (isPrefixOf, nub, sortOn, stripPrefix)
 import qualified Data.Map.Strict         as M
 import           Data.Maybe              (fromMaybe, isJust, isNothing,
                                           mapMaybe)
-import           Data.Ord                (Down (..))
 import           Data.Text               (Text)
 import qualified Data.Text               as T
 import qualified Data.Text.IO            as TIO
@@ -62,7 +61,7 @@ import           Text.Read               (readMaybe)
 
 import           AgdaGraph.Interaction.Iotcm
 import           AgdaGraph.Interaction.Protocol
-import           AgdaGraph.Schema        (Definition, defModule, defName)
+import           AgdaGraph.Schema        (Definition)
 import           AgdaInteract.Batch
 import           AgdaInteract.Edit
 import           AgdaInteract.GoalId
@@ -1530,7 +1529,8 @@ runRepair ss a = case argText a "file" of
         -- file itself is validated through the live session. A missing graph
         -- degrades to typo-only repair, not a failure.
         eLd <- ensureFresh ss
-        let env = RS.buildEnv (either (const Nothing) (Just . fst) eLd)
+        let mld = either (const Nothing) (Just . fst) eLd
+            env = RS.buildEnv (maybe [] ldRealDefs mld) (maybe M.empty ldAliases mld)
         (final, rep0) <- repairLoop ss file env maxIter orig
         -- Remaining-error text comes from the throwaway validation module;
         -- map its path/name back to the real file so the report reads cleanly.
@@ -1780,7 +1780,9 @@ runNewModule ss a = case argText a "path" of
     -- preloaded snapshot (and serves-stale in live mode). Best-effort: a
     -- cold/failed index just yields no resolutions (every import unresolved).
     mld <- either (const Nothing) (Just . fst) <$> ensureFresh ss
-    let (impLines, unresolved) = resolveImports mld openImp imports
+    let env   = RS.buildEnv (maybe [] ldRealDefs mld) (maybe M.empty ldAliases mld)
+        hints = [ ty | DefStub _ ty <- defs ]        -- stub types drive carrier affinity
+        (impLines, unresolved) = resolveImports env hints openImp imports
         content                = buildModuleContent lit modName impLines defs
     case checkFileInputFor file content of
       Rejected why -> pure (Left ("new_module refused: " <> why))
@@ -1825,34 +1827,20 @@ contentFrame :: Text -> Text
 contentFrame c = rule <> "\n" <> c <> (if "\n" `T.isSuffixOf` c then "" else "\n") <> rule
   where rule = "----------------------------------------"
 
--- | Resolve bare names to @open import <Module>@ (or @import@) lines via
--- the loaded snapshot's index; names with no defining module come back as
--- unresolved (reported, never invented). Deduped, input order preserved.
-resolveImports :: Maybe Loaded -> Bool -> [Text] -> ([Text], [Text])
-resolveImports mld openImp names =
+-- | Resolve bare names to @open import <Module>@ (or @import@) lines via the
+-- graph-backed 'RS.resolveImportModules' (alias-aware — R24 — and
+-- carrier-ranked by the stub types — R25b, so a constructor resolves to its
+-- parent module and a @ℕ@ goal prefers @Data.Nat@). Names with no candidate
+-- come back unresolved (reported, never invented). Deduped, input order
+-- preserved.
+resolveImports :: RS.Env -> [Text] -> Bool -> [Text] -> ([Text], [Text])
+resolveImports env hints openImp names =
   let kw = if openImp then "open import " else "import "
-      step nm = case mld >>= \ld -> resolveModuleFor ld nm of
-        Just m  -> Left (kw <> m)
-        Nothing -> Right nm
+      step nm = case RS.resolveImportModules env hints nm of
+        (m:_) -> Left (kw <> m)
+        []    -> Right nm
       rs = map step names
   in (nub [ l | Left l <- rs ], [ n | Right n <- rs ])
-
--- | The most common defining module among defs whose name matches @nm@
--- (exact, dotted-suffix, or last component); ties broken by module name.
--- Best-effort import resolution.
-resolveModuleFor :: Loaded -> Text -> Maybe Text
-resolveModuleFor ld nm =
-  case sortOn (\(m, c) -> (Down c, m)) (M.toList counts) of
-    []          -> Nothing
-    ((m, _) : _) -> Just m
-  where
-    counts = M.fromListWith (+)
-               [ (defModule d, 1 :: Int) | d <- ldRealDefs ld, nameMatches d ]
-    nameMatches d = let dn = defName d
-                    in dn == nm || ("." <> nm) `T.isSuffixOf` dn || lastCompT dn == nm
-
-lastCompT :: Text -> Text
-lastCompT t = let (_, suf) = T.breakOnEnd "." t in if T.null suf then t else suf
 
 -- | Derive a @module … where@ name from a file path: relativise against the
 -- most specific include root (else the project root), drop the
