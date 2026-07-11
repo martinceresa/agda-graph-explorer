@@ -44,7 +44,7 @@ import           Data.Aeson.Types        (parseMaybe)
 import           Data.IORef              (newIORef, readIORef, writeIORef)
 import           Data.List               (isPrefixOf, nub, sortOn, stripPrefix)
 import qualified Data.Map.Strict         as M
-import           Data.Maybe              (catMaybes, fromMaybe, isJust, isNothing,
+import           Data.Maybe              (fromMaybe, isJust, isNothing,
                                           mapMaybe)
 import           Data.Ord                (Down (..))
 import           Data.Text               (Text)
@@ -472,6 +472,8 @@ runAuto ss a = withGoal ss a $ \sess file e iid -> do
     -- that was skipped because it is out of the file's import scope (R19).
     AutoNone mErr oos ->
       pure (Left (fromMaybe (noSolution hints) mErr <> oosNote "auto" hintCands oos))
+    -- Budget expiry / session death: the session is reset (R23).
+    AutoAbort m -> pure (Left m)
   where
     headline Nothing  = "Mimer filled the goal:\n\n"
     headline (Just h) = "Mimer filled the goal via lemma `" <> h <> "`:\n\n"
@@ -506,6 +508,15 @@ data AutoResult
   | AutoNone (Maybe Text) [Text]
       -- ^ nothing found; @Just@ = an Agda error from the plain probe, plus
       --   the hints whose probe Agda rejected as out of scope (in try order).
+  | AutoAbort !Text
+      -- ^ the probe exceeded its wall budget or the session died (R23): the
+      --   session is dead, remaining hints were skipped, the message says so.
+
+-- | One probe's outcome (internal to 'autoSolve').
+data ProbeResult
+  = PGive  !Text            -- ^ Mimer returned a term
+  | PNone  !(Maybe Text)    -- ^ no term; optional Agda error
+  | PAbort !Text            -- ^ wall-budget expiry / session death
 
 -- | Mimer at one goal: plain first (closes trivial holes fast), then each
 -- lemma hint on its own. An unknown/out-of-scope hint aborts the entire
@@ -513,29 +524,47 @@ data AutoResult
 -- scope resolution happens before search, so a bad hint fails ~instantly.
 -- Stops at the first 'GiveAction'; hint probes use a smaller budget (a real
 -- hint solves near-instantly). A hint probe that fails with a not-in-scope
--- error is recorded (not discarded) so 'runAuto' can flag it (R19).
+-- error is recorded (not discarded) so 'runAuto' can flag it (R19). Every
+-- probe is bounded as wall-clock ('probeBudgetMicros'), so a goal whose
+-- normalization diverges resets the session instead of wedging it (R23).
 autoSolve :: Session -> FilePath -> Int -> Int -> [Text] -> IO AutoResult
 autoSolve sess file iid secs hints = do
-    (m0, mErr) <- probe ("-t " ++ show secs)
-    case m0 of
-      Just t  -> pure (AutoGive Nothing t)
-      Nothing -> tryHints hints [] mErr
+    r0 <- probe secs ("-t " ++ show secs)
+    case r0 of
+      PGive t   -> pure (AutoGive Nothing t)
+      PAbort m  -> pure (AutoAbort m)
+      PNone mErr -> tryHints hints [] mErr
   where
     hintSecs = max 1 (min 3 secs)
     tryHints []       oos mErr = pure (AutoNone mErr (reverse oos))
     tryHints (h : hs) oos mErr = do
-      (m, hErr) <- probe ("-t " ++ show hintSecs ++ " " ++ T.unpack h)
-      case m of
-        Just t  -> pure (AutoGive (Just h) t)
-        Nothing -> tryHints hs (if maybe False (RD.hintOutOfScope h) hErr
-                                  then h : oos else oos) mErr
-    probe opts = do
-      out <- runRaw sess (iotcmAutoOne file AsIs iid opts)
+      r <- probe hintSecs ("-t " ++ show hintSecs ++ " " ++ T.unpack h)
+      case r of
+        PGive t   -> pure (AutoGive (Just h) t)
+        PAbort m  -> pure (AutoAbort m)
+        PNone hErr -> tryHints hs (if maybe False (RD.hintOutOfScope h) hErr
+                                     then h : oos else oos) mErr
+    probe secsUsed opts = do
+      out <- sendIotcmBudget (probeBudgetMicros secsUsed) sess (iotcmAutoOne file AsIs iid opts)
       pure $ case out of
-        Left e   -> (Nothing, Just e)
-        Right rs -> case [gr | ReplyGiveAction _ gr <- rs] of
-          (GiveStr t : _) -> (Just t, Nothing)
-          _               -> (Nothing, firstError rs)
+        SendTimeout _  -> PAbort (budgetMsg secsUsed)
+        SendDied _ err -> PAbort (autoDiedMsg err)
+        SendOk rs      -> case [gr | ReplyGiveAction _ gr <- rs] of
+          (GiveStr t : _) -> PGive t
+          _               -> PNone (firstError rs)
+
+-- | Message for a Mimer probe that blew its wall budget (R23).
+budgetMsg :: Int -> Text
+budgetMsg secs =
+  "Mimer/goal work exceeded its " <> showT secs <> "s+" <> showT probeGraceSecs
+    <> "s wall budget — the Agda session was reset and reloads on the next \
+       \command; retry with a larger `timeout`, or guide the goal with a \
+       \`construct` refine/case_split step or `lemmas goal=…`."
+
+autoDiedMsg :: Text -> Text
+autoDiedMsg err =
+  "the Agda session ended during Mimer search (" <> err
+    <> "); it reloads on the next command."
 
 -- | Mimer over every open goal of a module in one call: no goal ids, one
 -- combined diff for the solved goals (or apply + reload with @write:true@),
@@ -576,21 +605,22 @@ runAutoAll ss a = do
                         | k == 0    = []
                         | otherwise = maybe [] (\ld -> goalHintCands ld k (geType e)) mLd
                       esWithHints = [ (e, hintsFor e) | e <- es ]
-                  (edits, solved, unsolved, oosAll) <-
+                  (edits, solved, unsolved, oosAll, mAbort) <-
                     autoAllLoop sess file (codeBlocksFor file orig) secs esWithHints
                   -- The in-session gives diverge from disk (which stays
                   -- untouched unless write:true) — reload on next use.
                   markSessionDirty ss file
                   let hintMap = M.toList (M.fromListWith (\_ old -> old)
                                             (concatMap snd esWithHints))
-                      oosBlock = oosNote "auto_all" hintMap (nub oosAll)
+                      oosBlock  = oosNote "auto_all" hintMap (nub oosAll)
+                      abortBlock = maybe "" ("\n" <>) mAbort   -- R23: a wedge reset the session
                       survivors
-                        | null unsolved = oosBlock
+                        | null unsolved = oosBlock <> abortBlock
                         | otherwise =
                             "\nMimer found nothing for: "
                               <> T.intercalate ", " (map (renderStableId . geStable) unsolved)
                               <> " — try a `construct` refine step, `lemmas goal=…`, or `construct` an explicit give."
-                              <> oosBlock
+                              <> oosBlock <> abortBlock
                   if null edits
                     then pure (Right ("Mimer solved none of the " <> showT (length es)
                                         <> " open goal(s) in " <> T.pack file
@@ -610,10 +640,10 @@ runAutoAll ss a = do
 -- move the on-disk text). Continue-on-failure — unlike @construct@, an
 -- unsolved goal is a /result/ here, not an abort.
 autoAllLoop :: Session -> FilePath -> CodeBlocks -> Int -> [(GoalEntry, [(Text, Definition)])]
-            -> IO ([(Int, Int, Text)], [Text], [GoalEntry], [Text])
+            -> IO ([(Int, Int, Text)], [Text], [GoalEntry], [Text], Maybe Text)
 autoAllLoop sess file cb secs = go [] [] [] []
   where
-    go eds ok bad oos []               = pure (reverse eds, reverse ok, reverse bad, reverse oos)
+    go eds ok bad oos []               = pure (reverse eds, reverse ok, reverse bad, reverse oos, Nothing)
     go eds ok bad oos ((e, hintCands) : rest) = case (geIid e, geRange e) of
       (Just iid, Just (GoalRange s en))
         | isInsideCode cb (rpPos s) -> do
@@ -623,6 +653,11 @@ autoAllLoop sess file cb secs = go [] [] [] []
                 go ((rpPos s, rpPos en, t) : eds)
                    (renderStableId (geStable e) : ok) bad oos rest
               AutoNone _ hoos -> go eds ok (e : bad) (reverse hoos ++ oos) rest
+              -- R23: the session is dead — stop; this goal and the rest are
+              -- unsolved. Edits collected so far are valid ORIGINAL-offset
+              -- gives and still merge/apply.
+              AutoAbort m ->
+                pure (reverse eds, reverse ok, reverse bad ++ (e : map fst rest), reverse oos, Just m)
       _ -> go eds ok (e : bad) oos rest
 
 -- ---------------------------------------------------------------------
@@ -978,12 +1013,37 @@ runRaw sess cmd = do
     SendDied _ err -> Left ("agda session ended: " <> err)
     SendOk rs      -> Right rs
 
+-- | 'runRaw' with a hard wall-clock budget (µs) — for a Mimer step that must
+-- not wedge a @construct@ batch on a pathological goal (R23).
+runRawBudget :: Int -> Session -> String -> IO (Either Text [Reply])
+runRawBudget budget sess cmd = do
+  out <- sendIotcmBudget budget sess cmd
+  pure $ case out of
+    SendTimeout _  -> Left "agda exceeded its wall budget on this step (session reset); \
+                           \reload and retry, or raise the goal's `timeout`."
+    SendDied _ err -> Left ("agda session ended: " <> err)
+    SendOk rs      -> Right rs
+
 -- ---------------------------------------------------------------------
 -- Session registry + load
 -- ---------------------------------------------------------------------
 
 sessionTimeoutMicros :: Int
 sessionTimeoutMicros = 60 * 1000000
+
+-- | Fixed grace added on top of a Mimer probe's own @-t@ budget to bound the
+-- /whole/ call as wall-clock (R23): Mimer's @-t@ bounds only its search, not
+-- the goal-type normalization Agda does first, so a pathological goal
+-- (@2 ^ n@-style) would otherwise wedge the serial session for the full
+-- 'sessionTimeoutMicros'. The grace covers command dispatch, scope
+-- resolution, and modest normalization; anything past it is the wedge this
+-- kills — the session is reset and the caller told to retry.
+probeGraceSecs :: Int
+probeGraceSecs = 5
+
+-- | Wall-clock budget (µs) for a Mimer probe whose search budget is @secs@.
+probeBudgetMicros :: Int -> Int
+probeBudgetMicros secs = (max 1 secs + probeGraceSecs) * 1000000
 
 -- | Resolve a user file argument to an absolute, normalised path under the
 -- project root.
@@ -1335,32 +1395,42 @@ runCheck ss a = case argText a "file" of
           Left err                 -> pure (Left err)
           Right (sess, _, es, out) -> do
             emitGoals ss file es
-            hints <- autoHints ss sess file es
-            pure (Right (renderCheckLive file (interpretCheck out) es hints))
+            (hints, mNote) <- autoHints ss sess file es
+            pure (Right (renderCheckLive file (interpretCheck out) es hints mNote))
 
 -- | Speculative Mimer probe over the first few open goals after a live
 -- @check@: report ready-made solutions inline so the agent sees the payoff
--- of proof search without having to remember @auto@ exists. Bounded by
--- Mimer's own @-t <secs>@ per-goal timeout ('cfgAutoHintsSecs') and capped
--- at 'cfgAutoHintsLimit' goals; @--no-auto-hints@ disables. A successful
--- probe solves the meta in Agda's /session/ state (the file is untouched),
--- so any success marks the session dirty — the next interaction reloads
--- from unchanged disk.
-autoHints :: ServerState -> Session -> FilePath -> [GoalEntry] -> IO [(GoalEntry, Text)]
+-- of proof search without having to remember @auto@ exists. Each probe is
+-- bounded as wall-clock ('probeBudgetMicros' over 'cfgAutoHintsSecs'), so a
+-- pathological goal can't wedge a routine @check@ (R23) — on budget expiry
+-- (or session death) probing stops and a note is returned; capped at
+-- 'cfgAutoHintsLimit' goals; @--no-auto-hints@ disables. A successful probe
+-- solves the meta in Agda's /session/ state (the file is untouched), so any
+-- success marks the session dirty — the next interaction reloads from
+-- unchanged disk.
+autoHints :: ServerState -> Session -> FilePath -> [GoalEntry] -> IO ([(GoalEntry, Text)], Maybe Text)
 autoHints ss sess file es
-  | not (cfgAutoHints c) || null cands = pure []
+  | not (cfgAutoHints c) || null cands = pure ([], Nothing)
   | otherwise = do
-      hints <- fmap catMaybes . forM cands $ \(e, iid) -> do
-        out <- sendIotcm sess (iotcmAutoOne file AsIs iid ("-t " ++ show secs))
-        pure $ case out of
-          SendOk rs | (GiveStr t : _) <- [gr | ReplyGiveAction _ gr <- rs] -> Just (e, t)
-          _ -> Nothing
+      (hints, mNote) <- probeAll cands []
       when (not (null hints)) (markSessionDirty ss file)
-      pure hints
+      pure (hints, mNote)
   where
     c     = ssConfig ss
     secs  = max 1 (cfgAutoHintsSecs c)
     cands = take (max 0 (cfgAutoHintsLimit c)) [ (e, iid) | e <- es, Just iid <- [geIid e] ]
+    probeAll [] acc = pure (reverse acc, Nothing)
+    probeAll ((e, iid) : rest) acc = do
+      out <- sendIotcmBudget (probeBudgetMicros secs) sess (iotcmAutoOne file AsIs iid ("-t " ++ show secs))
+      case out of
+        SendOk rs
+          | (GiveStr t : _) <- [gr | ReplyGiveAction _ gr <- rs] -> probeAll rest ((e, t) : acc)
+          | otherwise                                            -> probeAll rest acc
+        _ -> pure (reverse acc, Just (abortNote (renderStableId (geStable e))))   -- R23
+    abortNote gid =
+      "(auto-hints probe exceeded its " <> showT secs <> "s+" <> showT probeGraceSecs
+        <> "s budget on " <> gid <> "; remaining goals were not probed — the Agda \
+           \session was reset and reloads on the next command.)"
 
 checkVerdict :: FilePath -> CheckOutcome -> Text
 checkVerdict file co =
@@ -1383,14 +1453,15 @@ renderDiagnostics co = errBlock <> warnBlock
 -- session's reconciled map) and source positions. @hints@ are the
 -- speculative Mimer solutions from 'autoHints' — surfaced inline so the
 -- agent sees the payoff of proof search without having had to ask for it.
-renderCheckLive :: FilePath -> CheckOutcome -> [GoalEntry] -> [(GoalEntry, Text)] -> Text
-renderCheckLive file co es hints =
+renderCheckLive :: FilePath -> CheckOutcome -> [GoalEntry] -> [(GoalEntry, Text)] -> Maybe Text -> Text
+renderCheckLive file co es hints mNote =
   checkVerdict file co <> renderDiagnostics co
-    <> if null es then ""
-       else "\n\nOpen goals:\n"
-              <> T.unlines [ "  " <> renderStableId (geStable e) <> "  : " <> geType e <> posNote e | e <- es ]
-              <> mimerBlock
-              <> goalsFooter es
+    <> (if null es then ""
+        else "\n\nOpen goals:\n"
+               <> T.unlines [ "  " <> renderStableId (geStable e) <> "  : " <> geType e <> posNote e | e <- es ]
+               <> mimerBlock
+               <> goalsFooter es)
+    <> maybe "" ("\n" <>) mNote            -- R23: auto-hints budget/reset note
   where
     mimerBlock = case hints of
       []       -> ""
@@ -1905,7 +1976,11 @@ runStepEdit :: Session -> FilePath -> Text -> Int -> Int -> Int -> Step
             -> IO (Either Text (Int, Int, Text))
 runStepEdit sess file orig iid holeS holeE s@(Step op _ marg) =
   let lbl       = stepLabel s
-      giveStep  = giveStepEdit sess lbl holeS holeE
+      giveStep  = giveStepEdit (runRaw sess) lbl holeS holeE
+      -- A lone auto step is a Mimer probe: budget it as wall-clock so it can't
+      -- wedge the batch for the full session timeout (R23). give/refine keep
+      -- the session default (a heavy but legitimate post-give elaboration).
+      autoStep  = giveStepEdit (runRawBudget (probeBudgetMicros 5) sess) lbl holeS holeE
   in case op of
        "give" -> case marg of
          Nothing -> pure (Left (lbl <> ": give needs a `term`."))
@@ -1913,7 +1988,7 @@ runStepEdit sess file orig iid holeS holeE s@(Step op _ marg) =
        "refine" ->
          let hint = fromMaybe "" marg
          in giveStep (iotcmRefineOrIntro file iid (T.unpack hint)) hint
-       "auto" -> giveStep (iotcmAutoOne file AsIs iid "") ""
+       "auto" -> autoStep (iotcmAutoOne file AsIs iid "") ""
        "case_split" -> case marg of
          Nothing  -> pure (Left (lbl <> ": case_split needs a `var`."))
          Just var -> do
@@ -1935,10 +2010,10 @@ runStepEdit sess file orig iid holeS holeE s@(Step op _ marg) =
 -- | The shared give/refine/auto step: run the command, and on a
 -- 'ReplyGiveAction' return the replacement over the hole range @[holeS,
 -- holeE)@. An agda error (or no give-action) aborts the whole batch.
-giveStepEdit :: Session -> Text -> Int -> Int -> String -> Text
+giveStepEdit :: (String -> IO (Either Text [Reply])) -> Text -> Int -> Int -> String -> Text
              -> IO (Either Text (Int, Int, Text))
-giveStepEdit sess lbl holeS holeE cmd parenInput = do
-  out <- runRaw sess cmd
+giveStepEdit runCmd' lbl holeS holeE cmd parenInput = do
+  out <- runCmd' cmd
   case out of
     Left err -> pure (Left ("construct: " <> lbl <> ": " <> err))
     Right rs -> case firstError rs of

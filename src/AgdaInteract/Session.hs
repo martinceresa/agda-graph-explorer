@@ -34,11 +34,13 @@ module AgdaInteract.Session
   , SendOutcome(..)
   , startSession
   , sendIotcm
+  , sendIotcmBudget
   , sessionFile
   , sessionAlive
   , sessionTryReserve
   , closeSession
   , burstReplies
+  , clampRemainingMicros
   ) where
 
 import           Control.Concurrent       (ThreadId, forkIO, killThread)
@@ -47,6 +49,8 @@ import           Control.Concurrent.MVar  (MVar, newMVar, tryTakeMVar, withMVar)
 import           Control.Exception        (SomeException, try)
 import           Control.Monad            (unless, when)
 import           Data.Maybe               (isJust)
+import           Data.Word                (Word64)
+import           GHC.Clock                (getMonotonicTimeNSec)
 import qualified Data.ByteString          as BS
 import qualified Data.ByteString.Char8    as BSC
 import qualified Data.ByteString.Lazy     as BL
@@ -70,7 +74,12 @@ data SessionConfig = SessionConfig
                                     -- (e.g. @["+RTS","-M4096m","-RTS"]@ to cap the
                                     -- child's heap). Empty = inherit agda's defaults.
   , scExtraArgs     :: ![String]   -- ^ extra flags after @--interaction-json@.
-  , scTimeoutMicros :: !Int        -- ^ per-command wall-clock budget.
+  , scTimeoutMicros :: !Int        -- ^ per-command __inactivity__ budget: the
+                                    -- max gap between reply events before the
+                                    -- session is declared wedged. A chatty
+                                    -- burst (e.g. a big @Cmd_load@) may run
+                                    -- much longer in total. Use 'sendIotcmBudget'
+                                    -- for a hard wall-clock ceiling (Mimer probes).
   } deriving (Show)
 
 -- | A live session: the process, its stdin, the reader's event channel,
@@ -87,7 +96,8 @@ data Session = Session
   , sLock      :: !(MVar ())
   , sAlive     :: !(IORef Bool)
   , sFile      :: !FilePath
-  , sTimeout   :: !Int        -- ^ per-command wall-clock budget (µs).
+  , sTimeout   :: !Int        -- ^ per-command __inactivity__ budget (µs) —
+                              -- max gap between reply events (see 'scTimeoutMicros').
   }
 
 -- | One event off the reader thread.
@@ -168,10 +178,29 @@ startSession cfg file = do
         _ -> pure (Right s)
     Right _ -> pure (Left "agda process pipes were not created")
 
--- | Send one IOTCM command and collect its prompt-terminated reply burst.
+-- | Send one IOTCM command and collect its prompt-terminated reply burst,
+-- bounded by the session's per-event __inactivity__ timeout ('sTimeout').
 -- Serialised per session via 'sLock'. A dead session short-circuits.
 sendIotcm :: Session -> String -> IO SendOutcome
-sendIotcm s cmd = withMVar (sLock s) $ \_ -> do
+sendIotcm = sendGeneric (\s -> pure (pure (sTimeout s)))
+
+-- | 'sendIotcm' with a hard __wall-clock__ budget (µs) for the whole burst,
+-- for callers that must stay responsive no matter how the child behaves —
+-- notably Mimer probes, whose goal-type normalization is not bounded by
+-- Mimer's own @-t@. Expiry poisons the session exactly like the inactivity
+-- timeout (returns 'SendTimeout', marks it dead); the next use respawns.
+sendIotcmBudget :: Int -> Session -> String -> IO SendOutcome
+sendIotcmBudget budgetMicros = sendGeneric $ \_ -> do
+  start <- getMonotonicTimeNSec
+  let deadlineNs = start + fromIntegral (max 0 budgetMicros) * 1000
+  pure (remainingMicros deadlineNs)
+
+-- | Write the command, then collect the burst using a caller-supplied
+-- per-read timeout supplier (constant for the inactivity path; a shrinking
+-- remainder for the wall-budget path). The @IO (IO Int)@ is run once /after/
+-- the write, so a wall budget starts at the burst, not at lock acquisition.
+sendGeneric :: (Session -> IO (IO Int)) -> Session -> String -> IO SendOutcome
+sendGeneric mkNext s cmd = withMVar (sLock s) $ \_ -> do
   alive <- readIORef (sAlive s)
   if not alive
     then SendDied [] <$> recentStderr s
@@ -182,17 +211,42 @@ sendIotcm s cmd = withMVar (sLock s) $ \_ -> do
         Left e  -> do
           writeIORef (sAlive s) False
           pure (SendDied [] ("write to agda failed: " <> T.pack (show e)))
-        Right () -> collectBurst s
+        Right () -> do
+          next <- mkNext s
+          collectBurstWith s next
   where
     hPutStrLn' h str = BS.hPut h (BSC.pack str) >> BS.hPut h (BSC.singleton '\n')
 
--- | Read events accumulating replies until the next 'REPrompt', a timeout,
--- or EOF. On timeout/EOF the session is marked dead.
+-- | Microseconds left until a monotonic-clock deadline (0 once past it —
+-- never negative, so 'timeout' is never handed a "wait forever" argument).
+remainingMicros :: Word64 -> IO Int
+remainingMicros deadlineNs = clampRemainingMicros deadlineNs <$> getMonotonicTimeNSec
+
+-- | Pure core of 'remainingMicros': µs from @now@ to @deadline@ (both ns),
+-- clamped to 0 once the deadline has passed. Guards the 'Word64' subtraction
+-- against underflow (which would otherwise become a huge positive timeout).
+clampRemainingMicros :: Word64 -> Word64 -> Int
+clampRemainingMicros deadlineNs nowNs
+  | nowNs >= deadlineNs = 0
+  | otherwise           = fromIntegral ((deadlineNs - nowNs) `div` 1000)
+
+-- | The inactivity-bounded burst collector: the readiness prompt at startup
+-- and every plain 'sendIotcm' use this.
 collectBurst :: Session -> IO SendOutcome
-collectBurst s = go []
+collectBurst s = collectBurstWith s (pure (sTimeout s))
+
+-- | Read events accumulating replies until the next 'REPrompt', a timeout,
+-- or EOF. The @IO Int@ yields the timeout for the next 'readChan': a constant
+-- for the inactivity path, or a shrinking remainder for a wall budget. A
+-- non-positive value means the deadline has passed → poison immediately
+-- (never call 'timeout' with @<= 0@, which would block forever). On
+-- timeout/EOF the session is marked dead.
+collectBurstWith :: Session -> IO Int -> IO SendOutcome
+collectBurstWith s nextTimeout = go []
   where
     go !acc = do
-      mev <- timeout (sTimeout s) (readChan (sEvents s))
+      t <- nextTimeout
+      mev <- if t <= 0 then pure Nothing else timeout t (readChan (sEvents s))
       case mev of
         Nothing -> do
           writeIORef (sAlive s) False

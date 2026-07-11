@@ -34,6 +34,7 @@ import           AgdaInteract.Guard
 import           AgdaInteract.Literate
 import           AgdaInteract.GoalId
 import           AgdaInteract.Registry ( contentStamp, shouldKeepGoalIds )
+import           AgdaInteract.Session  ( clampRemainingMicros )
 import           AgdaInteract.Edit
 import           AgdaInteract.Batch    ( Step(..), wildcardCheck, allGiveSteps
                                        , checkInspectArgs, checkScratchOp
@@ -76,6 +77,7 @@ main = do
   sequence_ (map ($ fails) iotcmTests)
   sequence_ (map ($ fails) goalIdTests)
   sequence_ (map ($ fails) stampTests)
+  sequence_ (map ($ fails) budgetTests)
   sequence_ (map ($ fails) batchTests)
   sequence_ (map ($ fails) editTests)
   sequence_ (map ($ fails) diagnosticTests)
@@ -836,6 +838,20 @@ stampTests =
        in map geStable es == [StableId 2, StableId 3]     -- counter preserved
             && toInteractionId gm1 (StableId 0) == Nothing  -- stale g0 fails loudly
             && toInteractionId gm1 (StableId 2) == Just 0)
+  ]
+
+----------------------------------------------------------------------
+-- R23: wall-clock budget clamp (the underflow guard that keeps `timeout`
+-- from ever being handed a negative "wait forever" argument).
+
+budgetTests :: [Check]
+budgetTests =
+  [ checkEq "clamp: 5ms remaining on a 10ms deadline is 5000µs"
+      5000 (clampRemainingMicros 10000000 5000000)
+  , checkEq "clamp: exactly at the deadline is 0µs"
+      0 (clampRemainingMicros 5000000 5000000)
+  , checkEq "clamp: past the deadline is 0µs (no Word64 underflow)"
+      0 (clampRemainingMicros 5000000 9000000)
   ]
 
 ----------------------------------------------------------------------
