@@ -213,7 +213,7 @@ buildIndex ExpandedGraph{..} =
             Nothing     -> (f, r)
 
       -- Provenance map. 'Nothing' when the producer didn't emit per-edge
-      -- tags (preserves the old wire format for analyses that don't care).
+      -- tags (preserves the wire format for analyses that don't care).
       -- When 'Just', we zip edges with their tags and fold into a nested
       -- IntMap; duplicate (src, tgt) keys take the last tag seen, matching
       -- the implicit dedup behaviour of 'IS.union' on 'idxForward'.
@@ -353,7 +353,7 @@ ancestors ix seeds = closureFrom False (idxReverse ix) seeds
 -- | Ids of @unsafe@ definitions in a node's transitive dependency closure
 -- (forward\/uses edges), excluding the node itself. These are the soundness
 -- escapes the node transitively /rests on/ — the graph-level taint the
--- producer's per-def @unsafe@ tags (R12) enable: a theorem can carry no
+-- producer's per-def @unsafe@ tags enable: a theorem can carry no
 -- direct escape yet reach a @{-# NON_TERMINATING #-}@ helper or a
 -- @primTrustMe@ body through its dependencies. A def gains an escape either
 -- directly or by living in a module 'buildIndex' folded a file-level OPTIONS

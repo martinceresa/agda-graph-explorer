@@ -17,7 +17,7 @@
 -- and unchanged-hole-across-reload cases. And when a reload observes that
 -- the file changed on disk since the last load, the map is reset
 -- ('dropEntriesKeepNext') — the counter is kept so a stale cached id fails
--- loudly rather than retargeting a different hole (R22).
+-- loudly rather than retargeting a different hole.
 --
 -- A 'GoalMap' lives per session ('AgdaInteract.Session'): interaction
 -- ids are per-load, so the map is rebuilt each time 'syncGoals' runs
@@ -68,7 +68,7 @@ emptyGoalMap = GoalMap { gmNext = 0, gmByStable = M.empty }
 
 -- | Drop every current entry but __keep__ the id counter (unlike
 -- 'emptyGoalMap', which resets it to 0). Used when a reload observes an
--- external on-disk change (R22): a client's cached @g0@ must resolve to
+-- external on-disk change: a client's cached @g0@ must resolve to
 -- "not an open goal" (loud) rather than silently retargeting the new first
 -- hole — which is exactly what reusing @g0@ would do. See the "Scope of
 -- stability" note above.

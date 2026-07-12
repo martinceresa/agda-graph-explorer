@@ -149,7 +149,7 @@ lemmas for the goal, closing one-lemma goals plain Mimer misses; `check` also pr
 goals with Mimer inline (`--no-auto-hints` to disable). `repair` drives an
 almost-correct file to typecheck by interpreting the compiler's diagnostics
 — adding missing imports (resolved off the graph) and fixing misspelled
-references — spec-preserving and zero-axiom (see [`FixLoop.md`](FixLoop.md)).
+references — spec-preserving and zero-axiom.
 Full detail: [`plugin/`](plugin/README.md).
 
 ```sh
@@ -387,4 +387,4 @@ layout used only by `agda-deps`' HTML views), see the `agda-deps` repo.
 ## AI Disclaimer
 
 Substantial portions of this codebase were developed with AI assistance.
-Everthing that works is thanks to AI, whatever does not, it is my fault.
+Everything that works is thanks to AI; whatever does not is my fault.

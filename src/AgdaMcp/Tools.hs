@@ -286,7 +286,7 @@ staleFooter ld =
 -- the default @--keep-going@ producer drops the offending module's
 -- definitions from the graph while the build still "succeeds" (agda-deps
 -- exits 0), so an unqualified "no match" would otherwise read as
--- authoritative — a confident false negative (I6). This flags it. Louder
+-- authoritative — a confident false negative. This flags it. Louder
 -- when the graph is empty (a whole-file parse error can drop every def).
 -- Fires independently of the rebuilding-stale flag and in every mode.
 healthFooter :: Loaded -> Text
@@ -302,8 +302,8 @@ healthFooter ld = case ldFailed ld of
 -- | Appended when the backing graph predates a source edit
 -- ('ldStaleVsSource'). Unlike 'staleFooter' (a live rebuild is in flight),
 -- this fires from the snapshot's own precomputed flag, so it also surfaces
--- in preloaded mode — which 'ensureFresh' otherwise reports as never-stale
--- (R1). Silent when there is nothing to compare (bare @--graph@, in-memory
+-- in preloaded mode — which 'ensureFresh' otherwise reports as never-stale.
+-- Silent when there is nothing to compare (bare @--graph@, in-memory
 -- union).
 sourceStaleFooter :: Loaded -> Text
 sourceStaleFooter ld
@@ -314,10 +314,10 @@ sourceStaleFooter ld
   | otherwise = ""
 
 -- | Appended to a /watched/-mode read whose snapshot is behind a source edit
--- the fsnotify watcher has not yet turned into a rebuild (debounce lag, R16).
+-- the fsnotify watcher has not yet turned into a rebuild (debounce lag).
 -- Distinct from 'staleFooter' (a rebuild is actually in flight): here none is
 -- scheduled yet, so the answer is transiently behind. Flags the confident
--- false negative (the R1/R11 theme) with how far behind it is.
+-- false negative with how far behind it is.
 pendingFooter :: NominalDiffTime -> Text
 pendingFooter dt =
   "\n# stale: a source file under the include roots was edited " <> secs
@@ -327,7 +327,7 @@ pendingFooter dt =
     secs = T.pack (show (max (1 :: Int) (round dt))) <> "s"
 
 -- | The rebuild-side footer for a served snapshot's 'Freshness': the
--- background-rebuild note ('staleFooter'), the R16 pending-rebuild note, or
+-- background-rebuild note ('staleFooter'), the pending-rebuild note, or
 -- nothing when 'Fresh'. The snapshot's own health / source-staleness footers
 -- ('snapshotFooters') are appended separately and fire regardless.
 freshnessFooter :: Loaded -> Freshness -> Text
@@ -406,7 +406,7 @@ withFreshFailFast ss name f = do
     Just ld | not (nameInSnapshot ld name) -> do
       -- Fast path: absent from the current snapshot, answer instantly — but
       -- still carry the partial/source-stale footers, since "not in graph"
-      -- is exactly the answer a partial (parse-failed) build makes unsound (I6).
+      -- is exactly the answer a partial (parse-failed) build makes unsound.
       noteRebuilt ss False
       pure (Right (appendTextFooters (snapshotFooters ld)
                      (notInGraph ld (cfgEntries (ssConfig ss)) name)))
@@ -481,7 +481,7 @@ runUnused ss a = do
 -- indexes definitions + edges only, so textual queries (pragmas, comments,
 -- @using@-lists, regex, numeric literals) are invisible to name-mode search;
 -- this shell-out makes @search@ a superset of grep rather than a
--- different-shaped subset (arena R3). It reads the current bytes on disk, so
+-- different-shaped subset. It reads the current bytes on disk, so
 -- it is independent of the graph snapshot — no @ensureFresh@, no staleness
 -- caveat. Mirrors 'runUnused''s shell-out (findBin + the same process call).
 runSearchText :: ToolRunner

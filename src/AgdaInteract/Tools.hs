@@ -468,10 +468,10 @@ runAuto ss a = withGoal ss a $ \sess file e iid -> do
     AutoGive mh s -> fmap (headline mh <>) <$> applyHoleEdit ss (writeFlag a) file e s
     -- No solution: surface Agda's error if the plain probe sent one, else
     -- the no-solution note (listing the hints we tried), then flag any hint
-    -- that was skipped because it is out of the file's import scope (R19).
+    -- that was skipped because it is out of the file's import scope.
     AutoNone mErr oos ->
       pure (Left (fromMaybe (noSolution hints) mErr <> oosNote "auto" hintCands oos))
-    -- Budget expiry / session death: the session is reset (R23).
+    -- Budget expiry / session death: the session is reset.
     AutoAbort m -> pure (Left m)
   where
     headline Nothing  = "Mimer filled the goal:\n\n"
@@ -485,7 +485,7 @@ runAuto ss a = withGoal ss a $ \sess file e iid -> do
            \or `construct` an explicit give."
 
 -- | Footer flagging graph-ranked hints Mimer could not try because they are
--- out of the file's import scope (R19). Names the defining module's
+-- out of the file's import scope. Names the defining module's
 -- ready-to-paste import line (from the def the hint was ranked off, so it is
 -- exact — no re-resolution). Blank when nothing was out of scope. Honest
 -- phrasing: these are untried candidates, not verified closers.
@@ -508,7 +508,7 @@ data AutoResult
       -- ^ nothing found; @Just@ = an Agda error from the plain probe, plus
       --   the hints whose probe Agda rejected as out of scope (in try order).
   | AutoAbort !Text
-      -- ^ the probe exceeded its wall budget or the session died (R23): the
+      -- ^ the probe exceeded its wall budget or the session died: the
       --   session is dead, remaining hints were skipped, the message says so.
 
 -- | One probe's outcome (internal to 'autoSolve').
@@ -523,9 +523,9 @@ data ProbeResult
 -- scope resolution happens before search, so a bad hint fails ~instantly.
 -- Stops at the first 'GiveAction'; hint probes use a smaller budget (a real
 -- hint solves near-instantly). A hint probe that fails with a not-in-scope
--- error is recorded (not discarded) so 'runAuto' can flag it (R19). Every
+-- error is recorded (not discarded) so 'runAuto' can flag it. Every
 -- probe is bounded as wall-clock ('probeBudgetMicros'), so a goal whose
--- normalization diverges resets the session instead of wedging it (R23).
+-- normalization diverges resets the session instead of wedging it.
 autoSolve :: Session -> FilePath -> Int -> Int -> [Text] -> IO AutoResult
 autoSolve sess file iid secs hints = do
     r0 <- probe secs ("-t " ++ show secs)
@@ -552,7 +552,7 @@ autoSolve sess file iid secs hints = do
           (GiveStr t : _) -> PGive t
           _               -> PNone (firstError rs)
 
--- | Message for a Mimer probe that blew its wall budget (R23).
+-- | Message for a Mimer probe that blew its wall budget.
 budgetMsg :: Int -> Text
 budgetMsg secs =
   "Mimer/goal work exceeded its " <> showT secs <> "s+" <> showT probeGraceSecs
@@ -598,7 +598,7 @@ runAutoAll ss a = do
                       k    = max 0 (argInt a "hints" 6)
                   -- One graph snapshot; per-goal Mimer hint (name, def) pairs
                   -- off each type — the def lets an out-of-scope hint be
-                  -- reported with its import line (R19).
+                  -- reported with its import line.
                   mLd <- either (const Nothing) (Just . fst) <$> ensureFresh ss
                   let hintsFor e
                         | k == 0    = []
@@ -612,7 +612,7 @@ runAutoAll ss a = do
                   let hintMap = M.toList (M.fromListWith (\_ old -> old)
                                             (concatMap snd esWithHints))
                       oosBlock  = oosNote "auto_all" hintMap (nub oosAll)
-                      abortBlock = maybe "" ("\n" <>) mAbort   -- R23: a wedge reset the session
+                      abortBlock = maybe "" ("\n" <>) mAbort   -- a wedge reset the session
                       survivors
                         | null unsolved = oosBlock <> abortBlock
                         | otherwise =
@@ -652,7 +652,7 @@ autoAllLoop sess file cb secs = go [] [] [] []
                 go ((rpPos s, rpPos en, t) : eds)
                    (renderStableId (geStable e) : ok) bad oos rest
               AutoNone _ hoos -> go eds ok (e : bad) (reverse hoos ++ oos) rest
-              -- R23: the session is dead — stop; this goal and the rest are
+              -- the session is dead — stop; this goal and the rest are
               -- unsolved. Edits collected so far are valid ORIGINAL-offset
               -- gives and still merge/apply.
               AutoAbort m ->
@@ -909,7 +909,7 @@ applyOrDiff ss write file old new
         else do
           -- Write-time recheck: the edit was computed against @old@; if disk
           -- moved since (an external edit, or a slow validate/promote phase),
-          -- refuse rather than clobber it (R22). An unreadable file with a
+          -- refuse rather than clobber it. An unreadable file with a
           -- non-empty @old@ is the same hazard; @old == ""@ is the legitimate
           -- new-file creation path (give_file).
           nowTxt <- readFileSafe file
@@ -972,7 +972,7 @@ stampOf fp = either (const Nothing) (Just . contentStamp) <$> readFileSafe fp
 
 -- | Read a mutation's source file and refuse when it no longer matches the
 -- session's load stamp — an external edit since the goals were computed, so
--- the cached hole offsets no longer describe this content (R22). A file with
+-- the cached hole offsets no longer describe this content. A file with
 -- no registered session (e.g. @give_file@ on an unloaded path) is read
 -- as-is. An unknown load stamp (file changed while loading) also refuses.
 readSourceStamped :: ServerState -> FilePath -> IO (Either Text Text)
@@ -1013,7 +1013,7 @@ runRaw sess cmd = do
     SendOk rs      -> Right rs
 
 -- | 'runRaw' with a hard wall-clock budget (µs) — for a Mimer step that must
--- not wedge a @construct@ batch on a pathological goal (R23).
+-- not wedge a @construct@ batch on a pathological goal.
 runRawBudget :: Int -> Session -> String -> IO (Either Text [Reply])
 runRawBudget budget sess cmd = do
   out <- sendIotcmBudget budget sess cmd
@@ -1031,7 +1031,7 @@ sessionTimeoutMicros :: Int
 sessionTimeoutMicros = 60 * 1000000
 
 -- | Fixed grace added on top of a Mimer probe's own @-t@ budget to bound the
--- /whole/ call as wall-clock (R23): Mimer's @-t@ bounds only its search, not
+-- /whole/ call as wall-clock: Mimer's @-t@ bounds only its search, not
 -- the goal-type normalization Agda does first, so a pathological goal
 -- (@2 ^ n@-style) would otherwise wedge the serial session for the full
 -- 'sessionTimeoutMicros'. The grace covers command dispatch, scope
@@ -1076,7 +1076,7 @@ loadAndSync ss mExpect file = modifyMVar (ssSessions ss) $ \m -> do
       -- edit landing after our read; read-after alone would be unsound (an
       -- edit between Agda's read and ours would falsely match). A change
       -- during the load makes the bracket unstable → stamp unknown → the
-      -- entry is dirty and mutators refuse until a clean reload (R22).
+      -- entry is dirty and mutators refuse until a clean reload.
       preH  <- stampOf file
       out   <- sendIotcm sess (iotcmLoad file (loadIncludes ss file))
       postH <- stampOf file
@@ -1407,7 +1407,7 @@ runCheck ss a = case argText a "file" of
 -- @check@: report ready-made solutions inline so the agent sees the payoff
 -- of proof search without having to remember @auto@ exists. Each probe is
 -- bounded as wall-clock ('probeBudgetMicros' over 'cfgAutoHintsSecs'), so a
--- pathological goal can't wedge a routine @check@ (R23) — on budget expiry
+-- pathological goal can't wedge a routine @check@ — on budget expiry
 -- (or session death) probing stops and a note is returned; capped at
 -- 'cfgAutoHintsLimit' goals; @--no-auto-hints@ disables. A successful probe
 -- solves the meta in Agda's /session/ state (the file is untouched), so any
@@ -1431,7 +1431,7 @@ autoHints ss sess file es
         SendOk rs
           | (GiveStr t : _) <- [gr | ReplyGiveAction _ gr <- rs] -> probeAll rest ((e, t) : acc)
           | otherwise                                            -> probeAll rest acc
-        _ -> pure (reverse acc, Just (abortNote (renderStableId (geStable e))))   -- R23
+        _ -> pure (reverse acc, Just (abortNote (renderStableId (geStable e))))
     abortNote gid =
       "(auto-hints probe exceeded its " <> showT secs <> "s+" <> showT probeGraceSecs
         <> "s budget on " <> gid <> "; remaining goals were not probed — the Agda \
@@ -1466,7 +1466,7 @@ renderCheckLive file co es hints mNote =
                <> T.unlines [ "  " <> renderStableId (geStable e) <> "  : " <> geType e <> posNote e | e <- es ]
                <> mimerBlock
                <> goalsFooter es)
-    <> maybe "" ("\n" <>) mNote            -- R23: auto-hints budget/reset note
+    <> maybe "" ("\n" <>) mNote            -- auto-hints budget/reset note
   where
     mimerBlock = case hints of
       []       -> ""
@@ -1641,7 +1641,7 @@ firstWorking ss file env co text diags = go 0 flat
     -- Bound the per-round work: a parse dump can over-collect names, and each
     -- candidate costs a full throwaway-agda validate. Symbolic-first ordering
     -- (from parseErrorNames) means the cap bites the speculative alphabetic
-    -- tail; Env-miss tokens already contribute no candidates (R26).
+    -- tail; Env-miss tokens already contribute no candidates.
     flat  = take 16 [ (d, cand) | d <- diags, cand <- RS.candidatesFor env text d ]
     go dc [] = pure (Nothing, dc)
     go dc ((d, cand) : rest) =
@@ -1661,11 +1661,11 @@ firstWorking ss file env co text diags = go 0 flat
 
 -- | Accept a candidate iff it compiles clean, or it resolves the targeted
 -- name without raising the error count. Because imports only grow scope
--- (repair is import-only, R25), each accepted round adds a new distinct import
+-- (repair is import-only), each accepted round adds a new distinct import
 -- line, so this is monotone — the loop cannot oscillate. @stillMissing@ comes
 -- from the shared 'RD.stillMissingNames', which subtracts in-scope grammar
 -- operators, so an operator that framed a parse error but is itself in scope
--- doesn't keep 'targetResolved' false (R26).
+-- doesn't keep 'targetResolved' false.
 accepts :: CheckOutcome -> CheckOutcome -> RD.Diagnostic -> Bool
 accepts co co' d
   | null (coErrors co') = True
@@ -1841,8 +1841,8 @@ contentFrame c = rule <> "\n" <> c <> (if "\n" `T.isSuffixOf` c then "" else "\n
   where rule = "----------------------------------------"
 
 -- | Resolve bare names to @open import <Module>@ (or @import@) lines via the
--- graph-backed 'RS.resolveImportModules' (alias-aware — R24 — and
--- carrier-ranked by the stub types — R25b, so a constructor resolves to its
+-- graph-backed 'RS.resolveImportModules' (alias-aware and
+-- carrier-ranked by the stub types, so a constructor resolves to its
 -- parent module and a @ℕ@ goal prefers @Data.Nat@). Names with no candidate
 -- come back unresolved (reported, never invented). Deduped, input order
 -- preserved.
@@ -1960,7 +1960,7 @@ constructLoop ss file orig origStamp cb (s:rest) acc = do
     Right (sess, gm, _, _) -> do
       -- The per-step reload re-stamps to disk; if that no longer matches the
       -- text the edits are computed against, an external edit landed mid-batch
-      -- — abort rather than splice ORIGINAL-offset edits into new content (R22).
+      -- — abort rather than splice ORIGINAL-offset edits into new content.
       cur <- currentStamp ss file
       if cur /= Just origStamp
         then pure (Left "construct: the file changed on disk mid-batch — nothing applied; re-run load.")
@@ -1986,7 +1986,7 @@ runStepEdit sess file orig iid holeS holeE s@(Step op _ marg) =
   let lbl       = stepLabel s
       giveStep  = giveStepEdit (runRaw sess) lbl holeS holeE
       -- A lone auto step is a Mimer probe: budget it as wall-clock so it can't
-      -- wedge the batch for the full session timeout (R23). give/refine keep
+      -- wedge the batch for the full session timeout. give/refine keep
       -- the session default (a heavy but legitimate post-give elaboration).
       autoStep  = giveStepEdit (runRawBudget (probeBudgetMicros constructAutoSecs) sess) lbl holeS holeE
   in case op of
@@ -2043,7 +2043,7 @@ runLemmas :: ToolRunner
 runLemmas ss a = withGoal ss a $ \sess file e iid -> do
   -- Live goal context (binder types like `n : ℕ`) steers carrier affinity
   -- so the goal's actual carrier instance outranks same-shaped ones from
-  -- other number types (R20); degrade to [] if the goal query fails.
+  -- other number types; degrade to [] if the goal query fails.
   ctxTypes <- ctxTypesOf sess file iid
   ef <- ensureFresh ss
   case ef of

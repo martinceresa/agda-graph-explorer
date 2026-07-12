@@ -200,7 +200,7 @@ data Freshness
     -- ^ a rebuild is in flight (serve-stale); the background worker will swap
     -- the snapshot when it finishes.
   | BehindPending !NominalDiffTime
-    -- ^ watched mode only (R16): a source under the include roots is newer
+    -- ^ watched mode only: a source under the include roots is newer
     -- than the snapshot, but the fsnotify rebuild has not fired yet (debounce
     -- lag). Carries the gap (newest source mtime − snapshot build time).
   deriving (Eq)
@@ -272,7 +272,7 @@ data Loaded = Loaded
     -- (@Host.combine@) mapped to the canonical node-key it renames
     -- (@Core.Base.merge@), built from every 'ReExport' row's 'rxRenames'.
     -- Lets 'AgdaMcp.Query.resolveDefNote' resolve an alias — which is not a
-    -- graph node — to its origin, and @search@ surface it (R14). Empty when
+    -- graph node — to its origin, and @search@ surface it. Empty when
     -- no re-export carries a @renaming@ clause.
   , ldStaleVsSource :: !Bool
     -- ^ At snapshot-construction time, the backing graph file was older
@@ -281,18 +281,18 @@ data Loaded = Loaded
     -- when the graph has no single backing file (in-memory union) or no
     -- include roots are known (bare @--graph@, nothing to compare). Drives
     -- a source-staleness footer that also fires in preloaded mode, which
-    -- 'ensureFresh' otherwise reports as never-stale (R1).
+    -- 'ensureFresh' otherwise reports as never-stale.
   , ldConfigHash  :: !Text
     -- ^ Canonical identity digest of the graph's /configuration/: the
     -- build-date-stripped producer fingerprint, node-key + schema version,
     -- and the producer flag set (live mode). Stable across machines/dates
-    -- for the same build recipe, so a consumer can key regressions on it
-    -- (arena R9). See 'graphIdentity'.
+    -- for the same build recipe, so a consumer can key regressions on it.
+    -- See 'graphIdentity'.
   , ldContentHash :: !Text
     -- ^ Digest of the graph's /content/: a fold over the sorted real-def
     -- set (name + kind + state). Changes when definitions are added or
     -- silently dropped, so it is the tripwire that makes a partial-build
-    -- def drop (I6) visible in @status@ even when everything else looks
+    -- def drop visible in @status@ even when everything else looks
     -- fresh. See 'graphIdentity'.
   }
 
@@ -411,7 +411,7 @@ data ServerState = ServerState
     -- visible without parsing transcripts. In-memory only (resets with the
     -- daemon).
   , ssBehindProbe :: !(IORef (Maybe (UTCTime, ScanSig)))
-    -- ^ TTL cache for the R16 "how far behind" probe: the wall-clock time of
+    -- ^ TTL cache for the "how far behind" probe: the wall-clock time of
     -- the last proactive source rescan and its 'ScanSig'. In /watched/ mode
     -- 'ensureFresh' rescans at most once per 'behindProbeTtl' to spot a
     -- snapshot behind an on-disk edit the fsnotify watcher has not yet
@@ -706,7 +706,7 @@ loadedFromGraph cfg mGraphFile egProject = do
   let nkv = egNodeKeyVersion eg
       (configHash, contentHash) = graphIdentity cfg eg rds
       -- Host-qualified alias -> canonical node-key, from every re-export
-      -- row's renaming clause (R14). Keyed by @rxFrom.<alias>@ so a query
+      -- row's renaming clause. Keyed by @rxFrom.<alias>@ so a query
       -- for the fully-qualified alias resolves through it.
       aliases = M.fromList
         [ (rxFrom r <> "." <> alias, canonical)
@@ -745,8 +745,8 @@ loadedFromGraph cfg mGraphFile egProject = do
     , ldAliases    = aliases
     }
 
--- | Canonical @(config, content)@ identity digests for a snapshot (arena
--- R9; the content half also tripwires I6's silent def drops). Both are the
+-- | Canonical @(config, content)@ identity digests for a snapshot (the
+-- content half also tripwires silent def drops). Both are the
 -- vendored Murmur64 ('AgdaGraph.GoalCanon.hashString', 16-hex-digit) over a
 -- canonical rendering — no new dependency, and 64 bits is ample for an
 -- identity tripwire.
@@ -1194,7 +1194,7 @@ runBuildShared ss forceFull
 --     source tree's file-count + newest mtime and compare to the
 --     snapshot's 'ScanSig'. On a mismatch we also (lazily) ensure the
 --     background worker is running so 'ssWake' actually drains.
--- | The TTL for the R16 behind-probe cache. A full source rescan on every
+-- | The TTL for the behind-probe cache. A full source rescan on every
 -- read would defeat watched mode (whose whole point is to avoid scanning), so
 -- the proactive "am I behind?" check runs at most once per this window.
 -- Shorter than a typical fsnotify debounce lag (~2s measured), so a genuine
@@ -1202,7 +1202,7 @@ runBuildShared ss forceFull
 behindProbeTtl :: NominalDiffTime
 behindProbeTtl = 1
 
--- | R16: in /watched/ mode, is the served snapshot behind an on-disk edit the
+-- | In /watched/ mode, is the served snapshot behind an on-disk edit the
 -- fsnotify watcher has not yet turned into a rebuild? Compares the newest
 -- source mtime under the include roots against the snapshot's build time,
 -- caching the scan under 'behindProbeTtl'. 'BehindPending' with the gap when
@@ -1254,7 +1254,7 @@ ensureFresh ss@ServerState{..}
               -- Not scheduled for a rebuild. If one is in flight, this snapshot
               -- is about to be superseded (serve-stale). Otherwise, in watched
               -- mode, proactively check whether we are behind an edit the
-              -- fsnotify event has not delivered yet (R16 debounce lag).
+              -- fsnotify event has not delivered yet (debounce lag).
               if building
                 then pure (Right (ld, Rebuilding))
                 else do

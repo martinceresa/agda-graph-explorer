@@ -120,7 +120,7 @@ guardTests =
       (not (isRejected (checkGiveInput "f {- postulate -}")))
   , check "guard catches postulate after a comment"
       (isRejected (checkGiveInput "{- ok -} postulate q : A"))
-  -- R21: pragma tokens in inert regions are false positives; a pragma in
+  -- pragma tokens in inert regions are false positives; a pragma in
   -- active code (or a token blanking must not expose) still fires.
   , check "guard allows a pragma quoted in a line comment"
       (not (isRejected (checkGiveInput "f -- note: {-# TERMINATING #-}\n")))
@@ -162,14 +162,14 @@ fileGuardTests =
       (not (isRejected (checkFileInput "module M where\n-- postulate is discussed here\nfoo = 0\n")))
   , check "file guard rejects primTrustMe in a body"
       (isRejected (checkFileInput "module M where\nf = primTrustMe\n"))
-  -- R21: a pragma quoted in a comment or string is inert, not a refusal.
+  -- a pragma quoted in a comment or string is inert, not a refusal.
   , check "file guard allows a pragma in a line comment"
       (not (isRejected (checkFileInput "module M where\n-- {-# TERMINATING #-}\nfoo = 0\n")))
   , check "file guard allows a commented-out pragma block"
       (not (isRejected (checkFileInput "{- {-# TERMINATING #-} -}\nmodule M where\n")))
   , check "file guard allows a string-quoted pragma"
       (not (isRejected (checkFileInput "module M where\ns = \"{-# NON_TERMINATING #-}\"\n")))
-  -- R21 literate: only fenced Agda code is guarded; prose is not.
+  -- literate: only fenced Agda code is guarded; prose is not.
   , check "literate guard allows a pragma/postulate mentioned in prose"
       (not (isRejected (checkFileInputFor "Doc.lagda.md" litProseMention)))
   , check "literate guard rejects postulate inside a code fence"
@@ -296,10 +296,9 @@ iotcmTests =
 
 ----------------------------------------------------------------------
 -- agda-unused: the dead-definition check must not count a def's own
--- recursive call as a caller (I5 self-recursion), nor treat a
--- mutual-recursion cycle whose only callers are its own members as
--- live (I5 dead-cycle half), while a real *external* intra-module or
--- cross-module caller still keeps the defs off the dead list.
+-- recursive call as a caller, nor treat a mutual-recursion cycle whose
+-- only callers are its own members as live, while a real *external*
+-- intra-module or cross-module caller still keeps the defs off the dead list.
 
 unusedGraphJson :: BL.ByteString
 unusedGraphJson = BLC.pack $ unlines
@@ -463,8 +462,8 @@ unusedDeadTests = concat
   ]
 
 ----------------------------------------------------------------------
--- Schema wire fields: the producer's `unsafe` (R12) and re-export
--- `renames` (R14) decode into 'defUnsafe' / 'rxRenames', and their
+-- Schema wire fields: the producer's `unsafe` and re-export
+-- `renames` decode into 'defUnsafe' / 'rxRenames', and their
 -- absence in an older graph degrades to empty (backward compatibility).
 
 schemaGraphJson :: BL.ByteString
@@ -504,7 +503,7 @@ schemaFieldTests = case eitherDecode schemaGraphJson :: Either String ExpandedGr
     ]
 
 ----------------------------------------------------------------------
--- Transitive soundness taint (R12 follow-on): 'unsafeDeps' reports the
+-- Transitive soundness taint: 'unsafeDeps' reports the
 -- directly-`unsafe` defs in a node's forward (dependency) closure — the
 -- escapes a theorem transitively rests on. Chain: thm → step → loops
 -- (non-terminating); `cheat` (trustme) is present but unreachable from
@@ -608,7 +607,7 @@ moduleOptionEscapeTests = case eitherDecode escapeGraphJson :: Either String Exp
     ]
 
 ----------------------------------------------------------------------
--- LemmaRank — carrier-affinity tie-break (arena R20).
+-- LemmaRank — carrier-affinity tie-break.
 
 -- | Build a 'Definition' fixture; only the fields the ranker reads matter.
 mkDef :: Text -> Text -> Kind -> Maybe Text -> Definition
@@ -673,7 +672,7 @@ lemmaRankTests =
     aliasEnv = RankEnv [] (Map.singleton "Data.Nat.Base.\8469" "Agda.Builtin.Nat.Nat")
 
 ----------------------------------------------------------------------
--- R24 / R25b: alias-aware, carrier-ranked, import-only write-side resolvers.
+-- Alias-aware, carrier-ranked, import-only write-side resolvers.
 
 strategyTests :: [Check]
 strategyTests =
@@ -681,7 +680,7 @@ strategyTests =
     check "importCandidates: bare × resolves to _×_'s module"
       ("open import Data.Product using (_\215_)"
          `elem` RS.importCandidates prodEnv Set.empty "" "\215")
-  -- R24: a name in scope only via a renaming re-export resolves to its host.
+  -- a name in scope only via a renaming re-export resolves to its host.
   , check "importCandidates: a renaming alias resolves to its host module"
       ("open import Reexports using (combine)"
          `elem` RS.importCandidates combineEnv Set.empty "" "combine")
@@ -695,24 +694,24 @@ strategyTests =
       (let cs = RS.importCandidates collideEnv Set.empty "" "combine"
        in "open import Reexports using (combine)" `elem` cs
             && "open import Some.Mod using (combine)" `elem` cs)
-  -- R25 (new_module half): a constructor resolves to its PARENT module, not the
+  -- a constructor resolves to its PARENT module, not the
   -- raw datatype-namespaced module (which yields a broken import).
   , checkEq "resolveImportModules: a constructor resolves to its parent module"
       (Just "Agda.Builtin.Nat")
       (listToMaybe (RS.resolveImportModules zeroEnv [] "zero"))
-  -- R25b: carrier affinity picks the right module among same-named exporters.
+  -- carrier affinity picks the right module among same-named exporters.
   , checkEq "resolveImportModules: a ℕ-typed stub prefers Data.Nat.Base for +"
       (Just "Data.Nat.Base")
       (listToMaybe (RS.resolveImportModules plusEnv ["\8469 \8594 \8469"] "+"))
   , checkEq "resolveImportModules: a ℤ-typed stub flips the choice to Data.Integer.Base"
       (Just "Data.Integer.Base")
       (listToMaybe (RS.resolveImportModules plusEnv ["\8484 \8594 \8484"] "+"))
-  -- R25: candidatesFor is import-only — every candidate is a single EAddImport.
+  -- candidatesFor is import-only — every candidate is a single EAddImport.
   , check "candidatesFor: DScope yields only import edits (never a rename)"
       (let cs = RS.candidatesFor combineEnv "" (RD.DScope "combine")
        in not (null cs)
             && all (\c -> case c of [RE.EAddImport _] -> True; _ -> False) cs)
-  -- R25a: a typo no import fixes is only SUGGESTED, never applied.
+  -- a typo no import fixes is only SUGGESTED, never applied.
   , check "nearMissSuggestions: a typo of an alias is suggested"
       ("combine" `elem` RS.nearMissSuggestions combineEnv "" "combin")
   ]
@@ -869,7 +868,7 @@ goalIdTests =
   ]
 
 ----------------------------------------------------------------------
--- R22: content stamps + external-change goal-id reset.
+-- Content stamps + external-change goal-id reset.
 
 stampTests :: [Check]
 stampTests =
@@ -903,7 +902,7 @@ stampTests =
   ]
 
 ----------------------------------------------------------------------
--- R23: wall-clock budget clamp (the underflow guard that keeps `timeout`
+-- Wall-clock budget clamp (the underflow guard that keeps `timeout`
 -- from ever being handed a negative "wait forever" argument).
 
 budgetTests :: [Check]
@@ -1043,10 +1042,10 @@ missingSigMsg = T.intercalate "\n"
   , "when scope checking the declaration"
   , "  fin nums [] = 0" ]
 
--- Real Agda 2.9 [NoParseForLHS] renderings (captured), for R26.
+-- Real Agda 2.9 [NoParseForLHS] renderings (captured).
 -- A missing constructor in a pattern surfaces as an alphabetic token in the
 -- "Problematic expression" (not a symbolic one), and a missing _,_ as a bare
--- comma — both dropped by the pre-R26 extractor.
+-- comma.
 parseLhsCtorMsg :: Text
 parseLhsCtorMsg = T.intercalate "\n"
   [ "/tmp/x/CtorParse.agda:6.1-11: error: [NoParseForLHS]"
@@ -1077,7 +1076,7 @@ diagnosticTests =
       ("_\8804_" `elem` RD.parseErrorNames parseAppMsg)
   , check "parseErrorNames subtracts an in-grammar (in-scope) operator (× is listed)"
       ("\215" `notElem` RD.parseErrorNames parseAppMsg)
-  -- R26: alphabetic tokens ARE now collected (a bare constructor name), but
+  -- alphabetic tokens ARE now collected (a bare constructor name), but
   -- ordered AFTER the symbolic ones and bounded by classify's cap + the Env
   -- hit filter — so a `just`/`AllPairs` is a candidate, not silently dropped.
   , check "parseErrorNames now collects alphabetic tokens too, ordered after symbolic ones"
@@ -1086,12 +1085,12 @@ diagnosticTests =
             && case (elemIndex "_\8804_" ns, elemIndex "AllPairs" ns) of
                  (Just i, Just j) -> i < j
                  _                -> False)
-  -- R26 (constructor): a missing constructor is an alphabetic Problematic token.
+  -- a missing constructor is an alphabetic Problematic token.
   , check "parseErrorNames extracts a missing constructor (just) from a NoParseForLHS"
       ("just" `elem` RD.parseErrorNames parseLhsCtorMsg)
   , check "parseErrorNames drops the 1-char pattern var (x)"
       ("x" `notElem` RD.parseErrorNames parseLhsCtorMsg)
-  -- R26 (comma): a missing _,_ is a bare comma the old delimiter set discarded.
+  -- a missing _,_ is a bare comma the old delimiter set discarded.
   , check "parseErrorNames keeps a bare comma (a missing _,_)"
       ("," `elem` RD.parseErrorNames parseLhsCommaMsg)
   , check "nameKeys maps a bare comma onto its mixfix _,_"
@@ -1117,7 +1116,7 @@ diagnosticTests =
       True ("_\215_" `elem` RD.nameKeys "\215")            -- × ↦ _×_
   , check "isRefusableTag flags termination but not scope"
       (RD.isRefusableTag "TerminationIssue" && not (RD.isRefusableTag "NotInScope"))
-  -- hintOutOfScope (R19): a Mimer hint the file hasn't imported must be
+  -- hintOutOfScope: a Mimer hint the file hasn't imported must be
   -- recognised from the NotInScope reply; a genuine search miss must not.
   , check "hintOutOfScope: true when the hint is the not-in-scope name"
       (RD.hintOutOfScope "\8484" notInScopeMsg)                 -- ℤ, named in notInScopeMsg

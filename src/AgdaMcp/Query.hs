@@ -167,7 +167,7 @@ originSuffix d = maybe "" (\o -> "  [external: " <> o <> "]") (defOrigin d)
 -- or a file-level OPTIONS escape ('egModuleOptionEscapes', e.g.
 -- @--type-in-type@) 'buildIndex' folded in from its module; empty for a safe
 -- def. Makes an @agda --safe@-relevant escape visible wherever a def is
--- listed (R12).
+-- listed.
 unsafeSuffix :: Definition -> Text
 unsafeSuffix d = case defUnsafe d of
   [] -> ""
@@ -421,7 +421,7 @@ resolveDefNote ld name = case lookupDef (ldIndex ld) name of
          [d] -> Just ("", d)
          _   -> aliasOrFuzzy
   where
-    -- Tier 2.5: a @renaming@ re-export alias ('ldAliases', R14) — not a
+    -- Tier 2.5: a @renaming@ re-export alias ('ldAliases') — not a
     -- graph node itself — resolves to the canonical def it renames. An
     -- exact alias hit beats the tier-3 fuzzy near-match below.
     aliasOrFuzzy
@@ -437,7 +437,7 @@ resolveDefNote ld name = case lookupDef (ldIndex ld) name of
 -- helper: the nearest non-local def at or above the helper's start line,
 -- in the helper's own module or an enclosing one. As of v3 the producer
 -- re-homes such a helper into its nearest /named/ module (@Where.sq\@15@
--- lives in @Where@, no longer a phantom @Where._@), so the owner is found
+-- lives in @Where@), so the owner is found
 -- in the helper's own module or a prefix of it.
 -- 'Nothing' for a non-local def, or when lines are unavailable.
 ownerOf :: Loaded -> Definition -> Maybe Definition
@@ -614,7 +614,7 @@ queryBrief ld lim name = case resolveDefNote ld name of
         cov = coverageFootnote ld
         -- The embedded callers/callees sub-blocks each append 'cov' when
         -- non-empty; strip it there so the orientation bundle carries the
-        -- closure-coverage footer once, at the end (R17), not per section.
+        -- closure-coverage footer once, at the end, not per section.
         dropCov = if T.null cov then id else T.replace cov ""
         sig = case defSig d of
                 Just t | not (T.null (T.strip t)) -> t
@@ -782,7 +782,7 @@ queryPath ld k mPrefix fromName toName =
           "`" <> defName a <> "` and `" <> defName b <> "` are the same definition."
       -- A path answer (found or "no path") is only as complete as the closure:
       -- a real dependency link through an out-of-closure file would be missed,
-      -- so flag partial coverage the same as the cone tools (R17).
+      -- so flag partial coverage the same as the cone tools.
       else (<> coverageFootnote ld) $
           let ix    = ldIndex ld
               allow n = maybe True (`T.isPrefixOf` defModule (defAt ix n)) mPrefix
@@ -912,7 +912,7 @@ kShortestPathsVia ix allow src dst k =
 -- against the postulate list.
 --
 -- With @unsafe=@ it becomes a transitive soundness audit: the escapes the
--- subject rests on through its dependency cone ('unsafeDeps', R12) — an
+-- subject rests on through its dependency cone ('unsafeDeps') — an
 -- @agda --safe@-style check rooted at one theorem, each escape witnessed
 -- by the chain that reaches it. Without a filter, a passive
 -- 'rootsTaintBanner' still flags the taint so it is never silent.
@@ -1309,7 +1309,7 @@ rankGoalCandidates ld candKeep minSim goal ctxTypes =
 -- highest-ranked, def). The base name is what Mimer takes (2.9 rejects a
 -- qualified hint, and an out-of-scope hint aborts the whole search — so
 -- `auto` tries them one at a time); the paired 'Definition' lets `auto`
--- name the defining module of an out-of-scope hint (R19) without a second
+-- name the defining module of an out-of-scope hint without a second
 -- graph query. A modest coverage floor keeps junk out. Context-free
 -- (@ctxTypes = []@) — but inherits the carrier-affinity tiebreak, so the
 -- carrier-matching instance is tried first. Empty on a signature-less graph.
@@ -1336,7 +1336,7 @@ goalHintCands ld n goal =
 -- when at least one of @mKind@ / @mState@ / @mUnsafe@ / @mModPrefix@ is
 -- given — that lists every definition matching the filter (e.g.
 -- @unsafe=any@ enumerates every soundness escape, an @agda --safe@-style
--- audit; R12). @topLevelOnly@ drops @where@-/anonymous locals. Bad
+-- audit). @topLevelOnly@ drops @where@-/anonymous locals. Bad
 -- kind/state filter values produce an explicit error.
 querySearch :: Loaded -> Bool -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe Text -> Int -> OutFmt -> Text -> Text
 querySearch ld topLevelOnly mModPrefix mKindTxt mStateTxt mUnsafe lim fmt q =
@@ -1374,7 +1374,7 @@ querySearch ld topLevelOnly mModPrefix mKindTxt mStateTxt mUnsafe lim fmt q =
   where
     mKind  = mKindTxt  >>= parseKind
     mState = mStateTxt >>= parseState
-    -- Re-export aliases ('ldAliases', R14) whose host-qualified name matches
+    -- Re-export aliases ('ldAliases') whose host-qualified name matches
     -- the (non-empty) query as a substring — surfaced so `search combine`
     -- reveals a `Reexports.combine` alias for `Core.Base.merge` instead of
     -- silently returning only the unrelated real def of that short name.

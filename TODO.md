@@ -3,151 +3,47 @@
 Forward-looking work on the graph consumers. For runnable examples see
 [Examples.md](Examples.md); for deferred / refused ideas see
 [Backlog.md](Backlog.md) and [Deferred.md](Deferred.md); for shipped work see
-[Changelog.md](Changelog.md). A consolidated, prioritized fix plan for the
-open items below (designs, files, verification gates) is in
-[Plan/FixRLess.md](Plan/FixRLess.md).
+[Changelog.md](Changelog.md).
 
 ---
+
 ## Ideas
 
-- [ ] Shrink the interact schema footprint. Check out the most used tools, try
-      to shrink or removed unused ones.
+- [ ] Shrink the interact schema footprint — check the most-used tools, shrink
+      or remove unused ones.
 
 ## Open
 
-- [ ] **Adopt the arena CI regression gate** (arena R8; deliverable in
-  `MCPBenchArena/ci/` — workflow + `ci_gate.py` asserting G1–G4:
-  find_lemma 10/10, misleading-* ties, live lemmas/auto). Friction: our CI
-  is deliberately Agda-free; the gate needs agda 2.9 + agda-deps +
-  registered agda-stdlib 2.4 + the arena repo pinned + in-CI stdlib graph
-  builds. Budget as a new Agda-in-CI job, not an extra step. Staging plan in
-  [Plan/FixRLess.md](Plan/FixRLess.md) §6 (offline G1+G2 first via cached graphs, live
+- [ ] **Arena CI regression gate** (G1–G4: find_lemma 10/10, misleading-* ties,
+  live lemmas/auto). Friction: our CI is deliberately Agda-free; the gate needs
+  agda 2.9 + agda-deps + registered agda-stdlib 2.4 + an in-CI stdlib graph.
+  Budget as a new Agda-in-CI job (offline G1+G2 via cached graphs first, live
   G3+G4 second).
 
-- [ ] Check VerinaAgda benchmark and try to close the gap. Now unblocked:
-  the I1/I2 retrieval + hint fixes landed and the ergonomics tags shipped —
-  re-run the A/B with the sig graph + availability hint and record *per-rung*
-  uptake-when-stuck (the powered-P1 gap). See [Plan/FixRLess.md](Plan/FixRLess.md) §7.
+- [ ] **VerinaAgda benchmark** — re-run the A/B with the sig graph + availability
+  hint (I1/I2 retrieval + hint fixes and the ergonomics tags landed) and record
+  per-rung uptake-when-stuck.
 
-- [ ] Stdlib federation follow-ups (base landed 2026-07-05 — see Changelog:
-  `--overlay-graph` / `overlay-graphs:` + `scripts/build-stdlib-graph.sh`).
-  Remaining: auto-build + auto-register a stdlib overlay on first run (warm
-  compilation), and a producer flag keeping cross-boundary external edges as
-  dangling refs (would let `callers`/`impact` cross into the overlay — belongs
-  in the `agda-deps` repo). Consumer-side design in [Plan/FixRLess.md](Plan/FixRLess.md) §8.
+- [ ] **Stdlib federation follow-ups** (base landed 2026-07-05: `--overlay-graph`
+  + `scripts/build-stdlib-graph.sh`). Remaining: auto-build + auto-register a
+  stdlib overlay on first run; and a producer flag keeping cross-boundary
+  external edges as dangling refs (would let `callers`/`impact` cross into the
+  overlay — belongs in `agda-deps`).
 
-- [ ] **File-level option escapes** (soundness-escape, second half): surface
+- [ ] **File-level option escapes** (second half): surface
   `--no-positivity-check` / `--type-in-type` / `--no-termination-check` once
-  `agda-deps` Phase 2 emits them as a top-level `moduleOptionEscapes` field
-  (still open in the producer's TODO). The per-def `unsafe` half and its
-  transitive taint (below) already cover the measured audit misses.
+  `agda-deps` Phase 2 emits `moduleOptionEscapes`. The per-def `unsafe` half and
+  its transitive taint already ship.
 
-- [ ] **Round-6 P5 follow-up: structural goal canonicalisation.** `agda-goals`
-  canonicalises goal types textually (whitespace + alpha-rename) because
-  `--interaction-json` only exposes rendered strings, not internal `Term`s. To
-  reuse the producer's `TermCanon` we need one of:
-    1. A producer Backend-hook variant that reads the goal-type `Term` off
-       `lookupMetaInstantiation` in `TCM` and emits a JSON sidecar, merged with
-       the driver's hole locations. Trades away the process-driver simplicity
-       that motivated `agda-goals` being separate.
-    2. A surface-AST parser via `Agda.Syntax.Parser` on the rendered string,
-       canonicalising on the surface AST. Non-trivial — implicit args /
-       instance resolution differ between surface and internal forms.
-  Both paths are documented in `AgdaGoals.Canon`'s haddock.
+- [ ] **Structural goal canonicalisation.** `agda-goals` canonicalises goal
+  types textually (`--interaction-json` exposes only rendered strings). Reusing
+  the producer's `TermCanon` needs one of: (1) a Backend-hook variant reading the
+  goal-type `Term` off `lookupMetaInstantiation` and emitting a JSON sidecar
+  (trades away process-driver simplicity); (2) a surface-AST parser via
+  `Agda.Syntax.Parser` (implicit-arg / instance-resolution mismatch makes it
+  non-trivial). Both are in `AgdaGoals.Canon`'s haddock.
 
-- [ ] **Round-6 S1: surface-AST simplifier with typecheck rollback.**
-  Mechanical local rewrites with per-module typecheck + rollback and
-  `.agdai`-checksum invariance. Highest-risk piece. Defer until `term-cluster`
-  surfaces concrete rewrite candidates. See [Backlog.md](Backlog.md).
-
-## Shipped — see Changelog
-
-- [x] Reduce MCP tools: group the most used tools so agents know what to call.
-  (2026-07-09: category tags `[orient]`/`[find]`/`[trace]`/`[reuse]`/`[audit]`
-  on the read tools + `[prove]` and a when-stuck routing note on `check`.
-  2026-07-10: catalogue *reduction* shipped — write tools folded 21 → 11 via
-  the constructor-style batchers below.)
-
-- [x] **Constructor-style batchers: fold the write-tool catalogue 21 → 11.**
-  (2026-07-10, shipped — see Changelog.) Generalized the `construct` step-batch
-  shape to swallow the single-operation write tools. A full *replace* (not the
-  "additive aliases first" the original gate hedged — the VerinaAgda re-run now
-  measures the reduced surface directly). Removed 12 singletons, added 2
-  batchers, keeping 11:
-    - `construct` (extended → the primary hole-driving interface) subsumes
-      `give`/`refine`/`case_split`/`give_many`/`auto_all`: a lone
-      `{op:auto, goal:"*"}` step runs Mimer over every open goal (delegates to
-      `runAutoAll`); an all-`give` batch takes the single-load atomic path
-      (`runGiveMany`); otherwise the per-step-reload `constructLoop`.
-    - `inspect { goal, op:type|context|infer|normalize, expr? }` subsumes
-      `goal_type`/`goal_context`/`infer`/`normalize` (same `runGoalInfo`/`runExpr`).
-    - `scratch { op:open|promote|discard, target?, scratch?, write? }` subsumes
-      `stage`/`promote`/`discard`.
-  Standalone (kept): `load`, `goal_brief` (still first), `auto`, `check`,
-  `give_file`, `new_module`, `lemmas`, `repair`. Pure routing vocabulary
-  extracted to `AgdaInteract.Batch` (Step/wildcard/all-give + inspect/scratch op
-  validators); 26 offline assertions in `test/Spec.hs`; docs synced across
-  README/CLAUDE/plugin. Minor: the `{op:auto, goal:"*"}` path uses default Mimer
-  timeout/hints (standalone `auto` keeps those knobs).
-
-- [x] Live-watch staleness delta + brief/path coverage (R16 + R17) (2026-07-10)
-  — closes the two open consumer follow-ups the arena's `Requests.md` still
-  marked open. **R17:** `brief`/`path` now carry the same closure-coverage
-  footer as the cone tools (`coverageFootnote`; `brief` de-dups it out of its
-  embedded callers/callees so it shows once). **R16:** a watched-mode read
-  behind an on-disk edit the fsnotify event has not delivered yet (debounce
-  lag / missed event) now carries a `# stale: … edited Ns ago … rebuild has
-  not fired yet` footer via a new `Freshness` (`Fresh`/`Rebuilding`/
-  `BehindPending`) returned by `ensureFresh` + a TTL-cached `probeBehind`
-  source scan (watched mode only; poll/preloaded unchanged). (R18 —
-  mutually-recursive dead cycles — was already shipped in `9b69b48`; the arena
-  entry was stale.)
-- [x] Transitive soundness taint (R12 follow-on) (2026-07-09) — a reachability
-  query over the adopted `unsafe` field: `AgdaGraph.Index.unsafeDeps` +
-  `roots … unsafe=any` (transitive audit, witnessed) + passive
-  `⚠ soundness taint` banners on `roots`/`impact`. No new producer field.
-  Tests in `test/Spec.hs`. File-level option escapes remain open above (blocked
-  on producer Phase 2).
-- [x] Producer-follow-ups R12 + R14 (2026-07-09) — now that `agda-deps` emits
-  the wire fields: `Schema.Definition.defUnsafe` + a `search unsafe=` audit
-  filter and an `[unsafe: …]` tag in `locate`/lists (R12); and
-  `Schema.ReExport.rxRenames` + alias resolution — `locate`/`type_of` resolve
-  `Host.combine` to its `renaming` origin and `search` surfaces the alias
-  (R14). Schema-decode + backward-compat regression tests in `test/Spec.hs`.
-- [x] Arena-feedback round 2 (2026-07-09) — the FixRLess.md (ex-`ToFix.md`) batch: I6 partial-graph
-  flagging + R1 source-staleness footer (incl. preloaded mode), R9 graph
-  identity hashes in `status`, I5 dead mutual-recursion cycles, R2 coverage
-  counts on `callers`/`callees`/`impact`/`roots`, R3 `search mode=text`
-  (ripgrep), R7 tool-catalogue tags + when-stuck nudge, `format:json` for
-  `unused`. Arena gate G1–G4 re-verified green.
-- [x] Arena-feedback quick wins (2026-07-09) — `similar_types` false-100 cap
-  (I4), recursive dead code flagged by `unused` (I5 self-recursion half),
-  `search` per-answer closure-coverage count, advisor blurbs on
-  `type_of`/`locate`/`search`. Arena CI gate G1–G4 re-verified green.
-- [x] `agda-explore`: goal→lemma retrieval overhaul + hint-guided `auto`
-  (2026-07-08) — `find_lemma`/`lemmas` rank by name + algebraic shape +
-  operator-weighted coverage (qualifier-stripped, graph-vocab keep):
-  2/10→10/10 on the stdlib micro-bench. `auto`/`auto_all` seed Mimer with the
-  top `find_lemma` lemmas on a no-solution (fixes I1/I2).
-- [x] `agda-explore`: orientation bundles + federation + JSON + coverage + CLI
-  (2026-07-05) — `brief`/`goal_brief` one-call orientation, `--overlay-graph`
-  stdlib federation (`[external: …]` tags, project-wins), `format: json` on
-  `search`/`callers`/`callees`, closure-coverage warning (`coverage-ignore:`),
-  and the one-shot `agda-explore query <tool> key=value…` CLI.
-- [x] `agda-explore`: drive agents toward the write bridge (2026-07-05) —
-  `check` next-step footer + speculative Mimer hints, new `auto_all` tool,
-  plugin loop-closing hooks (validate-on-edit / route-first-grep),
-  `--control-port` endpoint for the edit hook, tool-usage histogram in
-  `status`.
-- [x] Adopt producer `nodeKeyVersion` 3: `module-local` provenance enum
-  (legacy `where` kept), `currentNodeKeyVersion` 2→3, helper detection
-  re-keyed off the `@<line>` disambiguator (the `._.` marker is gone in v3).
-- [x] `agda-explore`: `type_of` from producer-side `--with-signatures`.
-- [x] `agda-explore`: background `fsnotify` file-watch with poll fallback.
-- [x] `agda-explore`: `.agda-explore.yml` config.
-- [x] `agda-explore`: in-library `similar_*` parity (shared `AgdaGraph.WL` /
-  `AgdaGraph.Similarity` cores, byte-identical to `silhouette`).
-- [x] `agda-goals`: corpus scaling over a persistent session pool
-  (byte-identical across `-N1` / `-NK`).
-- [x] `agda-goals`: protocol-skew golden fixtures + offline `interaction-spec`
-  suite (regenerate with `bash test/interaction/regen.sh`).
+- [ ] **Surface-AST simplifier with typecheck rollback.** Mechanical local
+  rewrites with per-module typecheck + rollback and `.agdai`-checksum
+  invariance. Highest-risk piece. Defer until `term-cluster` surfaces concrete
+  rewrite candidates. See [Backlog.md](Backlog.md).

@@ -2,9 +2,9 @@
 -- | Pure text edits for the repair loop, and the spec-preservation predicate.
 --
 -- Repair is __import-only__: the sole edit inserts an @open import@ line
--- (renames were removed — R25 — because a rename can rewrite a theorem's
--- meaning to make a scope error vanish; repair now fails with a spelling
--- suggestion instead). Spec preservation is therefore structural — an
+-- (repair never renames: a rename could rewrite a theorem's meaning to
+-- make a scope error vanish; a misspelling no import fixes fails with a
+-- spelling suggestion instead). Spec preservation is therefore structural — an
 -- inserted import never touches an existing line — and 'signatures' remains
 -- the invariant the loop checks after each edit as a backstop.
 module AgdaRepair.Edit

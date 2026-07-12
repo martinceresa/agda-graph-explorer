@@ -200,8 +200,8 @@ Both decode with empty defaults, so an older graph stays valid. Schema-decode
 
 ### Arena-feedback round 2: staleness signals, graph identity, dead cycles, text search (2026-07-09)
 
-The [FixRLess.md](Plan/FixRLess.md) (ex-`ToFix.md`) batch — the correctness +
-feature items from the MCPBenchArena triage. Arena CI gate (G1–G4) re-verified green; the
+The correctness + feature items from the MCPBenchArena triage. Arena CI gate
+(G1–G4) re-verified green; the
 `interaction-spec` suite (now including the dead-cycle cases) passes; the
 `agda-unused` `-N1`/`-N4` byte-identity determinism test holds.
 
@@ -335,7 +335,7 @@ one-lemma goal.
   `+-identityʳ`; `auto_all` closes both `Holes.agda` goals in one diff.
 - Unit tests in `test/Spec.hs` (`goalCanonTests`, token + shape cases).
 
-### `agda-explore`: trim the always-on tool catalogue (FableAna §4) (2026-07-05)
+### `agda-explore`: trim the always-on tool catalogue (2026-07-05)
 
 The `tools/list` payload is loaded into every session where the plugin is
 enabled — including sessions that never touch Agda — so the tool *descriptions*
@@ -358,17 +358,17 @@ property descriptions and `SKILL.md` (the skill loads on demand, not always).
 
 ### `agda-explore`: orientation bundles, stdlib federation, JSON output, coverage warning, one-shot CLI (2026-07-05)
 
-Five capability additions (FableAna §2–§7), each verified end-to-end against
+Five capability additions, each verified end-to-end against
 Agda 2.9.0:
 
-- **Orientation bundles `brief` / `goal_brief` (§3).** `brief name=X` composes
+- **Orientation bundles `brief` / `goal_brief`.** `brief name=X` composes
   `locate` + type signature + direct `callers`/`callees` (capped) +
   `similar_bodies` into one sectioned block — the opening sequence an agent
   otherwise pays ~4 round trips for. `goal_brief goal=gN` (write side) does the
   same for a hole: live `goal_type` (type + context) + top reusable `lemmas`.
   Both are pure composition of existing runners (resolve once, drive off the
   canonical FQN so the auto-resolve note appears at most once); read-only.
-- **Stdlib graph federation (§2).** `--overlay-graph FILE` (repeatable) /
+- **Stdlib graph federation.** `--overlay-graph FILE` (repeatable) /
   `overlay-graphs:` decode a prebuilt expanded graph (e.g. agda-stdlib) once at
   startup, origin-tag every def (`defOrigin`), and union it into every snapshot
   inside `loadedFromGraph` (project graph FIRST ⇒ project wins every key
@@ -378,13 +378,13 @@ Agda 2.9.0:
   version-mismatched / unparseable overlay is warned-and-skipped, never fatal.
   `scripts/build-stdlib-graph.sh` builds one. `loadedFromGraph`/`loadLoaded`
   now take `Config` (subsumes the earlier per-arg threading).
-- **`format: json` on `search`/`callers`/`callees` (§5).** Opt-in structured
+- **`format: json` on `search`/`callers`/`callees`.** Opt-in structured
   `{tool, query, resolved?, total, shown, items[]}` envelope (`total`/`shown`
   keep the `…and N more` affordance); each item carries name/module/line/kind/
   state/access + edge provenance + overlay origin. Default stays prose
   (byte-identical to before — the text branch is untouched). New `ep` enum
   schema builder in `ToolDef`.
-- **Closure-coverage warning (§6).** At snapshot commit, `loadedFromGraph`
+- **Closure-coverage warning.** At snapshot commit, `loadedFromGraph`
   diffs on-disk sources under the include roots against the graph's module
   files; files outside every entry's closure (invisible to queries) are stored
   on `ldOrphanFiles`, filtered through `coverage-ignore:` globs
@@ -392,7 +392,7 @@ Agda 2.9.0:
   Surfaced in `status` and appended to an *empty* `search`/`locate` result — so
   an absent name reads as "outside the closure", not "does not exist". Glob
   matcher lifted to the shared `AgdaGraph.Glob` (deduped with `agda-unused`).
-- **One-shot CLI `agda-explore query <tool> key=value… [--json] (§7)`.** Loads
+- **One-shot CLI `agda-explore query <tool> key=value… [--json]`.** Loads
   the graph once (no daemon/watcher) and dispatches through the SAME tool table
   the server uses — inherits every read tool for free. Numeric/bool values are
   coerced so `limit=50` reaches `argInt` as a JSON number. Exit 0 on an answer

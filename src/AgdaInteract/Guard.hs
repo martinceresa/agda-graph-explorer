@@ -101,7 +101,7 @@ checkFileInput input
 -- | Literate-aware 'checkFileInput': for a @.lagda*@ file only the fenced
 -- Agda code blocks are guarded, so a literate module whose /prose/ merely
 -- mentions @postulate@ or quotes a @{-# TERMINATING #-}@ pragma is not
--- refused (the R21 false positive). For a plain @.agda@ file the whole file
+-- refused (the false positive). For a plain @.agda@ file the whole file
 -- is code, so this is exactly 'checkFileInput'. Code slices are rejoined with
 -- newlines so a multi-line pragma\/comment inside a fence is scanned intact.
 -- (Every fenced block is treated as Agda code — see "AgdaInteract.Literate" —

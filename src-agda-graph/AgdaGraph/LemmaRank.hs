@@ -13,7 +13,7 @@
 -- coverage/Jaccard pair is the historically-tuned primary signal (the
 -- @find_lemma@ 10/10 micro-bench) and is left untouched.
 --
--- Layered on top is a __carrier-module affinity__ tie-breaker (arena R20).
+-- Layered on top is a __carrier-module affinity__ tie-breaker.
 -- A goal like @n + zero ≡ n@ tokenises identically for
 -- @Data.Nat.Properties.+-identityʳ@ and @Data.Integer.Properties.+-identityʳ@
 -- (qualifier-strip erases @Data.Nat@ vs @Data.Integer@), so the two land in a
@@ -24,8 +24,8 @@
 -- path segment (@Nat@). It sits __after__ Jaccard in the sort key, so it only
 -- reorders otherwise-exact ties — the coverage number a client sees is
 -- unchanged. When nothing resolves (no carrier defs, no aliases, a
--- signature-less graph) affinity is 0 everywhere and the ranking is
--- byte-identical to the pre-R20 behaviour.
+-- signature-less graph) affinity is 0 everywhere and the ranking is the
+-- plain coverage/Jaccard order.
 module AgdaGraph.LemmaRank
   ( RankEnv(..)
   , LemmaScore

@@ -8,9 +8,9 @@
 --     read the def's 'defModule' (a constructor resolves to its datatype-parent
 --     module; 'defOrigin' marks an overlay def) __or__ an alias's host module,
 --     so a name in scope only via @open import M public renaming (a to b)@
---     resolves too (R24, e.g. @combine@ → @Reexports@, @ℕ@ → @Data.Nat.Base@);
+--     resolves too (e.g. @combine@ → @Reexports@, @ℕ@ → @Data.Nat.Base@);
 --   * closest name to a typo — edit distance over in-scope + graph names, used
---     only to /suggest/ (repair never renames — R25).
+--     only to /suggest/ (repair never renames).
 --
 -- Candidates are ranked (already-imported module first, carrier-affinity next
 -- so a bare @ℕ@/@+-comm@ prefers its carrier module, then shorter/less-exotic
@@ -47,7 +47,7 @@ import qualified AgdaGraph.LemmaRank  as LR
 import           AgdaRepair.Diagnostic (Diagnostic (..), stripUnderscores)
 import           AgdaRepair.Edit       (Edit (..), isSigLine)
 
--- | A candidate is a bundle of edits validated together. Import-only (R25).
+-- | A candidate is a bundle of edits validated together. Import-only.
 type Candidate = [Edit]
 
 -- | One thing that could bring a name into scope: either a real graph def, or
@@ -91,7 +91,7 @@ splitHostAlias qkey =
   let (pre, alias) = T.breakOnEnd "." qkey
   in (alias, if T.null pre then "" else T.dropEnd 1 pre)
 
--- | Ranked candidates for one diagnostic. Import-only (R25): a scope or parse
+-- | Ranked candidates for one diagnostic. Import-only: a scope or parse
 -- error is resolved by bringing the missing name into scope, never by renaming
 -- — a rename can rewrite a theorem's meaning to silence a scope error (e.g.
 -- @ℕ@ → @_#_@). A misspelling that no import fixes is reported with
@@ -101,7 +101,7 @@ candidatesFor env src d = case d of
   DScope name -> imports name
   -- A parse-error token that is already in scope (the file's own def or a var
   -- over-collected from the dump) needs no import; skip it so a full validate
-  -- isn't wasted (R26).
+  -- isn't wasted.
   DParse name
     | name `Set.member` scope -> []
     | otherwise               -> imports name
@@ -255,7 +255,7 @@ stripLineTag t = case T.breakOnEnd "@" t of
   _          -> t
 
 -- ---------------------------------------------------------------------
--- Near-match (typo) helpers — suggestion-only (repair never renames, R25)
+-- Near-match (typo) helpers — suggestion-only (repair never renames)
 -- ---------------------------------------------------------------------
 
 -- | In-scope names within edit distance ≤ 2 of a not-in-scope token, closest

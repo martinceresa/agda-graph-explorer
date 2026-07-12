@@ -3,7 +3,7 @@
 -- daemon: the session itself plus its per-load stable-goal map, a dirty
 -- flag the file-watcher flips when sources change on disk (serve-stale
 -- parity — reload lazily on next use), and a content stamp of the on-disk
--- source the current load reflects (R22 — so a mutator can refuse to
+-- source the current load reflects (so a mutator can refuse to
 -- splice against a file that changed under it). Held in the
 -- 'AgdaMcp.State.ServerState' registry.
 --
@@ -39,7 +39,7 @@ data SessionEntry = SessionEntry
     -- 'Nothing' = unknown (the file was unreadable at load, or it changed
     -- while the load was in flight) — mutators refuse until a clean reload
     -- restamps it. A mutator that reads different content than this refuses
-    -- rather than splicing a stale offset (R22).
+    -- rather than splicing a stale offset.
   }
 
 -- | Content identity stamp: the vendored Murmur64 over the decoded text

@@ -50,7 +50,7 @@ One shared library and four executables:
   (`op` = open/promote/discard) manages an isolated scratch module,
   and `repair` interprets the compiler's diagnostics to add
   missing imports and fix misspelled references — graph-backed, spec-preserving,
-  refusing semantic errors, see `FixLoop.md`) over a long-lived
+  refusing semantic errors) over a long-lived
   `agda --interaction-json`
   subprocess: every mutator is Agda-validated and returns a unified diff (no
   write unless passed `write:true`, which applies + reloads), under a hard
@@ -279,8 +279,8 @@ src/
                                 without exporting them (no cycle).
 
   AgdaRepair/                   Graph-backed, spec-preserving repair loop for
-                                the `repair` tool (see FixLoop.md). Pure logic;
-                                the IO driver lives in AgdaInteract.Tools.
+                                the `repair` tool. Pure logic; the IO driver
+                                lives in AgdaInteract.Tools.
     Diagnostic.hs               PURE classifier: agda's rendered errors →
                                 [Diagnostic] (DScope/DParse/DIncomplete/DRefuse).
                                 Parses NotInScope / NoParseFor* / error tags;
@@ -431,12 +431,12 @@ plugin/                         Claude Code plugin: agda-explore MCP server +
   so hints must be in-scope short names tried ONE AT A TIME — scope
   resolution is instant, so a bad hint fails before searching. Don't batch.
 
-- **`repair`'s three invariants are enforced structurally — don't relax them**
-  (see `FixLoop.md`). (1) *Spec preservation*: repair is __import-only__ — the
-  sole edit inserts an `open import` line (renames were removed in R25 because a
-  rename can rewrite a theorem's meaning to silence a scope error, e.g. `ℕ` →
-  `_#_`), so it structurally cannot touch existing code, and `firstWorking`
-  still asserts the `AgdaRepair.Edit.signatures` set is unchanged as a backstop.
+- **`repair`'s three invariants are enforced structurally — don't relax them.**
+  (1) *Spec preservation*: repair is __import-only__ — the sole edit inserts an
+  `open import` line (renaming is deliberately not a strategy: a rename can
+  rewrite a theorem's meaning to silence a scope error, e.g. `ℕ` → `_#_`), so it
+  structurally cannot touch existing code, and `firstWorking` still asserts the
+  `AgdaRepair.Edit.signatures` set is unchanged as a backstop.
   A misspelling no import fixes is reported with a `nearMissSuggestions`
   spelling hint, never rewritten. (2) *Zero axioms*: every candidate goes through
   `checkFileInput` first. (3) *Monotone termination*: `accepts` takes a candidate

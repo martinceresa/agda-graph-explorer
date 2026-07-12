@@ -44,7 +44,7 @@ import qualified Data.Text        as T
 -- 'coGoals' rather than classifying them.)
 data Diagnostic
   = DScope !Text        -- ^ an identifier / operator reported not-in-scope;
-                        --   resolve by adding an import (import-only — R25;
+                        --   resolve by adding an import (import-only;
                         --   a typo is reported, never renamed).
   | DParse !Text        -- ^ a candidate operator / constructor from a
                         --   @NoParseFor*@ error (import-only; no rename).
@@ -123,7 +123,7 @@ errorTags = mapMaybe tagOf . T.lines
 -- whole @Cmd_autoOne@ when a seeded hint name is not in scope (Agda 2.9),
 -- returning a @NotInScope@ error. Reporting that as "no solution" is a
 -- false negative — the graph named a closing lemma the file just hasn't
--- imported (R19). Precise path: the structured not-in-scope list names the
+-- imported. Precise path: the structured not-in-scope list names the
 -- hint. Fallback: a @NotInScope@ tag with the (dot-free base) hint present
 -- in the message, hedging a layout the primary parser misses. Anything else
 -- is a genuine search failure, not a scope problem.
@@ -164,9 +164,9 @@ notInScopeNames txt = dedup (fromTrailer ++ fromBlock)
 -- | Candidate missing names from a @NoParseFor*@ error: dropping an operator
 -- or constructor import breaks parsing, not scope, so the culprit is in the
 -- unparseable expression. Collects from the @Could not parse …@ and
--- @Problematic expression:@ lines both symbolic/mixfix tokens (@×@, @,@ — R26:
+-- @Problematic expression:@ lines both symbolic/mixfix tokens (@×@, @,@ —
 -- @,@ is not a delimiter here, so @_,_@ survives) __and__ alphabetic
--- identifiers ≥2 chars (@just@, @nothing@ — R26: a bare constructor name).
+-- identifiers ≥2 chars (@just@, @nothing@ — a bare constructor name).
 -- Operators already listed under @Operators used in the grammar@ are in scope,
 -- so they are subtracted (a @NoParseForApplication@ often names the in-scope
 -- operator that framed the unparseable part). Symbolic tokens come first
@@ -208,7 +208,7 @@ symbolic t = T.any (\c -> c == '_' || not (isAlphaNum c)) t
 
 -- | Tokeniser for a parse-error expression dump: splits on whitespace and
 -- bracketing, but __not__ on @,@ or @.@ — a bare @,@ is the reported form of a
--- missing @_,_@ (R26), and a qualified name keeps its dots. Strips surrounding
+-- missing @_,_@, and a qualified name keeps its dots. Strips surrounding
 -- dots and drops pure-number / bare-@.@ tokens.
 exprTokens :: Text -> [Text]
 exprTokens = mapMaybe clean . filter (not . T.null) . T.split isDelim
