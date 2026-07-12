@@ -101,6 +101,6 @@ jobs:
       run: |
         printf '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n' \
           | cabal run -v0 agda-explore -- --enable-interact --graph test/deps.json \
-          | grep -q '"name":"give"' \
+          | grep -q '"name":"construct"' \
           && echo "interaction tools present" \
           || { echo "interaction tools MISSING from tools/list"; exit 1; }
