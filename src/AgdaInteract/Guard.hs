@@ -24,7 +24,7 @@ module AgdaInteract.Guard
 import           Data.Text ( Text )
 import qualified Data.Text as T
 
-import           AgdaInteract.Literate ( codeBlocksFor, codeSlices )
+import           AgdaInteract.Literate ( codeBlocksFor, codeSlices, isLiterate )
 
 -- | Verdict for one piece of give\/refine input.
 data GuardVerdict
@@ -108,8 +108,9 @@ checkFileInput input
 -- so a token in a @```text@ block is still refused; conservative by design,
 -- and @--safe@ on the session is the backstop.)
 checkFileInputFor :: FilePath -> Text -> GuardVerdict
-checkFileInputFor fp txt =
-  checkFileInput (T.intercalate "\n" (codeSlices (codeBlocksFor fp txt) txt))
+checkFileInputFor fp txt
+  | not (isLiterate fp) = checkFileInput txt      -- whole file is code; skip the slice pass
+  | otherwise           = checkFileInput (T.intercalate "\n" (codeSlices (codeBlocksFor fp txt) txt))
 
 -- | The trimmed contents of each @{-# … #-}@ pragma block in the text
 -- (the bytes between the delimiters). An unterminated @{-#@ yields the

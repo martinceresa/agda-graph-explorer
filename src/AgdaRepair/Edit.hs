@@ -1,4 +1,3 @@
-{-# LANGUAGE BangPatterns      #-}
 {-# LANGUAGE OverloadedStrings #-}
 -- | Pure text edits for the repair loop, and the spec-preservation predicate.
 --

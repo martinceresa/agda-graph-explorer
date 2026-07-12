@@ -97,9 +97,11 @@ nameKeys n =
        else base ++ ["_" <> n <> "_", "_" <> n, n <> "_"]
 
 -- | Split a rendered fragment into maximal identifier/operator tokens on
--- whitespace and name-segment delimiters. Different delimiter set from
--- 'AgdaInteract.Guard.tokens': splits on @|,@ (they bound sub-expressions in a
--- parse-error dump), keeps @\@\"@ (absent in diagnostics).
+-- whitespace and name-segment delimiters, @,@ and @.@ included — for
+-- scope-error trailers ('notInScopeNames') and grammar-operator lines
+-- ('grammarOperators'), where @,@/@.@ are ordinary separators. Distinct from
+-- both 'AgdaInteract.Guard.tokens' and 'exprTokens' (the parse-error-dump
+-- tokeniser, which keeps @,@/@.@ so a bare @_,_@ and qualified names survive).
 tokens :: Text -> [Text]
 tokens = filter (not . T.null) . T.split isDelim
   where isDelim c = c `elem` (" \t\r\n(){}|;,." :: String)

@@ -1044,6 +1044,12 @@ probeGraceSecs = 5
 probeBudgetMicros :: Int -> Int
 probeBudgetMicros secs = (max 1 secs + probeGraceSecs) * 1000000
 
+-- | Mimer search budget (seconds) for a lone @construct@ auto step: a quick
+-- probe (a real hint solves near-instantly), wrapped as a wall-clock bound by
+-- 'probeBudgetMicros'. A longer hunt belongs in the `auto` tool.
+constructAutoSecs :: Int
+constructAutoSecs = 5
+
 -- | Resolve a user file argument to an absolute, normalised path under the
 -- project root.
 absFile :: ServerState -> Text -> FilePath
@@ -1551,7 +1557,7 @@ runRepair ss a = case argText a "file" of
               Right d -> Right (banner <> "\n\n" <> d)
 
 -- | The monotone repair driver. Each round: validate the current text,
--- classify the diagnostics, try candidate edits (import / rename) against the
+-- classify the diagnostics, try candidate import edits against the
 -- first actionable diagnostic, accept the first that resolves it without
 -- raising the error count or touching a signature, and recurse. Terminates at
 -- a clean typecheck, when nothing is actionable (refuse), or at @max_iter@.
@@ -1982,7 +1988,7 @@ runStepEdit sess file orig iid holeS holeE s@(Step op _ marg) =
       -- A lone auto step is a Mimer probe: budget it as wall-clock so it can't
       -- wedge the batch for the full session timeout (R23). give/refine keep
       -- the session default (a heavy but legitimate post-give elaboration).
-      autoStep  = giveStepEdit (runRawBudget (probeBudgetMicros 5) sess) lbl holeS holeE
+      autoStep  = giveStepEdit (runRawBudget (probeBudgetMicros constructAutoSecs) sess) lbl holeS holeE
   in case op of
        "give" -> case marg of
          Nothing -> pure (Left (lbl <> ": give needs a `term`."))

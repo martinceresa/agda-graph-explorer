@@ -30,7 +30,7 @@ module AgdaRepair.Strategy
   , importLineFor
   ) where
 
-import           Data.Char        (isDigit, isSpace)
+import           Data.Char        (isDigit)
 import           Data.List        (nub, sortOn)
 import qualified Data.Map.Strict  as M
 import           Data.Map.Strict  (Map)
@@ -45,7 +45,7 @@ import           AgdaGraph.Schema     (Access (..), Definition (..), Kind (..))
 import qualified AgdaGraph.LemmaRank  as LR
 
 import           AgdaRepair.Diagnostic (Diagnostic (..), stripUnderscores)
-import           AgdaRepair.Edit       (Edit (..))
+import           AgdaRepair.Edit       (Edit (..), isSigLine)
 
 -- | A candidate is a bundle of edits validated together. Import-only (R25).
 type Candidate = [Edit]
@@ -125,14 +125,8 @@ nearMissSuggestions env src name =
 -- Empty without a graph.
 importCandidates :: Env -> Set Text -> Text -> Text -> [Text]
 importCandidates env segs src name =
-  take 6 . dedupKeep . concatMap entryImportLines . sortOn (rankEntry segs already) $ entries
-  where
-    entries = M.findWithDefault [] (stripUnderscores name) (envByBase env)
-    already = importedModules src
-    dedupKeep = go []
-      where go _ [] = []
-            go seen (x:xs) | x `elem` seen = go seen xs
-                           | otherwise     = x : go (x : seen) xs
+  take 6 . nub . concatMap entryImportLines $
+    rankedEntries env segs (importedModules src) name
 
 -- | Modules that would bring @name@ into scope, ranked most-likely first — for
 -- @new_module@'s bare-name import resolution (which emits @open import M@, no
@@ -141,10 +135,17 @@ importCandidates env segs src name =
 -- type @ℕ → ℕ@ never resolves to a broken @open import Agda.Builtin.Nat.Nat@).
 resolveImportModules :: Env -> [Text] -> Text -> [Text]
 resolveImportModules env hints name =
-  take 6 . nub . concatMap entryModules . sortOn (rankEntry segs []) $ entries
-  where
-    entries = M.findWithDefault [] (stripUnderscores name) (envByBase env)
-    segs    = carrierSegmentsFromTypes env hints
+  take 6 . nub . concatMap entryModules $
+    rankedEntries env (carrierSegmentsFromTypes env hints) [] name
+
+-- | Entries for @name@ (by underscore-stripped base name), ranked by
+-- 'rankEntry'. The fetch-and-rank skeleton shared by both resolvers, which
+-- differ only in the projection off each entry and how @segs@/@already@ are
+-- derived. Empty without a graph.
+rankedEntries :: Env -> Set Text -> [Text] -> Text -> [EnvEntry]
+rankedEntries env segs already name =
+  sortOn (rankEntry segs already)
+         (M.findWithDefault [] (stripUnderscores name) (envByBase env))
 
 -- | Ranking key shared by both resolvers: prefer an already-imported module,
 -- then public over private, then higher carrier affinity, then a
@@ -208,15 +209,12 @@ carrierSegmentsFromTypes :: Env -> [Text] -> Set Text
 carrierSegmentsFromTypes env =
   LR.carrierSegmentsFor (envCarrierMap env) (envVocab env) ""
 
--- | The type (RHS of @:@) of each top-level @name : Type@ line.
+-- | The type (RHS of @:@) of each top-level @name : Type@ line. Shares the
+-- signature-line predicate with 'AgdaRepair.Edit.signatures' (the loop's
+-- spec-preservation invariant) so the two notions can't drift.
 sigTypeStrings :: Text -> [Text]
 sigTypeStrings src =
-  [ T.drop 1 rhs
-  | l <- T.lines src
-  , not (T.null l), not (isSpace (T.head l))          -- column 0
-  , let (lhs, rhs) = T.breakOn ":" l
-  , not (T.null rhs)
-  , length (T.words lhs) == 1 ]
+  [ T.drop 1 (snd (T.breakOn ":" l)) | l <- T.lines src, isSigLine l ]
 
 -- ---------------------------------------------------------------------
 -- Definition helpers (import line for a Definition — used by oosNote too)

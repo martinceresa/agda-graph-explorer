@@ -170,7 +170,7 @@ startSession cfg file = do
                 , sLock = lock, sAlive = alive, sFile = file
                 , sTimeout = scTimeoutMicros cfg }
       -- Consume the startup readiness prompt so the session is at a prompt.
-      ready <- collectBurst s
+      ready <- collectBurstWith s (pure (sTimeout s))
       case ready of
         SendDied _ err -> do
           _ <- closeSession s
@@ -229,11 +229,6 @@ clampRemainingMicros :: Word64 -> Word64 -> Int
 clampRemainingMicros deadlineNs nowNs
   | nowNs >= deadlineNs = 0
   | otherwise           = fromIntegral ((deadlineNs - nowNs) `div` 1000)
-
--- | The inactivity-bounded burst collector: the readiness prompt at startup
--- and every plain 'sendIotcm' use this.
-collectBurst :: Session -> IO SendOutcome
-collectBurst s = collectBurstWith s (pure (sTimeout s))
 
 -- | Read events accumulating replies until the next 'REPrompt', a timeout,
 -- or EOF. The @IO Int@ yields the timeout for the next 'readChan': a constant
