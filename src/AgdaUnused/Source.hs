@@ -40,8 +40,6 @@ data ImportLine = ImportLine
     -- a blanket @open import M@ (or @import M@) with no @using@.
   , ilPublic  :: !Bool
     -- ^ True if a trailing @public@ keyword was found.
-  , ilRaw     :: !T.Text
-    -- ^ Original line, kept for the user-facing report.
   , ilScope   :: !Int
     -- ^ Indent column of the enclosing @module … where@ declaration
     -- (0 for top-level). Two opens with different 'ilScope' values
@@ -108,7 +106,6 @@ scanImports raw =
                    , ilModule = T.empty
                    , ilUsing  = Nothing
                    , ilPublic = False
-                   , ilRaw    = T.pack line
                    , ilScope  = currentScope
                    }
             here = case ws of

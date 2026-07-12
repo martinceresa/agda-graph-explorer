@@ -24,7 +24,6 @@ module AgdaOptimization.Cluster
   , clusterAvgSim
   ) where
 
-import           Data.Foldable        ( foldl' )
 import qualified Data.IntSet          as IS
 import qualified Data.Sequence        as Seq
 import           Data.Sequence        ( ViewL(..), (|>) )

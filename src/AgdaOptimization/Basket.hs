@@ -40,12 +40,11 @@ module AgdaOptimization.Basket
   , run
   ) where
 
-import           Control.Concurrent      ( forkIO, threadDelay, killThread )
 import           Control.DeepSeq         ( rnf )
-import           Control.Exception       ( bracket, evaluate )
+import           Control.Exception       ( evaluate )
 import           Control.Monad           ( when )
 import           Control.Parallel.Strategies ( parMap, rdeepseq )
-import           Data.IORef              ( IORef, newIORef, readIORef, writeIORef )
+import           Data.IORef              ( IORef, newIORef, readIORef )
 import qualified Data.IntMap.Strict      as IM
 import           Data.IntMap.Strict      ( IntMap )
 import qualified Data.IntSet             as IS
@@ -62,7 +61,9 @@ import           Data.Aeson              ( (.=) )
 
 import           AgdaGraph.Index         ( Index(..), defAt )
 import           AgdaGraph.Schema        ( Definition(..), Kind(..) )
-import           AgdaOptimization.Common ( chunksOf, lastSegment )
+import           AgdaOptimization.Common ( chunksOf, computeTopFreqItems
+                                         , orderPair, orderTriple
+                                         , shortName, showD, withReaper )
 import           AgdaOptimization.FamilyFilter ( isForcedByFamily )
 import           AgdaOptimization.FlagSpec ( FlagSpec(..), SwitchVal(..)
                                            , parseFlags, applyFlagConfig )
@@ -401,46 +402,10 @@ run ix gOpts opts = do
             putStr (renderRulesTable ix (zip [1..] keptRules))
             putStrLn ""
 
--- | Spawn a reaper thread that flips the deadline 'IORef' once the
--- given wall-clock budget elapses. When @budgetSecs <= 0@ the action
--- runs unchanged with no thread spawned, so behaviour is identical to
--- the pre-budget code path.
---
--- Mirrors 'AgdaOptimization.Motif.withReaper' (same shape, 5 lines).
--- 'bracket' guarantees the reaper is killed before we return so we
--- don't leak a thread that would later 'writeIORef' into a stale ref.
-withReaper :: Double -> IORef Bool -> IO a -> IO a
-withReaper secs deadlineRef act
-  | secs <= 0 = act
-  | otherwise =
-      let !micros = floor (secs * 1e6) :: Int
-      in bracket
-           (forkIO (threadDelay micros >> writeIORef deadlineRef True))
-           killThread
-           (const act)
-
 -- | Specificity = support * lift. High specificity = the rule isn't
 -- just riding on a common RHS. Used as the tertiary sort key.
 specificity :: Rule -> Double
 specificity r = rSupport r * rLift r
-
--- | The set of items in the top @pct%@ of the support-count
--- distribution. Ties at the boundary are all included (we keep
--- everything with @count >= threshold@); this is the conservative
--- choice — slightly bigger exclusion set, slightly more rules dropped.
--- @pct <= 0@ yields the empty set (filter disabled).
-computeTopFreqItems :: Double -> IntMap Int -> IntSet
-computeTopFreqItems pct itemCounts
-  | pct <= 0  = IS.empty
-  | nItems == 0 = IS.empty
-  | otherwise = IS.fromList topItems
-  where
-    nItems    = IM.size itemCounts
-    -- ceiling so at least 1 item is excluded when pct > 0 (matches
-    -- "skip the top X%" intent at small item counts).
-    !nExclude = min nItems (max 1 (ceiling (pct / 100 * fromIntegral nItems)))
-    sortedDesc = sortOn (Down . snd) (IM.toList itemCounts)
-    topItems = map fst (take nExclude sortedDesc)
 
 -- | Header banner.
 headerLine :: Options -> String
@@ -548,19 +513,6 @@ chooseNBatches :: Double -> Int -> Int
 chooseNBatches budget nChunks
   | budget <= 0 = max 1 (min 16 nChunks)
   | otherwise   = max 1 (min 32 nChunks)
-
--- | Canonical (a, b) with a < b.
-orderPair :: Int -> Int -> (Int, Int)
-orderPair a b
-  | a <= b    = (a, b)
-  | otherwise = (b, a)
-
--- | Canonical (a, b, c) with a < b < c.
-orderTriple :: Int -> Int -> Int -> (Int, Int, Int)
-orderTriple a b c =
-  case sort [a, b, c] of
-    [x, y, z] -> (x, y, z)
-    _         -> (a, b, c)  -- unreachable: sort of 3-list yields 3-list
 
 -- | Count occurrences of every 2-subset (a, b) where a < b. Both
 -- items must be in @l1@; this is the anti-monotone prune at k=2 (an
@@ -883,14 +835,6 @@ renderRuleRow ix (rank, r) =
   , showD3 (specificity r)
   , showD3 (rPCorrected r)
   ]
-
--- | Last dot-component of the QName — basket rules need the short
--- form, full QNames blow the table up.
-shortName :: Index -> Int -> T.Text
-shortName ix i = lastSegment (defName (defAt ix i))
-
-showD :: Double -> String
-showD = show
 
 ----------------------------------------------------------------------
 -- Near-miss flagger.

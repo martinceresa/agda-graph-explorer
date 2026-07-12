@@ -29,6 +29,7 @@ import           System.Exit          ( exitFailure, exitSuccess, exitWith
                                       , ExitCode(..) )
 import           System.IO            ( hPutStrLn, stderr )
 
+import           AgdaGraph.ConfigCore ( extractConfigFlag )
 import           AgdaGoals.Bucket     ( Bucket(..), GoalOccurrence(..)
                                       , bucketGoals, rankBuckets )
 import           AgdaGoals.Canon      ( CanonicalGoal(..) )
@@ -136,19 +137,6 @@ parseArgs seed = go seed
           _         -> Left $ "--top-n expects an integer, got: " ++ v
       | "--" `isPrefixOf` a = Left $ "unrecognised flag: " ++ a
       | otherwise           = go (o { optRoots = optRoots o ++ [a] }) as
-
--- | Strip @--config=PATH@ (or @--config PATH@) before main CLI
--- parsing.
-extractConfigFlag :: [String] -> (Maybe FilePath, [String])
-extractConfigFlag = go []
-  where
-    go acc []                 = (Nothing, reverse acc)
-    go acc (a:rest)
-      | Just v <- stripPrefix "--config=" a = (Just v, reverse acc ++ rest)
-      | a == "--config" = case rest of
-          (v:rest') -> (Just v, reverse acc ++ rest')
-          []        -> (Nothing, reverse acc)
-      | otherwise = go (a : acc) rest
 
 ----------------------------------------------------------------------
 -- Config glue.

@@ -28,7 +28,6 @@ module AgdaGoals.Driver
   , DriverResult(..)
   , DriverError(..)
   , driverErrorTag
-  , runDriver
   , runDriverBatch
   ) where
 
@@ -225,13 +224,6 @@ loadOnWorker ref scfg tmpl f = do
                  Right s -> writeIORef ref s >> pure s
                  Left _  -> pure sess        -- respawn failed; the load will SendDied
   loadInSession sess' (tmpl { dcModuleFile = f })
-
--- | Drive a single module: one process, loaded once, then closed. A thin
--- wrapper over 'runDriverBatch' so the one-shot and batch paths share the
--- same session machinery.
-runDriver :: DriverConfig -> IO DriverResult
-runDriver cfg = headOr (DriverError NoGoalsReply) <$> runDriverBatch cfg [dcModuleFile cfg]
-  where headOr d xs = case xs of (x:_) -> x; [] -> d
 
 -- | Send one @Cmd_load@ over an existing session and interpret the reply
 -- burst into a 'DriverResult'.

@@ -9,7 +9,6 @@ module AgdaOptimization.Condense
   , buildCondensation
   ) where
 
-import           Data.List          ( foldl' )
 import qualified Data.Graph         as G
 import qualified Data.IntMap.Strict as IM
 import qualified Data.IntSet        as IS

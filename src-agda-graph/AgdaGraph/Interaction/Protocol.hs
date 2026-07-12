@@ -33,7 +33,6 @@ module AgdaGraph.Interaction.Protocol
 
     -- * Parsing
   , parseReply
-  , parseReplyLines
   , stripPromptPrefix
   , promptToken
   ) where
@@ -191,19 +190,6 @@ parseReply raw =
               Right v  -> case A.parseEither replyParser v of
                 Left err -> Left ("schema mismatch: " ++ err)
                 Right r  -> Right (Just r)
-
--- | Parse a whole burst by splitting on newlines and decoding each
--- non-empty line. Decode failures are accumulated per-line; successful
--- 'Reply's come back in stream order.
-parseReplyLines :: BL.ByteString -> ([String], [Reply])
-parseReplyLines bs =
-  let ls0 = BLC.lines bs
-      go [] !errs !okR = (reverse errs, reverse okR)
-      go (l:ls) !errs !okR = case parseReply l of
-        Left e          -> go ls (e : errs) okR
-        Right Nothing   -> go ls errs       okR
-        Right (Just r)  -> go ls errs       (r : okR)
-  in go ls0 [] []
 
 ----------------------------------------------------------------------
 -- aeson wiring.

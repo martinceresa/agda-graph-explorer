@@ -33,7 +33,6 @@ module AgdaGraph.GoalCanon
 
     -- * Conclusion / token extraction (find_lemma)
   , conclusionOf
-  , identTokens
   , tokenJaccard
     -- * Match-oriented tokens (find_lemma retrieval)
   , matchTokens
@@ -42,6 +41,10 @@ module AgdaGraph.GoalCanon
   , weightedCoverage
   , isOpToken
   , stripQualifiers
+
+    -- * Qualified-name helpers
+  , baseComponent
+  , moduleComponent
   ) where
 
 import           Control.DeepSeq  ( NFData(..) )
@@ -111,7 +114,7 @@ canonicalizeGoal raw =
 -- and @Deps.hashQName@ use) so any downstream consumer that already keys
 -- on @hashQName@ can cross-reference.
 hashCanonical :: CanonicalGoal -> Word64
-hashCanonical (CanonicalGoal t) = fromIntegral (hashString (T.unpack t))
+hashCanonical (CanonicalGoal t) = hashString (T.unpack t)
 
 ----------------------------------------------------------------------
 -- Implementation.
@@ -217,48 +220,6 @@ conclusionOf t = T.strip (go 0 (T.unpack t) "")
     arrowAt ('-' : '>' : r) = Just r
     arrowAt _               = Nothing
 
--- | The /name/ tokens of a (canonicalised) type string: the identifier
--- and operator runs that carry discriminating information for matching,
--- dropping the alpha-renamed / bound /lowercase variables/ (which a
--- canonicaliser turns into @v0@\/@v1@\/… and which say nothing about
--- /what/ a type is about). Two flavours of token are scanned:
---
---   * /identifier/ runs (per 'canonicalizeGoal''s 'identStart' \/
---     'identChar', so the boundary matches the alpha-renamer exactly):
---     kept when the run begins with an uppercase letter, a non-ASCII
---     letter, or contains any uppercase letter — i.e. a type\/
---     constructor\/qualified name like @List@, @Nat@, @≡@-free names —
---     and dropped when it is a bare lowercase ASCII run (a @v0@
---     placeholder or surviving bound var). Qualified names like
---     @Data.List@ split on the dot into per-component tokens, so @List@
---     survives even behind a lowercase qualifier.
---
---   * /operator/ runs: maximal runs of symbol characters that are not
---     whitespace, brackets, the dot, or alphanumerics — e.g. @∷@, @≡@,
---     @++@, @→@. These are highly discriminating for lemma conclusions
---     (an equation @… ≡ …@ vs. a function @… → …@), so they are kept
---     verbatim. (The arrow @→@ rarely survives into a /conclusion/ since
---     'conclusionOf' splits on top-level arrows, but nested ones do.)
-identTokens :: Text -> Set Text
-identTokens = Set.fromList . map T.pack . scan . T.unpack
-  where
-    scan [] = []
-    scan s@(c : _)
-      | identStart c =
-          let (tok, rest) = span identChar s
-          in (if keepIdent tok then (tok :) else id) (scan rest)
-      | isOpChar c =
-          let (tok, rest) = span isOpChar s
-          in tok : scan rest
-      | otherwise = scan (drop 1 s)
-    -- Keep an identifier token unless it is a bare lowercase-ASCII run
-    -- (an alpha-rename placeholder or surviving bound var).
-    keepIdent []          = False
-    keepIdent tok@(c : _) =
-      isUpper c
-        || not (isAsciiLower c || isDigit c || c == '_')   -- non-ASCII letter
-        || any isUpper tok                                   -- mixed-case name
-
 -- | Jaccard similarity of two token sets: @|A ∩ B| / |A ∪ B|@. Two empty
 -- sets are defined to be @0@ (no shared evidence ⇒ no match), so an
 -- empty goal conclusion never spuriously scores @1.0@ against another
@@ -274,10 +235,9 @@ tokenJaccard a b
 ----------------------------------------------------------------------
 -- Match-oriented tokens (find_lemma goal→lemma retrieval).
 --
--- 'identTokens' above is tuned for goal /bucketing/; the helpers here
--- are tuned for /retrieval/, where the query is a bare goal type and the
--- candidates are fully-qualified stored signatures. Three differences
--- decide whether the right lemma is rankable at all:
+-- These helpers are tuned for /retrieval/, where the query is a bare goal
+-- type and the candidates are fully-qualified stored signatures. Three
+-- differences decide whether the right lemma is rankable at all:
 --
 --   1. A qualified name is reduced to its final component before
 --      tokenising, so @Data.Nat._+_@ contributes @+@ and @Data.List.map@
@@ -307,6 +267,13 @@ isOpToken t = case T.uncons t of
 -- (@Data.Nat._+_@ → @_+_@, @map@ → @map@).
 baseComponent :: Text -> Text
 baseComponent = snd . T.breakOnEnd "."
+
+-- | Module part of a qualified name: everything before the final dotted
+-- component (@Data.Nat.Base.ℕ@ → @Data.Nat.Base@). @""@ when unqualified.
+moduleComponent :: Text -> Text
+moduleComponent qn = case fst (T.breakOnEnd "." qn) of
+  pre | T.null pre -> ""
+      | otherwise  -> T.dropEnd 1 pre
 
 -- | Match-oriented tokens of a type string (see the section note). The
 -- @keep@ predicate decides which bare-lowercase identifier runs survive

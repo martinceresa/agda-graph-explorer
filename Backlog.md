@@ -33,6 +33,14 @@ feature requests see [Deferred.md](Deferred.md).
   concrete rewrite candidates worth automating. Cross-module rename (inline
   single-callee, singleton `let`) is round 2 only. See [TODO.md](TODO.md).
 
+- **Remaining behavior-preserving cleanups** (from the 2026-07-12 simplification
+  pass, [Changelog.md](Changelog.md)). Two low-priority items left undone: fold
+  `Query`'s six repeated `resolve-or-notFound` prologues into a `withResolved`
+  helper — deferred because it restructures control flow in code with no
+  test/oracle coverage — and trim three history-narrating comments (the
+  `BuildInfo` war-story, the `LemmaRank` R20 changelog note, and the misplaced
+  lazy-cache doc in `State`).
+
 ## Refused
 
 - **`agda-simplify` umbrella executable** (round 6). The proposal folded

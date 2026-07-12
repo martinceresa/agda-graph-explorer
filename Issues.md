@@ -727,3 +727,46 @@ cannot (and must not, per G1) touch; both rows carry `[carrier: Nat]`.
 JSON string *or* an integral JSON number (rendered in decimal); `withGoal`
 uses it, and its error echoes the accepted forms (`g0`, or a bare integer).
 Verified live: `auto goal=0` (JSON integer) now runs instead of erroring.
+
+### I9 — `load-bearing` entry-module guess is input-order dependent on a tie
+
+- **Reported:** 2026-07-12 — audit during the behavior-preserving simplification
+  pass (not a benchmark run); see [Changelog.md](Changelog.md).
+- **Resolved:** 2026-07-12 — `guessEntryModule` now uses the same total-order
+  tie-break as `gravity`.
+- **Component:** `src/AgdaOptimization/LoadBearing.hs`.
+- **Severity:** low — surfaces only when two or more modules tie on public-def
+  count *and* equal name length; the winner then depended on the def vector's
+  traversal order rather than a stable key.
+
+#### Summary
+
+`LoadBearing.guessEntryModule` ranked candidate modules by
+`(Down count, name-length)`. On a tie in both keys the stable sort fell back to
+the hand-rolled accumulator's insertion order — i.e. the order defs happen to
+appear in the `Index` vector — so the chosen entry module (and the
+`results=terminals` fallback banner) was not a function of the graph alone.
+`gravity`'s sibling `guessEntryModule` already used the deterministic
+`(Down count, name-length, name)` key; `load-bearing` now matches it. No fixture
+output changed (`test/deps.json` has no such tie), so the acceptance oracle
+stayed byte-identical.
+
+### I10 — `agda-explore` and `agda-unused` disagree on which literate extensions count as Agda sources
+
+- **Reported:** 2026-07-12 — audit during the simplification pass; see
+  [Changelog.md](Changelog.md).
+- **Resolved:** 2026-07-12 — `isAgdaFile` extended to the full set.
+- **Component:** `src/MainMcp.hs` (`isAgdaFile`), mirroring `src/MainUnused.hs`
+  (`isAgdaSource`).
+- **Severity:** low — `agda-explore`'s file discovery / entry detection silently
+  skipped `.lagda.tree` and `.lagda.typ` sources that `agda-unused` accepts.
+
+#### Summary
+
+`agda-unused`'s `isAgdaSource` recognised `.agda`, `.lagda`, `.lagda.md`,
+`.lagda.rst`, `.lagda.tex`, `.lagda.org`, `.lagda.tree`, `.lagda.typ`; the
+`agda-explore` daemon's `isAgdaFile` omitted the last two, so a project with
+those literate modules had them ignored when the daemon walked the tree or
+classified a positional CLI argument as an entry file. The two lists are now the
+same set. (A single shared constant would prevent future drift — noted, not done,
+since the two executables don't currently share a source-discovery module.)

@@ -52,15 +52,14 @@ import qualified Network.Socket.ByteString as NSB
 import           System.Directory        (createDirectoryIfMissing)
 import           System.FilePath         (takeDirectory)
 
--- | Bind the control socket (probing upward from @startPort@), write the
--- bound port to @portFile@ (creating its directory), and fork the accept
--- loop. Returns the bound port, or 'Nothing' if none in the probe range
--- was free. @runCheck@ is the check action: file path in, verdict text
--- (or an operational error) out.
 -- | One @file=…@ route: the path prefix (query marker included, e.g.
 -- @\"/check?\"@) and the callback to run with the decoded @file@.
 type Route = (BS.ByteString, Text -> IO (Either Text Text))
 
+-- | Bind the control socket (probing upward from @startPort@), write the
+-- bound port to @portFile@ (creating its directory), and fork the accept
+-- loop over @routes@. Returns the bound port, or 'Nothing' if none in the
+-- probe range was free.
 startControl :: Int -> FilePath -> [Route] -> IO (Maybe Int)
 startControl startPort portFile routes = do
   mbound <- bindFirstAvailable startPort

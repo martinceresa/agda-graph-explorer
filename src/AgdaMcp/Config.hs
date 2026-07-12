@@ -22,7 +22,6 @@
 -- lifts @--config@ out of argv before the hand-rolled option parser sees it.
 module AgdaMcp.Config
   ( FileConfig(..)
-  , defaultFileConfig
   , Opts(..)
   , discoverConfigPath
   , loadConfig
@@ -152,44 +151,6 @@ data FileConfig = FileConfig
   , fcControlPort    :: Maybe Int
   , fcCoverageIgnore :: Maybe [String]
   , fcOverlayGraphs  :: Maybe [FilePath]
-  }
-
-defaultFileConfig :: FileConfig
-defaultFileConfig = FileConfig
-  { fcEntry         = Nothing
-  , fcEntries       = Nothing
-  , fcInclude       = Nothing
-  , fcGraph         = Nothing
-  , fcProject       = Nothing
-  , fcOutDir        = Nothing
-  , fcDepsBin       = Nothing
-  , fcUnusedBin     = Nothing
-  , fcNoTermHashes  = Nothing
-  , fcNoSignatures  = Nothing
-  , fcNormaliseSigs = Nothing
-  , fcShowImplicit  = Nothing
-  , fcMinTermDepth  = Nothing
-  , fcNoAutoRebuild = Nothing
-  , fcNoWatch       = Nothing
-  , fcNoIncremental = Nothing
-  , fcRequireWellTyped = Nothing
-  , fcStrictProducer = Nothing
-  , fcNoQueryLog    = Nothing
-  , fcNoAutoResolve = Nothing
-  , fcEnableInteract = Nothing
-  , fcAgdaBin        = Nothing
-  , fcInteractArgs   = Nothing
-  , fcInteractHeapMb = Nothing
-  , fcMaxSessions    = Nothing
-  , fcSessionIdleSecs = Nothing
-  , fcInspect        = Nothing
-  , fcInspectPort    = Nothing
-  , fcNoAutoHints    = Nothing
-  , fcAutoHintsLimit = Nothing
-  , fcAutoHintsSecs  = Nothing
-  , fcControlPort    = Nothing
-  , fcCoverageIgnore = Nothing
-  , fcOverlayGraphs  = Nothing
   }
 
 instance FromJSON FileConfig where

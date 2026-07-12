@@ -112,7 +112,7 @@ import           AgdaGraph.Schema            ( Definition(..), Kind(..)
                                              , State(..) )
 import           AgdaOptimization.FlagSpec   ( FlagSpec(..), SwitchVal(..)
                                              , parseFlags, applyFlagConfig )
-import           AgdaOptimization.Common     ( computeExcludedSet )
+import           AgdaOptimization.Common     ( computeExcludedSet, showD )
 import           AgdaOptimization.Report     ( GlobalOpts(..), OutFormat(..)
                                              , emitJsonReport, renderTable
                                              , withHumanOutput )
@@ -926,11 +926,6 @@ showFixed3 !x =
       sign   = if n < 0 then "-" else ""
       pad3 v = let s = show v in replicate (3 - length s) '0' ++ s
   in sign ++ show q ++ "." ++ pad3 r
-
--- | Bare @Show@ for a 'Double' weight value — keeps trailing zeroes
--- off the printed banner.
-showD :: Double -> String
-showD = show
 
 ------------------------------------------------------------------------
 -- JSON rendering

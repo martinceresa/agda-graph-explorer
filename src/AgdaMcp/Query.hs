@@ -24,7 +24,6 @@ module AgdaMcp.Query
   , querySimilarTypes
   , querySimilarBodies
   , queryFindLemma
-  , goalHintNames
   , goalHintCands
   , querySearch
   , queryStats
@@ -63,7 +62,7 @@ import           AgdaGraph.Schema   (Access (..), Definition (..),
 import           AgdaGraph.Similarity (SigBodyFingerprints (..), fingerprintSize)
 import           AgdaGraph.WL       (weightedJaccard)
 import           AgdaGraph.GoalCanon (conclusionOf, matchTokens,
-                                     shapeTokens, stripQualifiers)
+                                     shapeTokens, stripQualifiers, baseComponent)
 import           AgdaGraph.LemmaRank (RankEnv (..), LemmaScore,
                                      rankLemmaCandidates, goalCarrierSegments,
                                      moduleSegments)
@@ -527,6 +526,13 @@ filterError mKindTxt mStateTxt =
                        <> "` — use one of defined / postulate / hole / failed."
     _             -> Nothing
 
+-- | @unsafe=@ escape-kind predicate shared by @search@ and @roots@:
+-- @any@\/@true@\/empty ⇒ any escape present; a concrete tag ⇒ that tag.
+unsafeMatches :: Text -> Definition -> Bool
+unsafeMatches u d
+  | u `elem` ["any", "true", ""] = not (null (defUnsafe d))
+  | otherwise                    = u `elem` defUnsafe d
+
 -- | Validate the optional @unsafe@ escape-kind filter shared by @search@
 -- and @roots@: the enumerate-all aliases (@any@ / @true@ / empty) or a
 -- concrete tag. 'Just' a user-facing error, or 'Nothing' when it parses
@@ -974,18 +980,13 @@ queryRoots ld lim byMod chains mModPrefix mKindTxt mStateTxt mUnsafe name =
     -- kind/state assumption predicate; kind/state still narrow it if both
     -- are given. No filter at all ⇒ paper-level assumptions.
     isRoot dx = case mUnsafe of
-      Just u  -> unsafeMatch u dx
+      Just u  -> unsafeMatches u dx
                    && maybe True (== defKind dx) mKind
                    && maybe True (== defState dx) mState
       Nothing -> case (mKind, mState) of
         (Nothing, Nothing) ->
           defState dx == Postulate || defKind dx `elem` [KPostulate, KPrimitive]
         _ -> maybe True (== defKind dx) mKind && maybe True (== defState dx) mState
-    -- unsafe=any|true|"" ⇒ any escape; unsafe=<kind> ⇒ that one (mirrors
-    -- `search`'s unsafePred).
-    unsafeMatch u dx
-      | u `elem` ["any", "true", ""] = not (null (defUnsafe dx))
-      | otherwise                    = u `elem` defUnsafe dx
     filterDescr mk ms mp =
       let core = case mUnsafe of
             Just u
@@ -1185,10 +1186,9 @@ queryFindLemma
   -> [Text]         -- ^ live context binder types (carrier affinity; @[]@ read-side)
   -> Text
 queryFindLemma ld lim minSim mKindTxt mModPrefix mGoal mAnchor ctxTypes =
-  case badParse parseKind mKindTxt of
-    Just bad -> "Unknown kind filter `" <> bad <> "` — use one of function / "
-                  <> "projection / datatype / record / constructor / postulate / primitive / other."
-    Nothing -> case mAnchor of
+  case filterError mKindTxt Nothing of
+    Just err -> err
+    Nothing  -> case mAnchor of
       Just anchor -> anchorMode anchor
       Nothing     -> case mGoal of
         Just goal -> freeTextMode goal
@@ -1231,9 +1231,9 @@ queryFindLemma ld lim minSim mKindTxt mModPrefix mGoal mAnchor ctxTypes =
     -- Free-text mode: qualifier-stripped name/shape tokens + operator-
     -- weighted coverage (see 'rankGoalCandidates'). Ranking lives in the
     -- shared top-level 'rankGoalCandidates' so `auto`'s Mimer-hint seeding
-    -- ('goalHintNames') scores identically; this only renders it.
+    -- ('goalHintCands') scores identically; this only renders it.
     freeTextMode goal =
-      let vocab    = Set.fromList [ baseName (defName d) | d <- realDefs ld ]
+      let vocab    = Set.fromList [ baseComponent (defName d) | d <- realDefs ld ]
           keep t   = t `Set.member` vocab
           concl    = conclusionOf goal
           gbase    = matchTokens keep concl        -- for the note only
@@ -1315,7 +1315,7 @@ rankGoalCandidates ld candKeep minSim goal ctxTypes =
 -- carrier-matching instance is tried first. Empty on a signature-less graph.
 goalHintCands :: Loaded -> Int -> Text -> [(Text, Definition)]
 goalHintCands ld n goal =
-  take n (ordNubOn fst [ (baseName (defName d), d)
+  take n (ordNubOn fst [ (baseComponent (defName d), d)
                        | (_, d) <- rankGoalCandidates ld (const True) 0.4 goal [] ])
   where
     ordNubOn key = go Set.empty
@@ -1325,14 +1325,8 @@ goalHintCands ld n goal =
           | key x `Set.member` seen = go seen xs
           | otherwise               = x : go (Set.insert (key x) seen) xs
 
--- | Up to @n@ Mimer hint base-names for a goal (see 'goalHintCands').
-goalHintNames :: Loaded -> Int -> Text -> [Text]
-goalHintNames ld n goal = map fst (goalHintCands ld n goal)
-
 -- | Base (final dotted component) of a qualified name
 -- (@Data.Nat.Properties.+-comm@ → @+-comm@).
-baseName :: Text -> Text
-baseName = snd . T.breakOnEnd "."
 
 -- ---------------------------------------------------------------------
 -- search / stats
@@ -1358,13 +1352,8 @@ querySearch ld topLevelOnly mModPrefix mKindTxt mStateTxt mUnsafe lim fmt q =
               keep d = (not topLevelOnly || not (isLocalName d))
                          && maybe True (== defKind d)  mKind
                          && maybe True (== defState d) mState
-                         && unsafePred mUnsafe d
+                         && maybe True (\u -> unsafeMatches u d) mUnsafe
                          && modulePrefixPred mModPrefix d
-              -- unsafe=true|any (or empty) ⇒ any escape; unsafe=<kind> ⇒ that one.
-              unsafePred Nothing  _ = True
-              unsafePred (Just u) d'
-                | u `elem` ["true", "any", ""] = not (null (defUnsafe d'))
-                | otherwise                    = u `elem` defUnsafe d'
               notes  = T.concat
                          [ if topLevelOnly then " (top-level only)" else ""
                          , maybe "" (\p -> " module_prefix=" <> p) mModPrefix

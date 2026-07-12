@@ -61,7 +61,7 @@ import qualified Data.ByteString.Lazy as BL
 import           Data.Char            (isDigit)
 import           Data.IORef
 import qualified Data.IntMap.Strict   as IM
-import           Data.List            (foldl', isInfixOf, isPrefixOf, isSuffixOf, maximumBy, sort)
+import           Data.List            (isInfixOf, isPrefixOf, isSuffixOf, maximumBy, sort)
 import qualified Data.Map.Strict      as M
 import           Data.Maybe           (catMaybes, fromMaybe, isJust, mapMaybe)
 import qualified Data.Set             as S

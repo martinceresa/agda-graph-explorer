@@ -18,7 +18,6 @@ module AgdaOptimization.Report
     -- * Formatting
   , showD3
     -- * JSON output
-  , writeJsonReport
   , emitJsonReport
     -- * Human output (with optional file redirect)
   , withHumanOutput

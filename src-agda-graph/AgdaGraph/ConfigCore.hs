@@ -25,10 +25,12 @@ module AgdaGraph.ConfigCore
   , discoverInDir
   , firstExisting
   , loadYamlConfig
+  , extractConfigFlag
   ) where
 
 import           Control.Exception  ( IOException, catch )
 import           Data.Aeson         ( FromJSON )
+import           Data.List          ( stripPrefix )
 import qualified Data.Yaml          as Y
 
 import           System.Directory   ( doesDirectoryExist, doesFileExist
@@ -82,6 +84,21 @@ discoverInDir spec start = do
              in if parent == d
                   then pure Nothing   -- hit filesystem root
                   else walkUp parent
+
+-- | Strip @--config=PATH@ (or @--config PATH@) out of argv before the
+-- per-executable option parser runs, returning the path (if any) and the
+-- remaining args. A malformed trailing @--config@ with no value is left for
+-- the main parser to diagnose.
+extractConfigFlag :: [String] -> (Maybe FilePath, [String])
+extractConfigFlag = go []
+  where
+    go acc []       = (Nothing, reverse acc)
+    go acc (a:rest)
+      | Just v <- stripPrefix "--config=" a = (Just v, reverse acc ++ rest)
+      | a == "--config" = case rest of
+          (v:rest') -> (Just v, reverse acc ++ rest')
+          []        -> (Nothing, reverse acc)
+      | otherwise = go (a : acc) rest
 
 -- | Return the first path in the list that exists as a regular file.
 firstExisting :: [FilePath] -> IO (Maybe FilePath)

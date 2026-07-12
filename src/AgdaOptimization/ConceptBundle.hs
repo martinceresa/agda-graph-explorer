@@ -74,7 +74,9 @@ import           Data.Aeson              ( (.=) )
 
 import           AgdaGraph.Index         ( Index(..), defAt )
 import           AgdaGraph.Schema        ( Definition(..), Provenance(..) )
-import           AgdaOptimization.Common ( lastSegment )
+import           AgdaOptimization.Common ( shortName, showD
+                                         , orderPair, orderTriple
+                                         , computeTopFreqItems )
 import           AgdaOptimization.FamilyFilter ( isForcedByFamily )
 import           AgdaOptimization.FlagSpec ( FlagSpec(..), SwitchVal(..)
                                            , parseFlags, applyFlagConfig )
@@ -567,16 +569,6 @@ collectInfo ix l2 l3 l4 = foldl' step (Map.empty, Map.empty, Map.empty)
 -- Apriori counting. Mirrors 'AgdaOptimization.Basket': 'Map _ Int',
 -- not 'Map _ [Int]' — owners are collected post-prune in 'collectInfo'.
 
-orderPair :: Int -> Int -> (Int, Int)
-orderPair a b
-  | a <= b    = (a, b)
-  | otherwise = (b, a)
-
-orderTriple :: Int -> Int -> Int -> (Int, Int, Int)
-orderTriple a b c = case sort [a, b, c] of
-  [x, y, z] -> (x, y, z)
-  _         -> (a, b, c)  -- unreachable
-
 orderQuad :: Int -> Int -> Int -> Int -> (Int, Int, Int, Int)
 orderQuad a b c d = case sort [a, b, c, d] of
   [w, x, y, z] -> (w, x, y, z)
@@ -678,20 +670,6 @@ partitionForced ix fraction = foldr step ([], 0)
           (b : keep, dropped)
 
 ----------------------------------------------------------------------
--- Top-frequency exclusion (mirrors Basket).
-
-computeTopFreqItems :: Double -> IntMap Int -> IntSet
-computeTopFreqItems pct itemCounts
-  | pct <= 0    = IS.empty
-  | nItems == 0 = IS.empty
-  | otherwise   = IS.fromList topItems
-  where
-    nItems    = IM.size itemCounts
-    !nExclude = min nItems (max 1 (ceiling (pct / 100 * fromIntegral nItems)))
-    sortedDesc = sortOn (Down . snd) (IM.toList itemCounts)
-    topItems = map fst (take nExclude sortedDesc)
-
-----------------------------------------------------------------------
 -- Rendering.
 
 headerLine :: Options -> Bool -> String
@@ -748,11 +726,6 @@ renderBundleRow ix (rank, b) =
   , showD3 (specificity b)
   ]
 
-shortName :: Index -> Int -> T.Text
-shortName ix i = lastSegment (defName (defAt ix i))
-
-showD :: Double -> String
-showD = show
 
 ----------------------------------------------------------------------
 -- JSON output.

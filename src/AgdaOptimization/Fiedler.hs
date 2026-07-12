@@ -56,8 +56,7 @@ import           System.Exit                 ( ExitCode(..), exitWith )
 import           System.FilePath             ( (</>), takeDirectory )
 import           System.IO                   ( hClose, hPutStrLn, openTempFile
                                              , stderr )
-import           System.Directory            ( canonicalizePath, doesFileExist
-                                             , removeFile )
+import           System.Directory            ( canonicalizePath, removeFile )
 import           System.Process              ( readProcessWithExitCode )
 
 import qualified Data.Aeson                  as A
@@ -65,6 +64,7 @@ import           Data.Aeson                  ( (.=), (.:), (.:?), (.!=) )
 import qualified Data.ByteString.Lazy        as BL
 
 import           AgdaGraph.Index             ( Index(..), defAt )
+import           AgdaGraph.ConfigCore        ( firstExisting )
 import           AgdaGraph.Schema            ( Definition(..) )
 
 import           AgdaOptimization.FlagSpec   ( FlagSpec(..)
@@ -191,12 +191,6 @@ resolveHelperPath opts = do
 tryIO :: IO a -> IO (Maybe a)
 tryIO io = (Just <$> io) `catch` (\(_ :: SomeException) -> pure Nothing)
 
--- | First file on the candidate list whose path exists on disk.
-firstExisting :: [FilePath] -> IO (Maybe FilePath)
-firstExisting []     = pure Nothing
-firstExisting (p:ps) = do
-  ok <- doesFileExist p
-  if ok then pure (Just p) else firstExisting ps
 
 -- | Cabal-baked package version as a dotted string (e.g. @"1.1"@); used
 -- to build the @share/agda-deps-<ver>/@ fallback path.

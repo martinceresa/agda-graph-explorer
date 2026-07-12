@@ -1,5 +1,5 @@
--- | Thin re-export of the shared @--interaction-json@ reply parser
--- ('AgdaGraph.Interaction.Protocol'), which lives in the @agda-graph@
+-- | Thin re-export of the shared @--interaction-json@ wire shapes
+-- ('AgdaGraph.Interaction.Protocol'), which live in the @agda-graph@
 -- library so @agda-goals@ and @agda-explore@'s write-side interaction
 -- bridge share one parser.
 module AgdaGoals.Protocol
@@ -9,11 +9,6 @@ module AgdaGoals.Protocol
   , Goal(..)
   , GoalRange(..)
   , RangePos(..)
-
-    -- * Parsing
-  , parseReply
-  , parseReplyLines
-  , stripPromptPrefix
   ) where
 
 import AgdaGraph.Interaction.Protocol
@@ -22,7 +17,4 @@ import AgdaGraph.Interaction.Protocol
   , Goal(..)
   , GoalRange(..)
   , RangePos(..)
-  , parseReply
-  , parseReplyLines
-  , stripPromptPrefix
   )

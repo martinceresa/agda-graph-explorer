@@ -28,9 +28,10 @@
 -- forward clusters are mostly noise w.r.t. the delta signal. Pass
 -- @--max-cluster-spread=0@ to disable.
 --
--- WL refinement, weighted-Jaccard, union-find and candidate selection
--- are copied verbatim from 'Fingerprint.hs'; sharing the core helpers
--- keeps forward fingerprints byte-comparable between the two analyses.
+-- WL refinement, weighted-Jaccard, union-find and candidate selection come
+-- from the shared 'AgdaGraph.WL' / 'AgdaOptimization.UnionFind' /
+-- 'AgdaOptimization.Cluster' helpers, so forward fingerprints stay
+-- byte-comparable across the analyses that use them.
 module AgdaOptimization.Echo
   ( Options(..)
   , defaultOptions

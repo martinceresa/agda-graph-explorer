@@ -50,7 +50,8 @@ import qualified Data.Text        as T
 import           AgdaGraph.Schema    ( Definition(..), Kind(..) )
 import           AgdaGraph.GoalCanon ( conclusionOf, matchTokens, nameTokens
                                      , shapeTokens, weightedCoverage
-                                     , tokenJaccard, isOpToken )
+                                     , tokenJaccard, isOpToken
+                                     , baseComponent, moduleComponent )
 
 -- | Everything the ranker needs from a loaded graph snapshot, as plain
 -- data (no @Loaded@ / @AgdaMcp.State@ dependency, so it is testable).
@@ -150,24 +151,12 @@ genericSegments = Set.fromList
 carrierMap :: RankEnv -> Map Text (Set Text)
 carrierMap RankEnv{..} =
   Map.unionsWith Set.union $
-    [ Map.singleton (baseName (defName d)) (Set.singleton (defModule d))
+    [ Map.singleton (baseComponent (defName d)) (Set.singleton (defModule d))
     | d <- reDefs, defKind d `elem` [KConstructor, KDatatype, KRecord] ]
     ++
-    [ Map.singleton (baseName k) (Set.singleton (moduleOf k))
+    [ Map.singleton (baseComponent k) (Set.singleton (moduleComponent k))
     | k <- Map.keys reAliases ]
 
 envVocab :: RankEnv -> Set Text
-envVocab env = Set.fromList [ baseName (defName d) | d <- reDefs env ]
+envVocab env = Set.fromList [ baseComponent (defName d) | d <- reDefs env ]
 
--- | Final dotted component of a (possibly qualified) name
--- (@Data.Nat.Properties.+-comm@ → @+-comm@).
-baseName :: Text -> Text
-baseName = snd . T.breakOnEnd "."
-
--- | The module part of a fully-qualified node key: everything before the
--- final dotted component (@Data.Nat.Base.ℕ@ → @Data.Nat.Base@). @""@ when
--- unqualified.
-moduleOf :: Text -> Text
-moduleOf qn = case fst (T.breakOnEnd "." qn) of
-  pre | T.null pre -> ""              -- unqualified: no module part
-      | otherwise  -> T.dropEnd 1 pre  -- strip the trailing '.'

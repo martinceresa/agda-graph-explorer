@@ -30,10 +30,10 @@
 -- 'idxForward' only and emit one cluster set as "body twins" with no
 -- signature/body split, after a clear stderr warning.
 --
--- WL hashing, weighted Jaccard, and tag codes are copied verbatim from
--- 'AgdaOptimization.Fingerprint'. Keeping the hash mixer and tag codes
--- bit-identical means a Silhouette body fingerprint and a Fingerprint
--- body-only run produce the same colour histograms.
+-- WL hashing, weighted Jaccard, and tag codes come from the shared
+-- 'AgdaGraph.WL' / 'AgdaGraph.Similarity' core. Keeping the hash mixer and
+-- tag codes bit-identical means a Silhouette body fingerprint and a
+-- Fingerprint body-only run produce the same colour histograms.
 module AgdaOptimization.Silhouette
   ( Options(..)
   , defaultOptions

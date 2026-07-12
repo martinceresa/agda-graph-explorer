@@ -33,7 +33,7 @@ import qualified Data.IntSet        as IS
 import           Data.Vector        ( Vector )
 import qualified Data.Vector        as V
 
-import           AgdaGraph.Index    ( Index(..) )
+import           AgdaGraph.Index    ( Index(..), closureFrom )
 import           AgdaGraph.Schema   ( Provenance(..) )
 import           AgdaGraph.WL       ( ColorVec, Fingerprint, fingerprintAt
                                     , initialColors, refine )
@@ -78,18 +78,10 @@ splitSigBodyAdj ix = case idxEdgeProvenance ix of
     in (sig, body, True)
 
 -- | Unbounded rooted subtree under the supplied adjacency: every node
--- reachable from @root@ via forward edges, plus the root itself.
--- Iterative DFS with an 'IntSet' accumulator (the set is both the
--- visited-marker and the return value).
+-- reachable from @root@ via forward edges, plus the root itself. A thin
+-- specialisation of 'closureFrom' (seed kept).
 subtreeUnder :: IM.IntMap IS.IntSet -> Int -> IS.IntSet
-subtreeUnder adj root =
-  let go !seen [] = seen
-      go !seen (n : rest) =
-        let !nbrs  = IM.findWithDefault IS.empty n adj
-            !fresh = IS.difference nbrs seen
-            !seen' = IS.union seen fresh
-        in go seen' (IS.foldr (:) rest fresh)
-  in go (IS.singleton root) [root]
+subtreeUnder adj root = closureFrom True adj (IS.singleton root)
 
 -- | Number of nodes a fingerprint summarises (its rooted subtree size):
 -- the sum of the per-colour counts. Equals @IS.size (subtreeUnder adj i)@

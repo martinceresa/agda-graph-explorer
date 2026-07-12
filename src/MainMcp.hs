@@ -38,6 +38,7 @@ import           System.FilePath    (isAbsolute, splitSearchPath, takeDirectory,
                                      takeFileName, (</>))
 import           System.IO          (hPutStrLn, stderr)
 
+import           AgdaGraph.ConfigCore (firstExisting)
 import           AgdaMcp.Config     (Opts (..), applyConfig,
                                      discoverConfigPath, extractConfigArg,
                                      loadConfig, orderNub)
@@ -141,7 +142,8 @@ parseOpts (x : xs) o = case x of
 
 isAgdaFile :: FilePath -> Bool
 isAgdaFile f = any (`isSuffixOf` f)
-  [".agda", ".lagda", ".lagda.md", ".lagda.rst", ".lagda.tex", ".lagda.org"]
+  [ ".agda", ".lagda", ".lagda.md", ".lagda.rst", ".lagda.tex", ".lagda.org"
+  , ".lagda.tree", ".lagda.typ" ]
 
 orElse :: Maybe a -> Maybe a -> Maybe a
 orElse (Just x) _ = Just x
@@ -187,12 +189,6 @@ discoverEntry proj = do
   case map snd (sortOn fst scored) of
     (f : _) -> Just <$> makeAbsolute f
     []      -> pure Nothing
-
-firstExisting :: [FilePath] -> IO (Maybe FilePath)
-firstExisting []       = pure Nothing
-firstExisting (p : ps) = do
-  e <- doesFileExist p
-  if e then pure (Just p) else firstExisting ps
 
 -- ---------------------------------------------------------------------
 -- Build the Config

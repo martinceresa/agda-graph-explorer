@@ -20,7 +20,6 @@ module AgdaUnused.Analysis
 import           Control.DeepSeq            ( NFData(..), rnf )
 import           Control.Parallel.Strategies ( parBuffer, rdeepseq, using )
 import           Data.Graph      ( SCC(..), stronglyConnComp )
-import           Data.List       ( foldl' )
 import qualified Data.Map.Strict as M
 import           Data.Maybe      ( fromMaybe, isJust )
 import qualified Data.Set        as S
@@ -128,7 +127,7 @@ analyse graph fileBodies =
   let ctx       = buildContext graph fileBodies
       perFile   = [ findingsForFile ctx fp body | (fp, body) <- fileBodies ]
       sparked   = perFile `using` parBuffer 32 rdeepseq
-  in concat sparked ++ duplicateUsingsAcrossFiles ctx
+  in concat sparked
 
 -- ** Internal context shared across files
 
@@ -788,11 +787,6 @@ publicReexportFindings ctx fp thisMod imports =
 shortsThisModSurfacesFrom :: Context -> Text -> Text -> S.Set Text
 shortsThisModSurfacesFrom ctx host src =
   M.findWithDefault S.empty (host, src) (ctxRxShortsByPair ctx)
-
--- ** Cross-file duplicate detection
-
-duplicateUsingsAcrossFiles :: Context -> [Finding]
-duplicateUsingsAcrossFiles _ = []
 
 -- | Two or more separate @open import M …@ lines targeting the SAME
 -- module @M@ /within the same lexical scope/ in the same file. Almost

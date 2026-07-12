@@ -19,12 +19,8 @@
 --
 -- Add more callers here rather than duplicating the parser.
 module AgdaOptimization.FamilyFilter
-  ( -- * Family identification
-    parseCaseUnfold
-  , familyOf
-
-    -- * Forced-bundle decision
-  , isForcedByFamily
+  ( -- * Forced-bundle decision
+    isForcedByFamily
   ) where
 
 import qualified Data.Map.Strict   as Map

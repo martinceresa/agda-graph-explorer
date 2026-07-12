@@ -424,7 +424,9 @@ guessEntryModule defs =
           bump !k []                       = [(k, 1)]
           bump !k ((a,c):xs') | k == a     = (a, c + 1) : xs'
                               | otherwise  = (a, c) : bump k xs'
-      ranked = sortBy (comparing (\(m, c) -> (Down c, T.length m))) counts
+      -- Total order (count desc, name length, then name) so the winner is
+      -- independent of the def vector's traversal order in a tie.
+      ranked = sortBy (comparing (\(m, c) -> (Down c, T.length m, m))) counts
   in case ranked of
        []        -> Nothing
        ((m,_):_) -> Just m

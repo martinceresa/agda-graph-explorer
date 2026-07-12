@@ -173,7 +173,10 @@ src/
     ConceptBundle.hs            Apriori over signature-provenance edges.
     FamilyFilter.hs             forced-by-elaborator suppressor; imported by
                                 Basket + ConceptBundle.
-    Common.hs                   shared name/graph helpers.
+    Common.hs                   shared name/graph helpers, the Apriori itemset
+                                primitives (orderPair/orderTriple/
+                                computeTopFreqItems) + shortName/showD, and the
+                                wall-clock budget reaper (withReaper).
     Condense.hs                 shared SCC condensation.
     UnionFind.hs                shared path-light union-find.
 
@@ -300,13 +303,17 @@ src-agda-graph/AgdaGraph/       Shared library.
   Schema.hs                     FromJSON / NFData mirror of the expanded JSON;
                                 consumer source of truth for the wire shape.
   Index.hs                      strict in-memory rep: Vector Definition,
-                                fwd/rev IntMap IntSet, topoSort, descendants,
-                                ancestors, longestPathDP, idxEdgeProvenance.
+                                fwd/rev IntMap IntSet, topoSort, closureFrom
+                                (backs descendants/ancestors + Similarity's
+                                subtreeUnder), longestPathDP, idxEdgeProvenance.
   GoalCanon.hs                  goal-type canonicaliser + vendored-Murmur64
                                 hashString + find_lemma retrieval tokens
                                 (matchTokens qualifier-strip/vocab-keep,
                                 nameTokens, algebraic shapeTokens,
-                                weightedCoverage).
+                                weightedCoverage) + qname splitters
+                                (baseComponent/moduleComponent).
+  LemmaRank.hs                  find_lemma ranking core: carrier-affinity +
+                                token-coverage scoring over a RankEnv.
   WL.hs                         Weisfeiler–Leman refinement / hashing /
                                 fingerprints / weighted Jaccard.
   Similarity.hs                 shared structural-similarity cores so
@@ -318,6 +325,9 @@ src-agda-graph/AgdaGraph/       Shared library.
   Glob.hs                       tiny hand-rolled glob matcher (**/*/?), shared
                                 by agda-unused --exclude and agda-explore
                                 coverage-ignore.
+  ConfigCore.hs                 shared config-file discovery + raw YAML load +
+                                extractConfigFlag, behind the four per-executable
+                                Config modules.
 
 scripts/
   fiedler_helper.py             SciPy λ₂ / Fiedler-vector helper for
@@ -416,7 +426,7 @@ plugin/                         Claude Code plugin: agda-explore MCP server +
   Mimer options (`-t <secs>` bounds the search, verified on Agda 2.9) **and
   lemma hints** as space-separated identifiers. Plain Mimer won't try an
   in-scope lemma at any budget, so `auto` (+ `construct` auto steps) seed the
-  top `find_lemma` candidates (`Query.goalHintNames`) as hints. An
+  top `find_lemma` candidates (`Query.goalHintCands`) as hints. An
   unknown/out-of-scope or *qualified* hint aborts the whole call (Agda 2.9),
   so hints must be in-scope short names tried ONE AT A TIME — scope
   resolution is instant, so a bad hint fails before searching. Don't batch.

@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+### Behavior-preserving simplification pass (2026-07-12)
+
+A repo-wide cleanup — net −214 lines with **no** user-facing behavior change,
+verified byte-identical on all 17 `agda-optimization` subcommands (human +
+`--json`), byte-identical `agda-explore query` output on the fixture graph, and
+a green `interaction-spec`. `cabal build` stays warning-clean except for the 8
+pre-existing GHC-9.14 warnings (5 of which — redundant `foldl'` imports — this
+pass removed).
+
+- **Dead code removed** (zero callers): `GoalCanon.identTokens`,
+  `Driver.runDriver`, `Query.goalHintNames` (the live Mimer-hint path is
+  `goalHintCands`), `Protocol.parseReplyLines` and its dead `AgdaGoals.Protocol`
+  re-exports, `Config.defaultFileConfig`, the no-op
+  `Analysis.duplicateUsingsAcrossFiles`, and the write-only `Source.ilRaw` field.
+  `Report.writeJsonReport` / `FamilyFilter.familyOf` / `FamilyFilter.parseCaseUnfold`
+  narrowed to internal (only their exports were dead).
+- **Duplication consolidated into shared homes.** `withReaper`, the Apriori
+  itemset helpers (`orderPair` / `orderTriple` / `computeTopFreqItems`) and
+  `shortName` / `showD` → `AgdaOptimization.Common`; `extractConfigFlag` plus the
+  reuse of `firstExisting` → `AgdaGraph.ConfigCore`; the "final dotted component"
+  and "module part" splitters → `GoalCanon.baseComponent` / `moduleComponent`; the
+  two iterative-DFS closure walkers (`Index.traverseClosure`,
+  `Similarity.subtreeUnder`) → one `Index.closureFrom includeSeeds` (proven
+  set-equivalent). In `Query`, the two `unsafe=` predicates → one `unsafeMatches`,
+  and `queryFindLemma` now reuses `filterError` instead of re-inlining its message.
+- **Two latent bugs fixed.** `LoadBearing.guessEntryModule` now uses `Gravity`'s
+  deterministic tie-break (count desc, name length, then name) — its previous
+  `(Down c, name-length)` key left the winner dependent on the def vector's
+  traversal order on a module-count tie. `agda-explore`'s `isAgdaFile` now
+  recognizes `.lagda.tree` / `.lagda.typ`, matching `agda-unused`'s set.
+- **Housekeeping.** Pruned 5 now-redundant explicit `foldl'` imports (Prelude
+  re-exports it under base 4.21) and corrected 3 stale comments: the "copied
+  verbatim from `Fingerprint`" headers in `Echo` / `Silhouette` (they source from
+  the shared `AgdaGraph.WL` / `Similarity` / `Cluster` cores) and `Control`'s
+  orphaned `@runCheck@` Haddock (the parameter is now `routes`).
+
 ### Write-tool catalogue reduction: constructor-style batchers (21 → 11) (2026-07-10)
 
 Folded the `--enable-interact` write-side tool catalogue from 21 tools to 11 by

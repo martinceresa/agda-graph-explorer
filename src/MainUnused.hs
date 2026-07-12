@@ -39,6 +39,7 @@ import           System.Exit ( exitFailure, exitSuccess )
 import           System.FilePath ( (</>), normalise, takeDirectory )
 import           System.IO ( hPutStrLn, stderr )
 
+import           AgdaGraph.ConfigCore ( extractConfigFlag )
 import           AgdaGraph.Glob      ( globMatch )
 import           AgdaUnused.Analysis
 import           AgdaUnused.Config   ( ConfigTarget(..)
@@ -360,19 +361,6 @@ chunksOf n xs
   | null xs   = []
   | otherwise = let (h, t) = splitAt n xs in h : chunksOf n t
 
-
--- | Strip @--config=PATH@ (or @--config PATH@) from argv, returning
--- the path (if any) and the remaining args.
-extractConfigFlag :: [String] -> (Maybe FilePath, [String])
-extractConfigFlag = go []
-  where
-    go acc []                 = (Nothing, reverse acc)
-    go acc (a:rest)
-      | Just v <- stripPrefix "--config=" a = (Just v, reverse acc ++ rest)
-      | a == "--config" = case rest of
-          (v:rest') -> (Just v, reverse acc ++ rest')
-          []        -> (Nothing, reverse acc)  -- malformed; let parseArgs error later
-      | otherwise = go (a : acc) rest
 
 -- | Setters that let 'AgdaUnused.Config.applyConfig' touch our
 -- internal 'Options' record without importing it.

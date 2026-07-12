@@ -29,9 +29,8 @@ module AgdaGraph.Union
   ( unionExpandedGraphs
   ) where
 
-import           Data.List        (foldl', sort, sortOn)
+import           Data.List        (sort, sortOn)
 import qualified Data.Map.Strict  as M
-import           Data.Maybe       (fromMaybe)
 import           Data.Text        (Text)
 import           Data.Word        (Word64)
 
@@ -102,8 +101,8 @@ unionExpandedGraphs gs@(g0 : _) =
     perGraph :: ExpandedGraph -> [(Definition, [Word64], [Int])]
     perGraph g =
       let defs  = egDefinitions g
-          hs    = padTo (length defs) [] (asMaybe (egSubtermHashes g))
-          ds    = padTo (length defs) [] (asMaybe (egSubtermDepths g))
+          hs    = padTo (length defs) [] (egSubtermHashes g)
+          ds    = padTo (length defs) [] (egSubtermDepths g)
       in zip3 defs hs ds
 
     allDefsWithArrays :: [(Definition, [Word64], [Int])]
@@ -172,7 +171,7 @@ unionExpandedGraphs gs@(g0 : _) =
       concatMap
         (\g -> zip (egDefinitionEdges g)
                    (padTo (length (egDefinitionEdges g)) ProvUnknown
-                          (asMaybe (egEdgeProvenance g))))
+                          (egEdgeProvenance g)))
         gs
 
     -- Fold preserving first-seen order: a list of keys in order + a map for
@@ -194,11 +193,6 @@ unionExpandedGraphs gs@(g0 : _) =
       | anyProv   = [ M.findWithDefault ProvUnknown e provMap | e <- mergedEdges ]
       | otherwise = []
 
--- | A graph's edge-provenance list as a 'Maybe' (empty list = absent).
-asMaybe :: [a] -> Maybe [a]
-asMaybe [] = Nothing
-asMaybe xs = Just xs
-
 -- | Take the richer signature: a present one wins over an absent one;
 -- otherwise keep the first.
 orElseSig :: Maybe Text -> Maybe Text -> Maybe Text
@@ -218,15 +212,14 @@ betterProv p           _ = p
 mergeEscapes :: [Text] -> [Text] -> [Text]
 mergeEscapes a b = nubOrd (sort (a ++ b))
 
--- | Pad (or truncate) a (possibly absent) list to length @n@ with a filler.
--- A 'Nothing'/empty list pads entirely with the filler — used so a graph
--- that omitted a parallel array still lines up positionally with its
--- definitions/edges.
-padTo :: Int -> a -> Maybe [a] -> [a]
-padTo n filler m = take n (go (fromMaybe [] m))
+-- | Pad (or truncate) a list to length @n@ with a filler. An empty list
+-- pads entirely with the filler — used so a graph that omitted a parallel
+-- array still lines up positionally with its definitions/edges.
+padTo :: Int -> a -> [a] -> [a]
+padTo n filler xs = take n (go xs)
   where
-    go []       = repeat filler
-    go (x : xs) = x : go xs
+    go []        = repeat filler
+    go (x : xs') = x : go xs'
 
 -- | Order-preserving dedup (first occurrence wins). Deterministic given a
 -- deterministic input order.

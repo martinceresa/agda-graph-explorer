@@ -28,6 +28,7 @@ module AgdaGraph.Index
   , topoSort
   , descendants
   , ancestors
+  , closureFrom
   , unsafeDeps
   , longestPathDP
   ) where
@@ -343,11 +344,11 @@ topoSort Index{..} =
 -- from the result unless reachable from a seed via a non-empty path).
 -- Iterative DFS; visits each node at most once.
 descendants :: Index -> IS.IntSet -> IS.IntSet
-descendants ix seeds = traverseClosure (idxForward ix) seeds
+descendants ix seeds = closureFrom False (idxForward ix) seeds
 
 -- | Reverse transitive closure of a seed set.
 ancestors :: Index -> IS.IntSet -> IS.IntSet
-ancestors ix seeds = traverseClosure (idxReverse ix) seeds
+ancestors ix seeds = closureFrom False (idxReverse ix) seeds
 
 -- | Ids of @unsafe@ definitions in a node's transitive dependency closure
 -- (forward\/uses edges), excluding the node itself. These are the soundness
@@ -364,20 +365,20 @@ unsafeDeps ix i =
   filter (not . null . defUnsafe . defAt ix)
          (IS.toAscList (descendants ix (IS.singleton i)))
 
--- | Shared closure walker. Returns the set of /reachable/ nodes from
--- @seeds@ excluding the seeds themselves.
-traverseClosure :: IM.IntMap IS.IntSet -> IS.IntSet -> IS.IntSet
-traverseClosure adj seeds =
-  let initial = IS.toList seeds
-      go !acc [] = acc
+-- | Shared closure walker over adjacency @adj@ (iterative DFS, each node
+-- visited at most once). @includeSeeds@ keeps the seeds in the result (a
+-- rooted subtree); otherwise they are excluded — a seed appears only if
+-- reachable from a seed via a non-empty path, then it too is removed.
+closureFrom :: Bool -> IM.IntMap IS.IntSet -> IS.IntSet -> IS.IntSet
+closureFrom includeSeeds adj seeds =
+  let go !acc [] = acc
       go !acc (n : rest) =
         let nbrs   = IM.findWithDefault IS.empty n adj
             !fresh = IS.difference nbrs acc
             !acc'  = IS.union acc fresh
-            !rest' = IS.foldr (:) rest fresh
-        in go acc' rest'
-      reachable = go IS.empty initial
-  in IS.difference reachable seeds
+        in go acc' (IS.foldr (:) rest fresh)
+      reachable = go seeds (IS.toList seeds)
+  in if includeSeeds then reachable else IS.difference reachable seeds
 
 -- | Depth of each node to the deepest reachable sink, computed in
 -- /reverse/ topological order (i.e. sinks first). A sink that's in the

@@ -40,9 +40,7 @@ module AgdaOptimization.Motif
   , run
   ) where
 
-import           Control.Concurrent  ( forkIO, threadDelay, killThread )
 import           Control.DeepSeq     ( NFData(..) )
-import           Control.Exception   ( bracket )
 import           Control.Monad       ( when )
 import           Control.Parallel.Strategies ( parMap, rdeepseq )
 import qualified Data.Aeson          as A
@@ -63,7 +61,7 @@ import           System.IO           ( hPutStrLn, stderr )
 
 import           AgdaGraph.Index     ( Index(..), defAt )
 import           AgdaGraph.Schema    ( Definition(..), Kind, State )
-import           AgdaOptimization.Common ( chunksOf )
+import           AgdaOptimization.Common ( chunksOf, withReaper )
 import           AgdaOptimization.FlagSpec ( FlagSpec(..), SwitchVal(..)
                                            , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
@@ -317,24 +315,6 @@ run ix gOpts opts0 = do
     -- --per-module not implemented in either format; warn unconditionally.
     when (optPerModule opts) $
       hPutStrLn stderr "motif: --per-module not yet implemented; ran in global mode."
-
--- | Spawn a reaper thread that flips the deadline 'IORef' once the
--- given wall-clock budget elapses. When @budgetSecs <= 0@ the action
--- runs unchanged with no thread spawned, so behaviour is identical to
--- the pre-budget code path.
---
--- 'bracket' guarantees the reaper is killed before we return — we
--- don't want an orphan thread surviving to fire its 'writeIORef' into
--- the next user's IORef.
-withReaper :: Double -> IORef Bool -> IO a -> IO a
-withReaper secs deadlineRef act
-  | secs <= 0 = act
-  | otherwise =
-      let !micros = floor (secs * 1e6) :: Int
-      in bracket
-           (forkIO (threadDelay micros >> writeIORef deadlineRef True))
-           killThread
-           (const act)
 
 -- | Fold one @(key, embedding)@ pair into the running bucket map.
 -- Strict in the spine of the @[Embedding]@ value so we don't pile up
