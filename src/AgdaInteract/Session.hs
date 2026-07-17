@@ -57,6 +57,7 @@ import qualified Data.ByteString.Lazy     as BL
 import           Data.IORef
 import           Data.Text                (Text)
 import qualified Data.Text                as T
+import           Data.Text.Encoding       (decodeUtf8Lenient)
 import           System.IO                (BufferMode (..), Handle, hClose,
                                            hFlush, hSetBuffering, hSetEncoding,
                                            utf8)
@@ -260,23 +261,50 @@ collectBurstWith s nextTimeout = go []
 -- prefix is the prompt) and the trailing bare @JSON> @ (no newline — a
 -- line reader would block on it, so we work at the byte level).
 readerLoop :: Handle -> Chan ReplyEvent -> IO ()
-readerLoop h chan = loop BS.empty
+readerLoop h chan = loop 0 []
   where
-    loop !pending = do
+    -- @pending@ is the current unfinished line — the bytes since the last
+    -- newline, held as a REVERSED list of chunk fragments (never containing
+    -- a '\n'), with @plen@ its total byte length. Each new chunk is scanned
+    -- for newlines on its own; the fragments are concatenated exactly once,
+    -- when a newline finally completes the line. This keeps a reply larger
+    -- than one 8 KB read (a big AllGoalsWarnings / normalize burst) O(L)
+    -- instead of the O(L²/chunk) that re-@<>@-ing + re-splitting a growing
+    -- buffer every chunk would cost.
+    loop !plen pending = do
       chunk <- readChunk
       if BS.null chunk
         then do
-          unless (BS.null pending) (emitLine pending)
+          unless (null pending) (emitLine (BS.concat (reverse pending)))
           writeChan chan REEof
-        else do
-          let buf            = pending <> chunk
-              parts          = BSC.split '\n' buf
-              complete       = init parts
-              leftover       = last parts
-          mapM_ emitLine complete
-          if isBarePrompt leftover
-            then writeChan chan REPrompt >> loop BS.empty
-            else loop leftover
+        else case BSC.split '\n' chunk of
+          -- No newline in this chunk: extend the pending line. Probe for the
+          -- trailing bare @JSON> @ prompt (which carries no newline) only
+          -- while the line is short enough to BE one — a longer accumulated
+          -- line cannot be the prompt, so we skip the concat and stay O(L).
+          [only] ->
+            let !plen'   = plen + BS.length only
+                pending' = only : pending
+            in if plen' <= promptProbeMax
+                 && isBarePrompt (BS.concat (reverse pending'))
+                 then writeChan chan REPrompt >> loop 0 []
+                 else loop plen' pending'
+          -- ≥1 newline: the first part completes the pending line; interior
+          -- parts are whole lines; the final part is the new leftover.
+          (p0 : rest) -> do
+            emitLine (BS.concat (reverse (p0 : pending)))
+            mapM_ emitLine (init rest)
+            let leftover = last rest
+            if isBarePrompt leftover
+              then writeChan chan REPrompt >> loop 0 []
+              else if BS.null leftover
+                     then loop 0 []
+                     else loop (BS.length leftover) [leftover]
+          [] -> loop plen pending  -- BSC.split never returns [], defensive
+
+    -- Upper bound on the bare-prompt probe: @JSON> @ plus generous slack.
+    promptProbeMax :: Int
+    promptProbeMax = 64
 
     readChunk = either (const BS.empty) id
                   <$> (try (BS.hGetSome h 8192) :: IO (Either SomeException BS.ByteString))
@@ -288,7 +316,7 @@ readerLoop h chan = loop BS.empty
           (hadP, body) = stripPrompt l
       in do
         when hadP (writeChan chan REPrompt)
-        if BS.null (BSC.dropWhile (`elem` (" \t" :: String)) body)
+        if BS.null (BS.dropWhile isSpTab body)
           then pure ()
           else case parseReply (BL.fromStrict body) of
                  Right (Just r) -> writeChan chan (REReply r)
@@ -296,7 +324,7 @@ readerLoop h chan = loop BS.empty
                  Left e         -> writeChan chan (REDecodeError e)
 
     stripPrompt l =
-      let l' = BSC.dropWhile (`elem` (" \t" :: String)) l
+      let l' = BS.dropWhile isSpTab l
       in case BS.stripPrefix promptBS l' of
            Just rest -> (True, rest)
            Nothing   -> (False, l)
@@ -307,8 +335,13 @@ readerLoop h chan = loop BS.empty
     -- keep reading. Reuses 'stripPrompt' so the trailing-space handling
     -- matches exactly.
     isBarePrompt bs = case stripPrompt bs of
-      (True, rest) -> BS.null (BSC.dropWhile (`elem` (" \t\r" :: String)) rest)
+      (True, rest) -> BS.null (BS.dropWhile isSpTabCr rest)
       (False, _)   -> False
+
+    -- Word8 whitespace predicates (space=32, tab=9, CR=13) — no per-char
+    -- 'elem' over a String list.
+    isSpTab w   = w == 32 || w == 9
+    isSpTabCr w = w == 32 || w == 9 || w == 13
 
 -- | Drain stderr into a bounded ring buffer (most-recent first), so a
 -- 'SendDied' can attach context. Critical for deadlock-avoidance: an
@@ -323,7 +356,7 @@ stderrLoop h buf = loop
         Right chunk
           | BS.null chunk -> pure ()
           | otherwise     -> do
-              let ls = map (T.pack . BSC.unpack) (BSC.lines chunk)
+              let ls = map decodeUtf8Lenient (BSC.lines chunk)
               modifyIORef' buf (\old -> take 50 (reverse ls ++ old))
               loop
 

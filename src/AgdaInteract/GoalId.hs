@@ -35,7 +35,7 @@ module AgdaInteract.GoalId
   , parseStableId
   ) where
 
-import           Data.List  ( find )
+import qualified Data.IntMap.Strict as IM
 import qualified Data.Map.Strict as M
 import           Data.Text  ( Text )
 import qualified Data.Text  as T
@@ -91,10 +91,17 @@ entryStartPos e = (rpPos . grStart) <$> geRange e
 syncGoals :: GoalMap -> [Goal] -> (GoalMap, [GoalEntry])
 syncGoals gm goals =
   let prev = M.elems (gmByStable gm)
+      -- Prior entries indexed by start offset, built once (O(N log N)) so
+      -- the per-goal reuse lookup is O(log N) rather than a linear scan of
+      -- @prev@ (which made the whole reconcile O(N²)). @prev@ is ascending
+      -- by 'StableId' and 'fromListWith' keeps the first-seen value, so a
+      -- shared offset resolves to the smallest StableId — exactly what the
+      -- former @find@ (first match) returned.
+      offMap = IM.fromListWith (\_new old -> old)
+                 [ (off, geStable e) | e <- prev, Just off <- [entryStartPos e] ]
       step (m, next, esRev) g =
         let moff = goalStartPos g
-            reused = moff >>= \off ->
-              geStable <$> find ((== Just off) . entryStartPos) prev
+            reused = moff >>= \off -> IM.lookup off offMap
             (sid, next') = case reused of
               Just s  -> (s, next)
               Nothing -> (StableId next, next + 1)
