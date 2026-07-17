@@ -141,10 +141,9 @@ buildIndex ExpandedGraph{..} =
       -- (2) One pass over the edges: allocate trailing ids for edge-only
       -- QNames AND build forward/reverse adjacency together. Each edge's
       -- endpoints are interned (yielding their id) before its adjacency is
-      -- inserted, so a single fold replaces the former "discover ids, then
-      -- resolve both endpoints again per edge" two-pass shape — no redundant
-      -- 'HM.lookup'. 'IM.alter' allocates the singleton set only for a
-      -- source's first edge (the same result as @insertWith IS.union@).
+      -- inserted, so one fold does both with no redundant 'HM.lookup'.
+      -- 'IM.alter' allocates the singleton set only for a source's first
+      -- edge (the same result as @insertWith IS.union@).
       intern :: HM.HashMap Text Int -> Int -> Text
              -> (HM.HashMap Text Int, Int, Int)
       intern !m !n t = case HM.lookup t m of

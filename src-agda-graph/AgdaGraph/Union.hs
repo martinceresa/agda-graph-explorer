@@ -3,28 +3,17 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 -- | Pure union of several expanded graphs into one.
 --
--- The @agda-explore@ daemon's live mode builds the dependency graph by
--- shelling out to @agda-deps@. A /single/ @agda-deps@ invocation only
--- compiles the import closure of /one/ entry module, so to cover several
--- entry modules at once the daemon runs the producer once per entry (into
--- separate out-dirs), parses each 'ExpandedGraph', and unions the results
--- here. The single in-memory 'AgdaGraph.Index.buildIndex' over the unioned
--- graph then covers the union of all the entries' closures — every
--- downstream query/tool stays unchanged because it operates purely on the
--- 'AgdaGraph.Index.Index'.
+-- The @agda-explore@ daemon runs @agda-deps@ once per entry module (each
+-- invocation compiles only that entry's import closure), then unions the
+-- per-entry 'ExpandedGraph's here; a single 'AgdaGraph.Index.buildIndex'
+-- over the result covers every entry's closure with no downstream change.
+-- The union is by node KEY (a definition's fully-qualified 'defName', the
+-- key 'AgdaGraph.Index' uses) — see 'unionExpandedGraphs' for the full
+-- merge contract.
 --
--- The union is by node KEY — a definition's fully-qualified name
--- ('defName'), which is exactly the key 'AgdaGraph.Index' uses
--- ('idxNameToId'). A node appearing in more than one input graph is merged
--- once: its out-edges are unioned (deduplicated), and the /richer/ rendered
--- signature wins (a 'Just' 'defSig' over a 'Nothing'). Definitions are
--- emitted /sorted by node key/ so the in-memory id assignment is stable and
--- a repeated build is deterministic.
---
--- Single-input ('[g]') is a deliberate identity (modulo the by-name dedup a
--- single graph never needs) — callers keep the one-graph path
--- byte-identical to today by /not/ routing it through here at all; this
--- module is only invoked for the genuine multi-entry case.
+-- Single-input ('[g]') is a deliberate identity so the one-graph path
+-- stays byte-identical; this module is invoked only for the genuine
+-- multi-entry case.
 module AgdaGraph.Union
   ( unionExpandedGraphs
   ) where

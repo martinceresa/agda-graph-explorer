@@ -84,8 +84,7 @@ codeSlices :: CodeBlocks -> Text -> [Text]
 codeSlices (CodeBlocks spans) txt = go 1 txt spans
   where
     -- Walk the file once: spans are ascending and disjoint, so advance from
-    -- the previous span's end rather than re-dropping @s-1@ chars from the
-    -- start for each span (which was O(spans·n) on a large literate file).
+    -- the previous span's end (no re-drop from the start per span).
     go _   _ []            = []
     go pos t ((s, e) : rest) =
       let t'            = T.drop (s - pos) t   -- advance to this span's start

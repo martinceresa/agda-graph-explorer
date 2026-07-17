@@ -201,8 +201,7 @@ data Context = Context
     -- demoted from "deletion candidate" to a kept false-positive.
   , ctxTokenToFiles     :: !(M.Map Text (S.Set FilePath))
     -- ^ Inverted 'ctxSourceTokens': token -> the files whose body mentions
-    -- it. Built once so 'mentionedCrossFile' is an O(log) lookup instead of
-    -- a full scan of every file's token set per flagged def.
+    -- it, so 'mentionedCrossFile' is an O(log) lookup.
   , ctxSourceBodies     :: !(M.Map FilePath Text)
     -- ^ Per-file raw body text. Used to count token occurrences in
     -- the def's own file (same-file inliner case: a name appearing
@@ -235,9 +234,8 @@ buildContext ExpandedGraph{..} bodies =
       sourceTokens = M.fromList [ (p, bodyTokens b) | (p, b) <- bodies ]
       sourceBodies = M.fromList bodies
 
-      -- Inverted index: token -> files that mention it. One O(total tokens)
-      -- build (order-independent 'S.union' fold) turns 'mentionedCrossFile'
-      -- from O(files) per flagged def into an O(log) lookup.
+      -- Inverted index: token -> files that mention it (order-independent
+      -- 'S.union' fold, determinism-safe), for an O(log) 'mentionedCrossFile'.
       tokenToFiles = M.fromListWith S.union
         [ (t, S.singleton p) | (p, toks) <- M.toList sourceTokens, t <- S.toList toks ]
 

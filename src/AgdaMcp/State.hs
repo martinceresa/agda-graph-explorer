@@ -223,11 +223,11 @@ data Loaded = Loaded
   { ldModuleCount :: !Int
     -- ^ Number of modules in the source graph. Precomputed at snapshot
     -- construction so the daemon needn't retain the whole parsed
-    -- 'ExpandedGraph' (its 721k-edge @[(Text,Text)]@ list, raw provenance
-    -- and subterm arrays) for the life of the snapshot just to answer a
-    -- module count: 'buildIndexLean' already folds everything the queries
-    -- need into 'ldIndex', so the 'ExpandedGraph' becomes garbage once this
-    -- count is taken. Read by 'AgdaMcp.Query.queryStats'.
+    -- 'ExpandedGraph' (its large edge list, raw provenance and subterm
+    -- arrays) just to answer a module count: 'buildIndexLean' folds
+    -- everything the queries need into 'ldIndex', so the 'ExpandedGraph'
+    -- becomes garbage once this count is taken. Read by
+    -- 'AgdaMcp.Query.queryStats'.
   , ldIndex     :: !Index
   , ldModFiles  :: !(M.Map Text FilePath) -- ^ module name -> source file.
   , ldBuiltAt   :: !UTCTime
@@ -243,9 +243,8 @@ data Loaded = Loaded
     -- ^ Precomputed enclosing-owner lookup for @where@-/anonymous-module
     -- locals: a local def's id ('defId') to its owning top-level def (see
     -- 'AgdaMcp.Query.ownerOf'). Built once so the per-result-line owner
-    -- annotation is O(log n) instead of a full linear scan of all defs.
-    -- Absent key ⇒ no owner (the def is non-local, has no line, or has no
-    -- enclosing top-level def above it).
+    -- annotation is O(log n). Absent key ⇒ no owner (the def is non-local,
+    -- has no line, or has no enclosing top-level def above it).
     -- Lazy similarity caches (forced on the first @similar_*@ query, then
     -- reused for the life of the snapshot). Deliberately non-strict so a
     -- plain rebuild doesn't pay the WL / subterm-multiset cost up front.
@@ -372,15 +371,12 @@ data ServerState = ServerState
   , ssFailSig     :: !(IORef (Maybe ScanSig))
     -- ^ The source 'ScanSig' captured at the /last failed/ rebuild, or
     -- 'Nothing' after any success. The background worker ('watchWorker')
-    -- uses it to /change-gate/ retries: it only re-spawns @agda-deps@ when
-    -- the current source signature differs from this one. Without it a
-    -- persistently-failing corpus retried on a fixed timer — fine when a
-    -- build fails in milliseconds, but a 9-entry pass over a large corpus
-    -- takes minutes, so back-to-back retries on byte-identical (still
-    -- broken) sources burned CPU indefinitely. Gating on the signature
-    -- means a doomed build runs once per source state; a real edit (or the
-    -- fix to the broken module) changes the signature and re-enables it, so
-    -- the daemon still self-heals. The manual @rebuild@ tool ('forceRebuild')
+    -- change-gates retries with it: it only re-spawns @agda-deps@ when the
+    -- current source signature differs, so a doomed build runs once per
+    -- source state instead of re-running a multi-minute pass back-to-back
+    -- on byte-identical broken sources. A real edit (or the fix to the
+    -- broken module) changes the signature and re-enables the build, so the
+    -- daemon still self-heals. The manual @rebuild@ tool ('forceRebuild')
     -- bypasses the gate for transient-failure recovery.
   , ssDirtyFiles  :: !(IORef (S.Set FilePath))
     -- ^ Source files changed since the last build, accumulated by the
@@ -817,23 +813,18 @@ stripBuilt t = case T.breakOn ", built" t of
 -- and key it by the local def's 'defId'. A local def with no such owner
 -- (or no line) is simply absent from the map (returns 'Nothing').
 --
--- Equivalent, by construction, to a per-call scan + @maximumBy (comparing
--- defLine)@ over each rendered result line; folded
--- once here so a query touching N lines is O(N log n) rather than
--- O(N · nDefs). The non-local candidates are pulled out once and shared
--- across all locals.
+-- Built once so a query touching N lines is O(N log n); the non-local
+-- candidates are pulled out once and shared across all locals.
 buildOwnerMap :: [Definition] -> IM.IntMap Definition
 buildOwnerMap rds =
   IM.fromList (mapMaybe owner locals)
   where
-    -- Tag each def with its position in @rds@ so the tie-break matches the
-    -- former @maximumBy (comparing defLine)@ over a scan in @rds@ order
-    -- (equal max line ⇒ the LAST such def ⇒ the largest position).
+    -- Tag each def with its position in @rds@ for the tie-break: on an
+    -- equal max line the LAST def in @rds@ order wins (largest position).
     indexed   = zip [0 :: Int ..] rds
     locals    = [ d | (_, d) <- indexed, isLocalName d ]
     -- Non-local defs that carry a line, bucketed by module, each bucket a
-    -- Vector ascending by (line, position). Instead of scanning every
-    -- non-local per local (O(locals·nonLocals)), a local looks up only the
+    -- Vector ascending by (line, position). A local looks up only the
     -- buckets of its enclosing modules and binary-searches each for the
     -- best candidate at or above its line.
     byModule :: M.Map T.Text (V.Vector (Int, Int, Definition))
@@ -862,8 +853,8 @@ buildOwnerMap rds =
       let parts = T.splitOn "." m
       in [ T.intercalate "." (take i parts) | i <- [1 .. length parts] ]
     -- Rightmost element with @line <= ln@ in a (line,position)-ascending
-    -- vector — the largest (line, position) at or below the helper's line,
-    -- matching the old @maximumBy (comparing defLine)@ within one bucket.
+    -- vector — the largest (line, position) at or below the helper's line
+    -- (the tie-break winner within one bucket).
     bestLE :: Int -> V.Vector (Int, Int, Definition)
            -> Maybe (Int, Int, Definition)
     bestLE ln vec = go 0 (V.length vec - 1) Nothing

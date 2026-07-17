@@ -216,7 +216,7 @@ undirectedAdj Index{..} =
       -- 'idxReverse' is the exact transpose of 'idxForward' (built together
       -- in 'buildIndex'), so a second pass over it would only re-add every
       -- edge step1 already inserted — a uniform 2× scaling of all weights
-      -- that Louvain (scale-invariant) ignores. Dropped.
+      -- that Louvain (scale-invariant) ignores.
 
       -- Ensure every node is a key (even isolated ones).
       !final = foldl'

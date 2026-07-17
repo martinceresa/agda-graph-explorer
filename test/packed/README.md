@@ -22,11 +22,10 @@ The packed `defs` object carries only **`names`, `modules`, `states`, `x`,
 | `type` (sig)     | `type_of`, `find_lemma`, `similar_types` | ✗ |
 | subterm hashes/depths | `similar_bodies`, `term-cluster` | ✗ |
 
-So loading packed and defaulting those fields would **silently degrade**
+Loading packed and defaulting those fields would **silently degrade**
 `type_of` / `similar_*` / `find_lemma` / `unused` / `locate`-line /
-`search --kind` — exactly the tools an agent leans on. Consistent with this
-project's "never degrade silently" stance, the consumer refuses packed with
-an actionable error rather than serving a crippled graph.
+`search --kind`. So the consumer refuses packed with an actionable error
+rather than serving a crippled graph.
 
 ## Packed wire layout (for whoever implements the producer fix)
 
@@ -50,9 +49,6 @@ i32 indices), plus viewer-only `searchIndex` / `fileTree` / `moduleTree` /
 ## The real fix (producer-side)
 
 A **`packed-complete`** producer mode that keeps the compact CSR + base64
-encoding but *adds* the analytical fields (`kind`/`line`/`access`/`type`
-and the subterm hashes). Then the consumer-side change is small: a fast
-base64-LE + CSR decoder (use `base64-bytestring` + a `Storable` cast, not a
-hand-rolled bit loop, to stay fast on a 174 MB graph) mapping it to
-`ExpandedGraph`, validated by asserting the decoded graph equals the
-expanded form of the same corpus. Tracked in `Backlog.md`.
+encoding but *adds* the analytical fields (`kind` / `line` / `access` /
+`type` and the subterm hashes). The consumer side is then a small
+base64-LE + CSR decoder into `ExpandedGraph`. Tracked in `Backlog.md`.

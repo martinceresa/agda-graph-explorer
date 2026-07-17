@@ -372,9 +372,8 @@ isDottedSuffix needle hay =
 --      thing standing between the user and an answer was a single
 --      suggestion.
 --
--- The breadcrumb is empty for the byte-identical exact (tier 1) and
--- unique-dotted-suffix (tier 2) tiers, so existing precise behaviour is
--- unchanged. Tier 3 emits @(auto-resolved \`<input>\` to \`<FQN>\`)@ so an
+-- The breadcrumb is empty for the exact (tier 1) and unique-dotted-suffix
+-- (tier 2) tiers. Tier 3 emits @(auto-resolved \`<input>\` to \`<FQN>\`)@ so an
 -- agent that typed a short or differently-cased name learns the canonical
 -- name. Reusing 'rankedMatches' makes "auto-resolved" exactly "the
 -- Did-you-mean block would have shown a single candidate"; ambiguity
@@ -1301,9 +1300,6 @@ goalHintCands ld n goal =
         go seen (x : xs)
           | key x `Set.member` seen = go seen xs
           | otherwise               = x : go (Set.insert (key x) seen) xs
-
--- | Base (final dotted component) of a qualified name
--- (@Data.Nat.Properties.+-comm@ → @+-comm@).
 
 -- ---------------------------------------------------------------------
 -- search / stats

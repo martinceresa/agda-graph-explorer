@@ -302,11 +302,10 @@ computeExported ix =
 -- Hole / postulate selection
 -- ---------------------------------------------------------------------
 
--- | Single-pass bucketer: fold 'idxDefs' once and return the
--- Hole/Postulate/Failed index sets together. Equivalent to three
--- separate per-state folds (IntSet membership is determined solely by
--- which indices carry the matching state, independent of insertion
--- order), but visits the vector once.
+-- | Single-pass bucketer: fold 'idxDefs' once, returning the
+-- Hole/Postulate/Failed index sets together. IntSet membership depends
+-- only on which indices carry the matching state, independent of
+-- insertion order.
 collectStates3 :: V.Vector Definition -> (IS.IntSet, IS.IntSet, IS.IntSet)
 collectStates3 defs =
   V.ifoldl' step (IS.empty, IS.empty, IS.empty) defs

@@ -10,8 +10,8 @@
 -- The ranker scores every signature-carrying definition by how much of a
 -- goal's conclusion tokens it covers (operator-weighted 'weightedCoverage',
 -- see 'AgdaGraph.GoalCanon'), then breaks ties by 'tokenJaccard'. This
--- coverage/Jaccard pair is the historically-tuned primary signal (the
--- @find_lemma@ 10/10 micro-bench) and is left untouched.
+-- coverage/Jaccard pair is the primary signal (tuned on the @find_lemma@
+-- 10/10 micro-bench).
 --
 -- Layered on top is a __carrier-module affinity__ tie-breaker.
 -- A goal like @n + zero ≡ n@ tokenises identically for

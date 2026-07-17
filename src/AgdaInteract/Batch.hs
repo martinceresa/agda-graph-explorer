@@ -56,11 +56,11 @@ allGiveSteps :: [Step] -> Bool
 allGiveSteps = all isGiveStep
 
 -- | Validate the wildcard @goal:"*"@ usage. A @*@ goal means "apply to every
--- open goal" and is only meaningful for @auto@ (⇒ the former @auto_all@);
--- reject it for give/refine/case_split, and require it to stand alone (it
--- already targets every goal, so combining it with other steps is
--- ill-defined). @Right True@ = the single wildcard-auto shorthand, @Right
--- False@ = no wildcard present, @Left@ = a misuse to report.
+-- open goal" and is only meaningful for @auto@; reject it for
+-- give/refine/case_split, and require it to stand alone (it already targets
+-- every goal, so combining it with other steps is ill-defined). @Right True@
+-- = the single wildcard-auto shorthand, @Right False@ = no wildcard present,
+-- @Left@ = a misuse to report.
 wildcardCheck :: [Step] -> Either Text Bool
 wildcardCheck steps = case filter ((== "*") . stepGoal) steps of
   []  -> Right False

@@ -267,10 +267,8 @@ readerLoop h chan = loop 0 []
     -- newline, held as a REVERSED list of chunk fragments (never containing
     -- a '\n'), with @plen@ its total byte length. Each new chunk is scanned
     -- for newlines on its own; the fragments are concatenated exactly once,
-    -- when a newline finally completes the line. This keeps a reply larger
-    -- than one 8 KB read (a big AllGoalsWarnings / normalize burst) O(L)
-    -- instead of the O(L²/chunk) that re-@<>@-ing + re-splitting a growing
-    -- buffer every chunk would cost.
+    -- when a newline completes the line — so a reply larger than one 8 KB
+    -- read (a big AllGoalsWarnings / normalize burst) stays O(L) in length.
     loop !plen pending = do
       chunk <- readChunk
       if BS.null chunk

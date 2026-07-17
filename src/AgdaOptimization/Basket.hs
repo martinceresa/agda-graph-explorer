@@ -241,8 +241,7 @@ run ix gOpts opts = do
   let !txsAll = buildTransactions ix
       -- Cap oversized baskets BEFORE the C(b,k) enumeration so one
       -- high-fan-out definition can't make the pair/triple count maps
-      -- blow up super-linearly (the cause of the prior hang on large
-      -- corpora). Disabled with --max-basket-size=0.
+      -- blow up super-linearly. Disabled with --max-basket-size=0.
       (!txs, !nCapped) = capLargeBaskets (optMaxBasketSize opts) (qualifying txsAll)
       !n      = length txs
 
@@ -352,8 +351,7 @@ run ix gOpts opts = do
                                  bonferroniKept
             else (bonferroniKept, 0)
 
-        -- Specificity primary, confidence secondary (one stable pass,
-        -- equivalent to the former sortOn-after-sortOn).
+        -- Specificity primary, confidence secondary.
         ranked = sortOn (\r -> (Down (specificity r), Down (rConfidence r)))
                         forcedKept
 

@@ -37,9 +37,6 @@ Forward-looking work: [TODO.md](TODO.md); deferred / refused ideas:
 cabal build
 ```
 
-Resolves entirely from Hackage — no Agda `source-repository-package` pin
-(that lives in the `agda-deps` repo).
-
 ## Producing the input graph
 
 Every tool consumes the **expanded** v2 JSON. Produce it with `agda-deps`:
@@ -131,7 +128,7 @@ load · goal_brief · inspect · auto · construct · scratch · check ·
 give_file · new_module · lemmas · repair
 ```
 
-Three of these are batchers that subsume the older single-op tools:
+Three are batchers:
 `inspect` reads an open goal (`op` = type / context / infer / normalize),
 `construct` drives holes with a sequence of `{op, goal, …}` steps
 (`give` / `refine` / `case_split` / `auto`; a lone `{op:auto, goal:"*"}`
@@ -143,14 +140,13 @@ Agda-validated and by default returns a unified diff **without writing**;
 pass `write:true` to apply, reload, and return the diff plus refreshed
 goals in one round-trip. A hard zero-axiom contract refuses any
 `postulate`, termination/coverage/unsafe-`OPTIONS` pragma, or escape
-hatch up front. `.lagda.md` literate sources are handled. On a no-solution
-`auto` (and `construct`'s `auto` steps) seed Mimer with the top `find_lemma`
-lemmas for the goal, closing one-lemma goals plain Mimer misses; `check` also probes remaining
-goals with Mimer inline (`--no-auto-hints` to disable). `repair` drives an
-almost-correct file to typecheck by interpreting the compiler's diagnostics
-— adding missing imports (resolved off the graph) and fixing misspelled
-references — spec-preserving and zero-axiom.
-Full detail: [`plugin/`](plugin/README.md).
+hatch up front. `.lagda.md` literate sources are handled. `auto` (and
+`construct`'s `auto` steps) run Mimer, seeded with the top `find_lemma`
+lemmas so one-lemma goals close; `check` probes remaining goals with Mimer
+inline (`--no-auto-hints` to disable). `repair` drives an almost-correct
+file to typecheck — adding missing imports and fixing misspelled
+references, spec-preserving and zero-axiom. Full detail:
+[`plugin/`](plugin/README.md).
 
 ```sh
 agda-explore --project /path/to/agda/project --enable-interact
@@ -269,24 +265,25 @@ roots: [src/]
 
 ### `.agda-explore.yml`
 
-Mirrors the daemon's CLI flags. Path keys: `entry` (single Agda entry
-module), `entries` (a *list* of entry modules), `include` (include paths,
-list), `graph` (a prebuilt `graph.json` for preloaded mode), `project`,
-`out-dir`, `agda-deps-bin`, `agda-unused-bin`. Behaviour toggles (bools):
-`no-term-hashes`, `no-signatures`, `normalise-signatures`,
-`show-implicit`, `no-auto-rebuild`, `no-watch`, `require-well-typed`
-(only promote a fully type-checking rebuild; holes still refresh),
-`strict-producer` (strict `agda-deps`: drop `--keep-going` for its
-`--incremental` cache; needs Agda ≥ 2.9), `enable-interact`
-(write-side bridge), `no-auto-hints` (disable the speculative Mimer probe
-`check` runs over remaining goals), `inspect` (web inspector); plus
-`min-term-depth` (int), `auto-hints-limit` (goals the check-time Mimer
-probe tries, default 3), `auto-hints-timeout` (Mimer budget per goal in
-seconds, default 1), `control-port` (localhost `/check` endpoint for the
-edit hook; needs `enable-interact`; `0` = off), `inspect-port` (start
-port, default 7000; implies `inspect`), `agda-bin` (else `$AGDA_BIN` /
-`$PATH`), and `agda-arg` (extra flags for `agda --interaction-json`, e.g.
-`--safe`).
+Mirrors the daemon's CLI flags.
+
+- **Paths:** `entry` (single entry module), `entries` (list of entry
+  modules), `include` (include paths, list), `graph` (prebuilt `graph.json`
+  for preloaded mode), `project`, `out-dir`, `agda-deps-bin`,
+  `agda-unused-bin`, `agda-bin` (else `$AGDA_BIN` / `$PATH`).
+- **Toggles (bool):** `no-term-hashes`, `no-signatures`,
+  `normalise-signatures`, `show-implicit`, `no-auto-rebuild`, `no-watch`,
+  `require-well-typed` (only promote a fully type-checking rebuild; holes
+  still refresh), `strict-producer` (drop `--keep-going` for `agda-deps`'
+  `--incremental` cache; needs Agda ≥ 2.9), `enable-interact` (write-side
+  bridge), `no-auto-hints` (disable the Mimer probe `check` runs over
+  remaining goals), `inspect` (web inspector).
+- **Values:** `min-term-depth` (int); `auto-hints-limit` (goals the
+  check-time Mimer probe tries, default 3); `auto-hints-timeout` (Mimer
+  budget per goal, seconds, default 1); `control-port` (localhost `/check`
+  endpoint for the edit hook; needs `enable-interact`; `0` = off);
+  `inspect-port` (start port, default 7000; implies `inspect`); `agda-arg`
+  (extra flags for `agda --interaction-json`, e.g. `--safe`).
 
 **Multiple entry modules.** `--entry` is repeatable on the CLI and the
 config accepts an `entries:` list alongside the back-compat scalar

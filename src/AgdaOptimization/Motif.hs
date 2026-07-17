@@ -244,9 +244,8 @@ run ix gOpts opts0 = do
 
     -- Chunked seed loop. Each chunk's per-seed embeddings are produced
     -- in parallel via 'parMap rdeepseq', then folded into the running
-    -- bucket map sequentially. Deadline check moves from per-seed to
-    -- per-chunk granularity (small UX change; chunk size 64 keeps it
-    -- responsive enough in practice).
+    -- bucket map sequentially. Deadline check is per-chunk; chunk size
+    -- 64 keeps it responsive.
     let chunkSize = 64 :: Int
         loop :: [[Int]] -> IO ()
         loop []           = pure ()

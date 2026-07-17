@@ -363,10 +363,10 @@ buildBaskets ix opts excluded =
         | otherwise =
             let !d = IM.findWithDefault IS.empty c (idxForward ix)
             in IS.difference d excluded
-      -- Compute each node's basket once (was evaluated twice — guard and
-      -- tuple). In transitive mode each basket is an independent closure,
-      -- so spark them (order-preserving parMap → identical result);
-      -- direct baskets are cheap map lookups, kept serial.
+      -- Compute each node's basket once. In transitive mode each basket
+      -- is an independent closure, so spark them (order-preserving parMap
+      -- → identical result); direct baskets are cheap map lookups, kept
+      -- serial.
       withBasket
         | optTransitive opts =
             parMap rdeepseq (\c -> (c, basket c)) [0 .. n - 1]

@@ -301,8 +301,7 @@ data ExpandedGraph = ExpandedGraph
     -- tags the @i@-th edge. Empty when the producer didn't emit the
     -- @definitionEdgesProvenance@ field (older JSON); when non-empty,
     -- the parser enforces @length egEdgeProvenance == length
-    -- egDefinitionEdges@. The strict spine + 'NFData Provenance' mean
-    -- this is safe to keep around for the whole analysis lifetime.
+    -- egDefinitionEdges@.
   , egSubtermHashes    :: ![[Word64]]
     -- ^ Parallel to 'egDefinitions' — index @i@ in this list is the
     -- array of canonical-form hashes for the @i@-th definition's
@@ -418,8 +417,7 @@ instance FromJSON ExpandedGraph where
 -- out-of-process consumers (the @unused@ tool shells out to
 -- @agda-unused --json=cfgGraphPath@) read the SAME graph the in-memory
 -- 'AgdaGraph.Index.Index' was built from. These instances round-trip
--- through the 'FromJSON' instances above (they are defined alongside the
--- types, so they are not orphans and are the canonical encoders).
+-- through the 'FromJSON' instances above.
 -- ---------------------------------------------------------------------
 
 instance A.ToJSON State where

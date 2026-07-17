@@ -415,8 +415,7 @@ pickSeeds !ix = \case
 guessEntryModule :: [Definition] -> Maybe Text
 guessEntryModule defs =
   let pubs   = [ defModule d | d <- defs, defAccess d == Public ]
-      -- Per-module public-def counts via a strict Map (O(P·log M) instead
-      -- of the former hand-rolled assoc-list scan's O(P·M)).
+      -- Per-module public-def counts via a strict Map, O(P·log M).
       counts :: [(Text, Int)]
       counts = Map.toList (foldl' (\m k -> Map.insertWith (+) k 1 m) Map.empty pubs)
       -- Total order (count desc, name length, then name) so the winner is

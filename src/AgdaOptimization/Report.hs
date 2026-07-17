@@ -32,8 +32,7 @@ import           System.IO            ( IOMode(..), hClose, hFlush, stdout
                                       , withFile )
 
 -- | Output channel preference, threaded through every analysis. The
--- CLI ('AgdaOptimization.CLI') re-exports this so existing callers
--- don't notice the module move.
+-- CLI ('AgdaOptimization.CLI') re-exports it.
 data OutFormat = OutHuman | OutJson
   deriving (Show, Eq)
 

@@ -107,7 +107,7 @@ runStdioLoop dispatch = do
     isWsByte w = w == 32 || w == 9 || w == 13 || w == 10
 
     writeMsg v = do
-      -- One buffered put (encoded reply + newline) rather than two; the
-      -- per-reply flush stays so the client sees each response promptly.
+      -- One buffered put (encoded reply + newline); the per-reply flush
+      -- stays so the client sees each response promptly.
       BL.hPut stdout (encode v <> "\n")
       hFlush  stdout

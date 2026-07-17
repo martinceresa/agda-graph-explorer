@@ -210,9 +210,8 @@ buildConfig o = do
       -- Entries: the CLI/config list ('oEntries', already appended in
       -- precedence order), order-preserving deduped. AGDA_EXPLORE_ENTRY is a
       -- FALLBACK only — used when no --entry/config entry was given (so a
-      -- CLI --entry is never silently unioned with a stray env value). When
-      -- it IS the source it is
-      -- PATH-separator-splittable, mirroring AGDA_EXPLORE_INCLUDE. Several
+      -- CLI --entry is never silently unioned with a stray env value), and
+      -- is PATH-separator-splittable like AGDA_EXPLORE_INCLUDE. Several
       -- entries union their import closures into one graph (see
       -- "AgdaGraph.Union").
       entriesRaw = orderNub $ if null (oEntries o)

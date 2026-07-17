@@ -62,20 +62,17 @@ apply, reloads pick up edits, goals converge, and the finished proof
 compiles. Needs `agda` on `$PATH`; NOT run in CI.
 
 The staging case drops an `.agda-lib` at its temp project root so the scratch
-module sits *under* a project root — the exact condition that triggered the
-`ModuleNameDoesntMatchFileName` regression `loadIncludes` fixes (it fails with
-the prepend disabled, passes with it), which a plain tempdir doesn't surface.
+module sits *under* a project root — the condition that triggers the
+`ModuleNameDoesntMatchFileName` regression `loadIncludes` fixes (a plain
+tempdir doesn't surface it).
 
 ```
 python3 test/interaction/convergence.py        # discovers the cabal binary
 ```
 
-The richer `proj/Proof.agda` (a case-split + a refine + plain gives) is left
-for an **agent-driven** pass: point an agent at the daemon and have it close
-every hole using only the bridge tools, then confirm `agda` is clean — the
-truest test of whether the tools are usable from their descriptions. (The
-plugin loaded in a real Claude Code session against a real project is the
-highest-fidelity version of that.)
+`proj/Proof.agda` (a case-split + a refine + plain gives) is left for an
+**agent-driven** pass: point an agent at the daemon, have it close every hole
+using only the bridge tools, then confirm `agda` is clean.
 
 ## IOTCM command syntax (Agda 2.9.0, confirmed working)
 

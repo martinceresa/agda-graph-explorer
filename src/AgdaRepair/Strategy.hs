@@ -194,7 +194,7 @@ entryPrivate (EntryDef d)     = defAccess d == Private
 entryPrivate (EntryAlias _ _) = False
 
 -- ---------------------------------------------------------------------
--- Carrier affinity (R25b): a bare `ℕ` / `+-comm` prefers its carrier module.
+-- Carrier affinity: a bare `ℕ` / `+-comm` prefers its carrier module.
 -- ---------------------------------------------------------------------
 
 -- | Carrier segments implied by a file's top-level signature types (repair):

@@ -7,9 +7,9 @@
 -- snapshot — they reflect live on-disk file state and so deliberately
 -- bypass @ensureFresh@.
 --
--- The catalogue is folded to 11 tools: the rarely-fired single-operation
--- mutators are consolidated behind @op@-dispatched batchers, keeping the
--- handful agents actually reach for flat and prominent. Three families:
+-- The catalogue is 11 tools: single-operation mutators sit behind
+-- @op@-dispatched batchers, keeping the handful agents reach for flat and
+-- prominent. Three families:
 --
 --   * /read-only/ — @load@, @goal_brief@ (one-call goal orientation:
 --     type + context + candidate lemmas), @inspect@ (@op@ =
@@ -18,8 +18,8 @@
 --     @lemmas@ (goal-directed lemma search wired off a live goal's type).
 --   * /hole-driven mutators/ — @auto@ (Mimer at one goal) and @construct@
 --     (a heterogeneous batch of give/refine/case_split/auto steps against
---     one warm load; a @goal:"*"@ auto step runs Mimer over every open goal,
---     the former @auto_all@). Each returns a unified diff and (with
+--     one warm load; a @goal:"*"@ auto step runs Mimer over every open goal).
+--     Each returns a unified diff and (with
 --     @write:true@) optionally applies it and reloads.
 --   * /file authoring + repair/ — @new_module@ (scaffold a validated module
 --     skeleton, resolving imports off the dependency graph), @give_file@
@@ -317,8 +317,7 @@ runLoad ss a = case argText a "file" of
 -- file just yields empty content.
 emitGoals :: ServerState -> FilePath -> [GoalEntry] -> IO ()
 emitGoals ss fp es = case ssInspect ss of
-  -- Inspector off (the default): skip the whole-file read entirely — it was
-  -- otherwise done on every load/check just to be dropped by 'emitInspect'.
+  -- Inspector off (the default): skip the whole-file read entirely.
   Nothing  -> pure ()
   Just hub -> do
     ec <- readFileSafe fp
@@ -360,9 +359,8 @@ runExpr mkCmd ss a = case argText a "expr" of
     withGoal ss a $ \sess file _e iid ->
       runCmd sess (mkCmd file iid (T.unpack expr)) (fmap renderGoalInfoExpr . firstGoalInfo)
 
--- | Read-only live-goal query batcher: dispatch @op@ to the existing goal-info
--- / expression readers (folds the former goal_type / goal_context / infer /
--- normalize tools).
+-- | Read-only live-goal query batcher: dispatch @op@ to the goal-info /
+-- expression readers.
 runInspect :: ToolRunner
 runInspect ss a = case checkInspectArgs (argText a "op") (argText a "expr") of
   Left err -> pure (Left err)
@@ -667,8 +665,7 @@ autoAllLoop sess file cb secs = go [] [] [] []
 -- Scratch / staging buffer (op = open / promote / discard)
 -- ---------------------------------------------------------------------
 
--- | Scratch-module lifecycle batcher: dispatch @op@ to the existing staging
--- runners (folds the former stage / promote / discard tools).
+-- | Scratch-module lifecycle batcher: dispatch @op@ to the staging runners.
 runScratch :: ToolRunner
 runScratch ss a = case checkScratchOp (argText a "op") of
   Left err  -> pure (Left err)
@@ -1334,9 +1331,7 @@ renderGoals file es
 
 -- | The next-step routing footer appended wherever open goals are listed
 -- (load / check / a @write:true@ reload). Names the first goal concretely
--- so the suggested calls are copy-pasteable. This fires at exactly the
--- moment an agent decides what to do about a goal — the point where a
--- catalogue description read once loses to habit.
+-- so the suggested calls are copy-pasteable.
 goalsFooter :: [GoalEntry] -> Text
 goalsFooter []      = ""
 goalsFooter (e : _) =

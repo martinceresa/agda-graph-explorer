@@ -43,9 +43,7 @@ spliceRanges txt edits =
   where
     sorted = sortBy (comparing (\(s, _, _) -> s)) edits
     -- One left-to-right assembly over the ascending ranges using ORIGINAL
-    -- offsets (so an earlier edit never shifts a later one), concatenated
-    -- once — instead of R full-text copies (O(R·n)) from folding
-    -- 'spliceRange'.
+    -- offsets (so an earlier edit never shifts a later one), concatenated once.
     build _   t []               = [t]
     build pos t ((s, e, r) : rest) =
       let (before, afterStart) = T.splitAt (s - pos) t  -- gap chars [pos, s)
