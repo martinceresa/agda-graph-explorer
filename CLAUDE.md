@@ -303,9 +303,9 @@ src-agda-graph/AgdaGraph/       Shared library.
   Schema.hs                     FromJSON / NFData mirror of the expanded JSON;
                                 consumer source of truth for the wire shape.
   Index.hs                      strict in-memory rep: Vector Definition,
-                                fwd/rev IntMap IntSet, topoSort, closureFrom
-                                (backs descendants/ancestors + Similarity's
-                                subtreeUnder), longestPathDP, idxEdgeProvenance.
+                                fwd/rev IntMap IntSet, closureFrom (backs
+                                descendants/ancestors + Similarity's
+                                subtreeUnder), idxEdgeProvenance.
   GoalCanon.hs                  goal-type canonicaliser + vendored-Murmur64
                                 hashString + find_lemma retrieval tokens
                                 (matchTokens qualifier-strip/vocab-keep,
