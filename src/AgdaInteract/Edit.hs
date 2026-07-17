@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns      #-}
 {-# LANGUAGE OverloadedStrings #-}
 -- | Source-edit helpers for the interaction bridge: splice a replacement
 -- at a hole, locate the clause line for a case-split, re-indent generated
@@ -38,9 +39,18 @@ spliceRanges txt edits =
   case overlap sorted of
     Just (a, b) -> Left ("refusing to apply overlapping edits (ranges "
                            <> tshow a <> " and " <> tshow b <> ")")
-    Nothing     -> Right (foldr (\(s, e, r) t -> spliceRange t s e r) txt sorted)
+    Nothing     -> Right (T.concat (build 1 txt sorted))
   where
     sorted = sortBy (comparing (\(s, _, _) -> s)) edits
+    -- One left-to-right assembly over the ascending ranges using ORIGINAL
+    -- offsets (so an earlier edit never shifts a later one), concatenated
+    -- once — instead of R full-text copies (O(R·n)) from folding
+    -- 'spliceRange'.
+    build _   t []               = [t]
+    build pos t ((s, e, r) : rest) =
+      let (before, afterStart) = T.splitAt (s - pos) t  -- gap chars [pos, s)
+          afterRange           = T.drop (e - s) afterStart  -- skip [s, e)
+      in before : r : build e afterRange rest
     overlap (x@(_, e1, _) : y@(s2, _, _) : rest)
       | e1 > s2   = Just (x, y)
       | otherwise = overlap (y : rest)
@@ -55,9 +65,9 @@ lineSpanAt :: Text -> Int -> (Int, Int)
 lineSpanAt txt pos =
   let idx0   = max 0 (pos - 1)
       before = T.take idx0 txt
-      start  = case T.findIndex (== '\n') (T.reverse before) of
-                 Just k  -> idx0 - k + 1            -- 1-based pos after the prev '\n'
-                 Nothing -> 1
+      -- chars after the last '\n' in @before@ = the current line's prefix;
+      -- scanning backward avoids reversing the whole prefix.
+      start  = idx0 - T.length (T.takeWhileEnd (/= '\n') before) + 1
       after  = T.drop idx0 txt
       endOff = case T.findIndex (== '\n') after of
                  Just k  -> pos + k                 -- 1-based pos of the '\n'
@@ -118,8 +128,10 @@ unifiedDiff path old new
         ++ map ((' ' :) . T.unpack) post
 
 commonPrefix :: Eq a => [a] -> [a] -> Int
-commonPrefix (x:xs) (y:ys) | x == y = 1 + commonPrefix xs ys
-commonPrefix _ _ = 0
+commonPrefix = go 0
+  where
+    go !n (x:xs) (y:ys) | x == y = go (n + 1) xs ys
+    go !n _      _               = n
 
 commonSuffix :: Eq a => [a] -> [a] -> Int
 commonSuffix xs ys = commonPrefix (reverse xs) (reverse ys)

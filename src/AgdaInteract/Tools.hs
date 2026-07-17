@@ -316,13 +316,17 @@ runLoad ss a = case argText a "file" of
 -- editing view (a no-op when @--inspect@ is off). Best-effort: an unreadable
 -- file just yields empty content.
 emitGoals :: ServerState -> FilePath -> [GoalEntry] -> IO ()
-emitGoals ss fp es = do
-  ec <- readFileSafe fp
-  emitInspect (ssInspect ss) $ EvGoals
-    { evFile    = T.pack fp
-    , evContent = either (const "") id ec
-    , evGoals   = map toGoalLite es
-    }
+emitGoals ss fp es = case ssInspect ss of
+  -- Inspector off (the default): skip the whole-file read entirely — it was
+  -- otherwise done on every load/check just to be dropped by 'emitInspect'.
+  Nothing  -> pure ()
+  Just hub -> do
+    ec <- readFileSafe fp
+    emitInspect (Just hub) $ EvGoals
+      { evFile    = T.pack fp
+      , evContent = either (const "") id ec
+      , evGoals   = map toGoalLite es
+      }
   where
     toGoalLite e =
       let (ln, col) = case geRange e of

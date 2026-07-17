@@ -81,5 +81,13 @@ isInsideCode (CodeBlocks spans) pos = any (\(s, e) -> pos >= s && pos < e) spans
 -- @"\n"@ to reconstruct multi-line pragmas\/comments faithfully. Used by the
 -- guard to scan only a literate file's Agda code, never its prose.
 codeSlices :: CodeBlocks -> Text -> [Text]
-codeSlices (CodeBlocks spans) txt =
-  [ T.take (e - s) (T.drop (s - 1) txt) | (s, e) <- spans ]
+codeSlices (CodeBlocks spans) txt = go 1 txt spans
+  where
+    -- Walk the file once: spans are ascending and disjoint, so advance from
+    -- the previous span's end rather than re-dropping @s-1@ chars from the
+    -- start for each span (which was O(spans·n) on a large literate file).
+    go _   _ []            = []
+    go pos t ((s, e) : rest) =
+      let t'            = T.drop (s - pos) t   -- advance to this span's start
+          (slice, rem') = T.splitAt (e - s) t'
+      in slice : go e rem' rest
