@@ -267,6 +267,13 @@ data Loaded = Loaded
     -- (already @coverage-ignore@-filtered), so invisible to queries.
     -- Surfaced by @status@ and by the empty-result coverage note. Empty in
     -- preloaded mode.
+  , ldBaseNameIndex :: M.Map Text [Definition]
+    -- ^ Base-name (final dot-component, @\@line@-tag stripped) to the real
+    -- defs carrying it. Lets 'AgdaMcp.Query.resolveDefNote' resolve a bare
+    -- or dotted-suffix name by looking up one bucket instead of scanning
+    -- every def. Lazy (built on the first non-exact resolution, then reused)
+    -- so an exact-FQN-only workload pays nothing. Keyed by
+    -- 'resolveBaseKey', which must mirror the Query name-normalisers.
   , ldAliases   :: !(M.Map Text Text)
     -- ^ @renaming@ re-export aliases: a host-qualified alias name
     -- (@Host.combine@) mapped to the canonical node-key it renames
@@ -735,6 +742,8 @@ loadedFromGraph cfg mGraphFile egProject = do
     , ldNodeKeyV = nkv
     , ldRealDefs = rds
     , ldOwnerMap = ownerMap
+    , ldBaseNameIndex = M.fromListWith (++)
+        [ (resolveBaseKey (defName d), [d]) | d <- rds ]
     , ldSigBodyFp = buildSigBodyFingerprints silhouetteDefaultWlK ix
     , ldSubtermFp = subtermMultisetsVec ix
     , ldAutoResolveUnique = cfgAutoResolveUnique cfg
@@ -813,6 +822,20 @@ stripBuilt t = case T.breakOn ", built" t of
 -- once here so a query touching N lines is O(N log n) rather than
 -- O(N · nDefs). The non-local candidates are pulled out once and shared
 -- across all locals.
+-- | Base-name key for 'ldBaseNameIndex': the final dot-component of a name
+-- with the producer's @\@\<line\>@ helper disambiguator stripped. MUST stay
+-- in lock-step with 'AgdaMcp.Query.stripLineTag' + 'AgdaMcp.Query.lastComp'
+-- (the resolver looks up by @lastComp (stripLineTag name)@).
+resolveBaseKey :: T.Text -> T.Text
+resolveBaseKey = lastCompT . stripTagT
+  where
+    stripTagT t = case T.breakOnEnd "@" t of
+      (pre, suf) | not (T.null pre), not (T.null suf), T.all isDigit suf
+                 -> T.dropEnd 1 pre
+      _          -> t
+    lastCompT t = let (_, suf) = T.breakOnEnd "." t
+                  in if T.null suf then t else suf
+
 buildOwnerMap :: [Definition] -> IM.IntMap Definition
 buildOwnerMap rds =
   IM.fromList (mapMaybe owner locals)

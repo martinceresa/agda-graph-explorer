@@ -417,7 +417,10 @@ resolveDefNote ld name = case lookupDef (ldIndex ld) name of
     let name' = stripLineTag name
         matches d = let nm = stripLineTag (defName d)
                     in isDottedSuffix name' nm
-    in case filter matches (realDefs ld) of
+        -- Any dotted-suffix match of @name'@ shares its final component, so
+        -- look up just that base-name bucket instead of scanning every def.
+        candidates = M.findWithDefault [] (lastComp name') (ldBaseNameIndex ld)
+    in case filter matches candidates of
          [d] -> Just ("", d)
          _   -> aliasOrFuzzy
   where
@@ -1418,13 +1421,19 @@ queryStats :: Loaded -> Text
 queryStats ld =
   let ix      = ldIndex ld
       rds     = realDefs ld
-      n       = length rds
       synth   = idxSyntheticCount ix
-      nEdges  = sum (map IS.size (IM.elems (idxForward ix)))
+      nEdges  = IM.foldl' (\ !a s -> a + IS.size s) 0 (idxForward ix)
       mods    = ldModuleCount ld
-      cnt p   = length (filter p rds)
-      byState s = cnt ((== s) . defState)
-      byKind  k = cnt ((== k) . defKind)
+      -- One pass over the defs: total count + per-state + per-kind tallies,
+      -- rather than ~11 separate O(n) filters.
+      (!n, !stateM, !kindM) =
+        foldl' (\(!c, !sm, !km) d ->
+                  ( c + 1
+                  , M.insertWith (+) (defState d) (1 :: Int) sm
+                  , M.insertWith (+) (defKind  d) (1 :: Int) km ))
+               (0 :: Int, M.empty, M.empty) rds
+      byState s = M.findWithDefault 0 s stateM
+      byKind  k = M.findWithDefault 0 k kindM
   in T.unlines
        [ "Graph statistics:"
        , "  modules:      " <> tshow mods
