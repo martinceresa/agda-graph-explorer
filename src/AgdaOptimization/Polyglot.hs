@@ -213,20 +213,15 @@ undirectedAdj Index{..} =
         , s /= t
         ]
 
-      -- Reverse is redundant for symmetry given we ran step1, but
-      -- we still process it to be defensive against any unidirectional
-      -- entries the Index might somehow hold.
-      !step2 = foldl' addPair step1
-        [ (s, t)
-        | (t, ss) <- IM.toAscList idxReverse
-        , s       <- IS.toList ss
-        , s /= t
-        ]
+      -- 'idxReverse' is the exact transpose of 'idxForward' (built together
+      -- in 'buildIndex'), so a second pass over it would only re-add every
+      -- edge step1 already inserted — a uniform 2× scaling of all weights
+      -- that Louvain (scale-invariant) ignores. Dropped.
 
       -- Ensure every node is a key (even isolated ones).
       !final = foldl'
         (\m i -> if IM.member i m then m else IM.insert i IM.empty m)
-        step2
+        step1
         [0 .. idxNodeCount - 1]
   in final
   where

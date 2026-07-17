@@ -42,6 +42,7 @@ module AgdaOptimization.Echo
   ) where
 
 import           Control.Monad        ( forM_ )
+import           Control.DeepSeq             ( NFData(..) )
 import           Control.Parallel.Strategies ( parMap, rdeepseq )
 import qualified Data.IntMap.Strict   as IM
 import qualified Data.IntSet          as IS
@@ -197,6 +198,9 @@ data Cand = Cand
   , cFwdFp       :: !Fingerprint
   }
 
+instance NFData Cand where
+  rnf (Cand i s r f) = rnf i `seq` rnf s `seq` rnf r `seq` rnf f
+
 candidates :: Index -> ColorVec -> ColorVec -> Options -> [Cand]
 candidates ix revColors fwdColors Options{..} =
   let n   = idxNodeCount ix
@@ -216,7 +220,9 @@ candidates ix revColors fwdColors Options{..} =
                       in if IM.null revFp
                            then Nothing
                            else Just (Cand i revSub revFp fwdFp)
-  in [ c | Just c <- [ mk i | i <- [0 .. n - 1] ] ]
+      -- Each candidate builds two independent per-node closures + colour
+      -- histograms; spark them (order-preserving parMap → identical list).
+  in [ c | Just c <- parMap rdeepseq mk [0 .. n - 1] ]
 
 --------------------------------------------------------------------------------
 -- Pair scoring

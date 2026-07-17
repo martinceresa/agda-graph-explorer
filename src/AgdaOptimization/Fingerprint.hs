@@ -49,6 +49,7 @@ module AgdaOptimization.Fingerprint
 
 import           Control.Monad        ( forM_, when )
 import           System.IO            ( hPutStrLn, stderr )
+import           Control.DeepSeq             ( NFData(..) )
 import           Control.Parallel.Strategies ( parMap, rdeepseq )
 import qualified Data.HashMap.Strict  as HM
 import qualified Data.IntMap.Strict   as IM
@@ -226,6 +227,9 @@ data Cand = Cand
   , cFp      :: !Fingerprint
   } -- not Show; we never print this whole thing.
 
+instance NFData Cand where
+  rnf (Cand i s f) = rnf i `seq` rnf s `seq` rnf f
+
 candidates :: Index -> ColorVec -> Options -> [Cand]
 candidates ix cols opts@Options{..} =
   let n   = idxNodeCount ix
@@ -244,7 +248,10 @@ candidates ix cols opts@Options{..} =
                       in if IM.null fp
                            then Nothing
                            else Just (Cand i sub fp)
-  in [ c | Just c <- [ mk i | i <- [0 .. n - 1] ] ]
+      -- Each candidate's rooted-subtree closure + fingerprint is an
+      -- independent per-node computation; spark them (order-preserving
+      -- parMap → identical candidate list and downstream numbering).
+  in [ c | Just c <- parMap rdeepseq mk [0 .. n - 1] ]
 
 --------------------------------------------------------------------------------
 -- Owner extraction

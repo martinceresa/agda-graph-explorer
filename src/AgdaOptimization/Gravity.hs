@@ -395,16 +395,19 @@ powerIter Options{..} tel preds outDeg
   | n == 0    = (U.empty, 0, 0)
   | otherwise = runST $ do
       cur <- U.thaw tel  -- initial guess = teleport vector
+      -- Dangling node ids (outDeg = 0) are invariant across iterations;
+      -- compute them once (ascending v) instead of rescanning all N nodes
+      -- every iteration. Summation order is unchanged, so the Double
+      -- dangling mass is bit-identical.
+      let !danglingIds = U.fromList [ v | v <- [0 .. n - 1], outDeg U.! v == 0 ]
+          !nDangling   = U.length danglingIds
       let loop !it = do
-            -- Dangling mass: total cur[v] for v with outDeg = 0.
-            let danglingAcc !acc !v
-                  | v >= n = pure acc
+            -- Dangling mass: total cur[v] over the precomputed dangling set.
+            let danglingAcc !acc !i
+                  | i >= nDangling = pure acc
                   | otherwise = do
-                      x <- MU.read cur v
-                      let !acc' = if outDeg U.! v == 0
-                                    then acc + x
-                                    else acc
-                      danglingAcc acc' (v + 1)
+                      x <- MU.read cur (danglingIds U.! i)
+                      danglingAcc (acc + x) (i + 1)
             !dangling <- danglingAcc 0 0
             let !danglingScale = optDamping * dangling
             -- Build next[]; we use a fresh mutable then swap.

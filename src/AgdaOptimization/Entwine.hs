@@ -356,8 +356,6 @@ run ix gOpts opts = do
 buildBaskets :: Index -> Options -> IntSet -> [(Int, IntSet)]
 buildBaskets ix opts excluded =
   let n   = idxNodeCount ix
-      raw = [ (c, basket c) | c <- [0 .. n - 1]
-                            , not (IS.null (basket c)) ]
       basket c
         | optTransitive opts =
             let !d = descendants ix (IS.singleton c)
@@ -365,7 +363,16 @@ buildBaskets ix opts excluded =
         | otherwise =
             let !d = IM.findWithDefault IS.empty c (idxForward ix)
             in IS.difference d excluded
-  in raw
+      -- Compute each node's basket once (was evaluated twice — guard and
+      -- tuple). In transitive mode each basket is an independent closure,
+      -- so spark them (order-preserving parMap → identical result);
+      -- direct baskets are cheap map lookups, kept serial.
+      withBasket
+        | optTransitive opts =
+            parMap rdeepseq (\c -> (c, basket c)) [0 .. n - 1]
+        | otherwise =
+            [ (c, basket c) | c <- [0 .. n - 1] ]
+  in [ (c, b) | (c, b) <- withBasket, not (IS.null b) ]
 
 ----------------------------------------------------------------------
 -- Pair counting (Apriori within-basket emission).

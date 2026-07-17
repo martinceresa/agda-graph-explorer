@@ -363,10 +363,15 @@ greedy holes0 nExp = go 1 IS.empty holes0 []
 holePrereqEdges :: Index -> IS.IntSet -> IM.IntMap IS.IntSet
                 -> [(Int, Int, Int)]
 holePrereqEdges ix debtSet covByHole =
-  let pairs =
+  let -- 'descendants' is an independent BFS per debt node; spark them
+      -- (mirrors 'holeCovs'). Order-preserving parMap keeps the pair list
+      -- identical to the serial version (the final sortBy is a total order).
+      !downs = parMap rdeepseq
+                 (\a -> (a, IS.intersection (descendants ix (IS.singleton a)) debtSet))
+                 (IS.toList debtSet)
+      pairs =
         [ (a, b, shared)
-        | a <- IS.toList debtSet
-        , let down = IS.intersection (descendants ix (IS.singleton a)) debtSet
+        | (a, down) <- downs
         , b <- IS.toList down
         , let ca     = IM.findWithDefault IS.empty a covByHole
               cb     = IM.findWithDefault IS.empty b covByHole

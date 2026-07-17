@@ -44,6 +44,7 @@ import           Control.Monad          ( when )
 import           Control.Parallel.Strategies ( parMap, rdeepseq )
 import           AgdaOptimization.Condense ( Condensation(..), buildCondensation )
 import qualified Data.IntMap.Strict     as IM
+import qualified Data.Map.Strict        as Map
 import qualified Data.IntSet            as IS
 import           Data.List              ( sortBy, sortOn )
 import           Data.Maybe             ( fromMaybe, mapMaybe )
@@ -414,16 +415,10 @@ pickSeeds !ix = \case
 guessEntryModule :: [Definition] -> Maybe Text
 guessEntryModule defs =
   let pubs   = [ defModule d | d <- defs, defAccess d == Public ]
-      -- Hand-rolled assoc counter to avoid pulling in Data.Map for this
-      -- handful of strings.
+      -- Per-module public-def counts via a strict Map (O(P·log M) instead
+      -- of the former hand-rolled assoc-list scan's O(P·M)).
       counts :: [(Text, Int)]
-      counts = go pubs []
-        where
-          go []       acc = acc
-          go (n:rest) acc = go rest (bump n acc)
-          bump !k []                       = [(k, 1)]
-          bump !k ((a,c):xs') | k == a     = (a, c + 1) : xs'
-                              | otherwise  = (a, c) : bump k xs'
+      counts = Map.toList (foldl' (\m k -> Map.insertWith (+) k 1 m) Map.empty pubs)
       -- Total order (count desc, name length, then name) so the winner is
       -- independent of the def vector's traversal order in a tie.
       ranked = sortBy (comparing (\(m, c) -> (Down c, T.length m, m))) counts

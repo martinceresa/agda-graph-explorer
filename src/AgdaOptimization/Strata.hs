@@ -291,6 +291,16 @@ classifyAllEdges ix modOf =
     lookupMod :: Int -> Text
     lookupMod n = fromMaybe (defModule (defAt ix n)) (IM.lookup n modOf)
 
+    -- Split every distinct module name into its dot-components ONCE. The
+    -- external-edge classification below otherwise re-runs @T.splitOn "."@
+    -- on the same module strings once per edge (O(E·L)); with the cache it
+    -- is O(M·L) splits + O(E) lookups.
+    compCache :: Map.Map Text [Text]
+    compCache = Map.fromSet (T.splitOn ".")
+                  (Set.fromList [ lookupMod n | n <- [0 .. idxNodeCount ix - 1] ])
+    comps :: Text -> [Text]
+    comps m = Map.findWithDefault (T.splitOn "." m) m compCache
+
     visitSrc :: Map.Map Text ModAcc -> Int -> IS.IntSet -> Map.Map Text ModAcc
     visitSrc !acc src tgts =
       let !srcMod = lookupMod src
@@ -323,8 +333,10 @@ classifyAllEdges ix modOf =
       -> Text     -- ^ tgt module
       -> Map.Map Text ModAcc -> Map.Map Text ModAcc
     bumpExternal !srcMod !tgtMod !acc =
-      let !pfx     = sharedPrefixOrRoot srcMod tgtMod
-          !mSib    = siblingPrefixOf srcMod tgtMod
+      let !srcC    = comps srcMod
+          !tgtC    = comps tgtMod
+          !pfx     = sharedPrefixOrRoot srcC tgtC
+          !mSib    = siblingPrefixOf srcC tgtC
           updSrc mo =
             let a   = fromMaybe emptyAcc mo
                 !ex = aExternal a + 1
@@ -367,41 +379,32 @@ isPrefixModule prefix m
   | prefix == m = True
   | otherwise   = (prefix `T.append` ".") `T.isPrefixOf` m
 
--- | The longest common dot-prefix of two module names (in dotted form),
--- or the empty Text if they share no dot-component at the root.
+-- | The longest common dot-prefix of two module names, given as their
+-- dot-split component lists and dotted back together — or the empty Text
+-- if they share no root component.
 --
--- Example: @longestSharedPrefix \"A.B.C\" \"A.B.D\" == \"A.B\"@;
---          @longestSharedPrefix \"A.B\" \"X.Y\"     == \"\"@.
-longestSharedPrefix :: Text -> Text -> Text
-longestSharedPrefix a b =
-  let pa = T.splitOn "." a
-      pb = T.splitOn "." b
-      shared = takeWhilePair (==) pa pb
-  in T.intercalate "." shared
+-- Example: @["A","B","C"]@ vs @["A","B","D"]@ ⇒ @"A.B"@;
+--          @["A","B"]@      vs @["X","Y"]@     ⇒ @""@.
+longestSharedPrefix :: [Text] -> [Text] -> Text
+longestSharedPrefix pa pb =
+  T.intercalate "." (takeWhilePair (==) pa pb)
   where
     takeWhilePair :: (x -> y -> Bool) -> [x] -> [y] -> [x]
     takeWhilePair p (x:xs) (y:ys) | p x y = x : takeWhilePair p xs ys
     takeWhilePair _ _      _              = []
 
 -- | The bucket key used for sibling-disjoint grouping (see
--- 'spreadOf'). For an external target @e@ relative to owning module
--- @m@: the /longest shared prefix/ if non-empty, otherwise the first
--- dot-component of @e@ as a fallback root group. We keep the fallback
+-- 'spreadOf'), on the component lists of owning module @m@ and external
+-- target @e@: the /longest shared prefix/ if non-empty, otherwise @e@'s
+-- first component as a fallback root group. We keep the fallback
 -- non-empty so root-level externals can't collide into a single
 -- ambiguous "" bucket.
-sharedPrefixOrRoot :: Text -> Text -> Text
-sharedPrefixOrRoot m e =
-  let !sp = longestSharedPrefix m e
+sharedPrefixOrRoot :: [Text] -> [Text] -> Text
+sharedPrefixOrRoot mC eC =
+  let !sp = longestSharedPrefix mC eC
   in if T.null sp
-       then firstComponent e
+       then case eC of { (h:_) -> h; [] -> "" }
        else sp
-
--- | First dot-component of a dotted name; the whole input if it has no
--- dot. Empty input collapses to empty (vacuous, but defensive).
-firstComponent :: Text -> Text
-firstComponent t =
-  let (hd, _) = T.breakOn "." t
-  in hd
 
 -- | @siblingPrefixOf m e@ — name the /sibling subtree/ of @m@ that the
 -- external module @e@ lives in, or 'Nothing' if @e@ is not in a sibling
@@ -421,15 +424,14 @@ firstComponent t =
 -- empty root and has no parent itself — there is no sibling-subtree
 -- concept at the root, so we return 'Nothing'. Callers surface that as
 -- a different finding line; see 'renderFinding'.
-siblingPrefixOf :: Text -> Text -> Maybe Text
-siblingPrefixOf m e =
-  case T.splitOn "." m of
+siblingPrefixOf :: [Text] -> [Text] -> Maybe Text
+siblingPrefixOf mParts eParts =
+  case mParts of
     []     -> Nothing  -- defensive; T.splitOn never returns []
     [_]    -> Nothing  -- m at depth 1 -> parent has no parent
-    mParts ->
+    _      ->
       let parentParts = init mParts
           mOwnChild   = last mParts
-          eParts      = T.splitOn "." e
       in case stripListPrefix parentParts eParts of
            Just (eChild : _) | eChild /= mOwnChild ->
              Just $! T.intercalate "." (parentParts ++ [eChild])

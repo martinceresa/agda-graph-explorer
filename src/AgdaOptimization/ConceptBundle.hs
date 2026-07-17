@@ -57,6 +57,7 @@ module AgdaOptimization.ConceptBundle
 
 import           Control.DeepSeq         ( rnf )
 import           Control.Exception       ( evaluate )
+import           Control.Parallel.Strategies ( parMap, rdeepseq )
 import qualified Data.IntMap.Strict      as IM
 import           Data.IntMap.Strict      ( IntMap )
 import qualified Data.IntSet             as IS
@@ -76,7 +77,7 @@ import           AgdaGraph.Index         ( Index(..), defAt )
 import           AgdaGraph.Schema        ( Definition(..), Provenance(..) )
 import           AgdaOptimization.Common ( shortName, showD
                                          , orderPair, orderTriple
-                                         , computeTopFreqItems )
+                                         , chunksOf, computeTopFreqItems )
 import           AgdaOptimization.FamilyFilter ( isForcedByFamily )
 import           AgdaOptimization.FlagSpec ( FlagSpec(..), SwitchVal(..)
                                            , parseFlags, applyFlagConfig )
@@ -569,15 +570,29 @@ collectInfo ix l2 l3 l4 = foldl' step (Map.empty, Map.empty, Map.empty)
 -- Apriori counting. Mirrors 'AgdaOptimization.Basket': 'Map _ Int',
 -- not 'Map _ [Int]' — owners are collected post-prune in 'collectInfo'.
 
+-- | Canonical ascending @(w, x, y, z)@ via the optimal 5-comparator
+-- sorting network for 4 inputs — no list, no 'sort' allocation, run once
+-- per candidate quad in the Apriori counting loop.
 orderQuad :: Int -> Int -> Int -> Int -> (Int, Int, Int, Int)
-orderQuad a b c d = case sort [a, b, c, d] of
-  [w, x, y, z] -> (w, x, y, z)
-  _            -> (a, b, c, d)  -- unreachable
+orderQuad a b c d =
+  let (a1, b1) = orderPair a  b
+      (c1, d1) = orderPair c  d
+      (a2, c2) = orderPair a1 c1
+      (b2, d2) = orderPair b1 d1
+      (b3, c3) = orderPair b2 c2
+  in (a2, b3, c3, d2)
+
+-- | Baskets per parallel chunk for the counting passes. Sum is
+-- associative + commutative, so 'Map.unionsWith (+)' over the per-chunk
+-- partials is byte-identical regardless of chunk/spark order.
+bundleChunk :: Int
+bundleChunk = 64
 
 -- | Count occurrences of every 2-subset across baskets.
 countPairs :: [Basket] -> IntSet -> Map (Int, Int) Int
 countPairs txs l1 =
-  foldl' addBk Map.empty txs
+  Map.unionsWith (+)
+    (parMap rdeepseq (foldl' addBk Map.empty) (chunksOf bundleChunk txs))
   where
     addBk !acc (Basket _ is _) =
       let !filtered = filter (`IS.member` l1) is
@@ -590,7 +605,8 @@ countPairs txs l1 =
 countTriples :: [Basket] -> IntSet -> Map (Int, Int) Int
              -> Map (Int, Int, Int) Int
 countTriples txs l1 l2sup =
-  foldl' addBk Map.empty txs
+  Map.unionsWith (+)
+    (parMap rdeepseq (foldl' addBk Map.empty) (chunksOf bundleChunk txs))
   where
     addBk !acc (Basket _ is _) =
       let !filtered = filter (`IS.member` l1) is
@@ -618,7 +634,8 @@ countTriples txs l1 l2sup =
 countQuads :: [Basket] -> IntSet -> Map (Int, Int, Int) Int
            -> Map (Int, Int, Int, Int) Int
 countQuads txs l1 l3sup =
-  foldl' addBk Map.empty txs
+  Map.unionsWith (+)
+    (parMap rdeepseq (foldl' addBk Map.empty) (chunksOf bundleChunk txs))
   where
     addBk !acc (Basket _ is _) =
       let !filtered = filter (`IS.member` l1) is

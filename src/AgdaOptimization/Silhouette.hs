@@ -1,4 +1,5 @@
 {-# LANGUAGE BangPatterns      #-}
+{-# LANGUAGE DeriveGeneric     #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
 -- | Silhouette — type-signature topology vs. body topology.
@@ -43,7 +44,9 @@ module AgdaOptimization.Silhouette
   , run
   ) where
 
+import           Control.DeepSeq      ( NFData )
 import           Control.Monad        ( forM_, when )
+import           Control.Parallel.Strategies ( parMap, rdeepseq )
 import           Data.List            ( sortBy, tails )
 import qualified Data.Map.Strict      as Map
 import           Data.Map.Strict      ( Map )
@@ -51,6 +54,7 @@ import           Data.Ord             ( Down(..), comparing )
 import qualified Data.Text            as T
 import qualified Data.Vector          as V
 import           Data.Vector          ( Vector )
+import           GHC.Generics         ( Generic )
 import           System.IO            ( hPutStrLn, stderr )
 import           Text.Printf          ( printf )
 
@@ -210,7 +214,9 @@ signatureTwinClusters cs minSize =
 -- | Tag for an individual body-overlap measurement between two
 -- structural twins.
 data OverlapTag = TagCombinator | TagCopyPaste | TagMixed
-  deriving (Show, Eq)
+  deriving (Show, Eq, Generic)
+
+instance NFData OverlapTag
 
 overlapTag :: Options -> Double -> OverlapTag
 overlapTag Options{..} s
@@ -232,7 +238,9 @@ data ClusterSummary = ClusterSummary
   , csTag            :: !OverlapTag
   , csPairCount      :: !Int
     -- ^ Number of unordered pairs in the cluster (n*(n-1)/2).
-  }
+  } deriving (Generic)
+
+instance NFData ClusterSummary
 
 summariseCluster :: Options -> Vector Cand -> [Int] -> ClusterSummary
 summariseCluster opts cs members =
@@ -312,8 +320,11 @@ runProvenance ix gOpts opts@Options{..} sf = do
       !nCand     = V.length candVec
 
       !rawClusters = signatureTwinClusters candVec optMinClusterSize
+      -- Each cluster's O(k²) body-overlap average is independent; spark
+      -- them (order-preserving parMap → identical to the serial list, and
+      -- 'ranked' re-sorts anyway).
       !summarised  =
-        [ (c, summariseCluster opts candVec c) | c <- rawClusters ]
+        parMap rdeepseq (\c -> (c, summariseCluster opts candVec c)) rawClusters
       -- Rank: combinator > copy-paste > mixed; secondary key is cluster
       -- size desc; tertiary is average overlap (combinator: high first;
       -- copy-paste: low first; mixed: high first as a sensible default).
