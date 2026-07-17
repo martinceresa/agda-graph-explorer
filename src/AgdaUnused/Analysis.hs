@@ -144,13 +144,6 @@ data Context = Context
   , ctxUsersOfModule    :: !(M.Map Text (S.Set Text))
     -- ^ For each module M, the set of OTHER modules that reference any
     -- qname inside M. Used by the "no downstream user" check.
-  , ctxUsedNamesInMod   :: !(M.Map Text (S.Set Text))
-    -- ^ For each module M (the user-side), the set of short names of
-    -- qnames it pulls in from *any* other module (i.e. the right-hand
-    -- side of every definitionEdge whose lhs lives in M, projected to
-    -- (referenced-module, short-name)). Currently aggregated as a
-    -- flat set of short names. The unused-using check uses this plus
-    -- a per-import-module restriction.
   , ctxUsedQNames       :: !(M.Map Text (S.Set (Text, Text)))
     -- ^ For each user-module M, the set of (target-module, short-name)
     -- pairs M references. This is the precise version of
@@ -182,7 +175,6 @@ data Context = Context
     -- the graph shows intra-module callers yet the cycle is dead as a
     -- unit. The @dead@ check treats a keyed def as 'DefinedDead' and
     -- names the mapped peers in the finding note.
-  , ctxAllModules       :: !(S.Set Text)
   , ctxRxShortsByHost   :: !(M.Map Text (S.Set Text))
     -- ^ For each *host* module @H@ (the module that bears the
     -- @open … public@), the set of *short* names @H@ surfaces in its
@@ -207,6 +199,10 @@ data Context = Context
     -- text still mentions the qname's short name. If any *other*
     -- source file mentions the flagged short name, the finding is
     -- demoted from "deletion candidate" to a kept false-positive.
+  , ctxTokenToFiles     :: !(M.Map Text (S.Set FilePath))
+    -- ^ Inverted 'ctxSourceTokens': token -> the files whose body mentions
+    -- it. Built once so 'mentionedCrossFile' is an O(log) lookup instead of
+    -- a full scan of every file's token set per flagged def.
   , ctxSourceBodies     :: !(M.Map FilePath Text)
     -- ^ Per-file raw body text. Used to count token occurrences in
     -- the def's own file (same-file inliner case: a name appearing
@@ -238,6 +234,12 @@ buildContext ExpandedGraph{..} bodies =
 
       sourceTokens = M.fromList [ (p, bodyTokens b) | (p, b) <- bodies ]
       sourceBodies = M.fromList bodies
+
+      -- Inverted index: token -> files that mention it. One O(total tokens)
+      -- build (order-independent 'S.union' fold) turns 'mentionedCrossFile'
+      -- from O(files) per flagged def into an O(log) lookup.
+      tokenToFiles = M.fromListWith S.union
+        [ (t, S.singleton p) | (p, toks) <- M.toList sourceTokens, t <- S.toList toks ]
 
       -- Index each definition by its module via the *qname's prefix*,
       -- not 'defModule', so we agree with how 'shortNameOf' splits.
@@ -319,8 +321,6 @@ buildContext ExpandedGraph{..} bodies =
         foldl' (\acc e -> ingestEdge e acc)
                (M.empty, M.empty, M.empty, M.empty, S.empty) egDefinitionEdges
 
-      usedShortInMod = M.map (S.map snd) usedQ0
-
       -- Re-export indices. For every row @(host, source, [qualified-names])@
       -- we build three orientations: by source-module, by (source, short),
       -- and by host. The producer already collapses chains to the
@@ -363,18 +363,17 @@ buildContext ExpandedGraph{..} bodies =
        { ctxModuleByFile     = moduleByFile
        , ctxDefShortByModule = defShortByMod
        , ctxUsersOfModule    = usersMod0
-       , ctxUsedNamesInMod   = usedShortInMod
        , ctxUsedQNames       = usedQ0
        , ctxUsersOfQName     = usersQ0
        , ctxIntraModUsedQ    = intraModUsedQ0
        , ctxSelfRecursive    = selfRec0
        , ctxDeadCycles       = deadCycles0
-       , ctxAllModules       = S.fromList egModules
        , ctxRxShortsByHost   = rxShortsByHost
        , ctxRxBySourceQ      = rxBySrcQ
        , ctxRxByHost         = rxByHost
        , ctxRxShortsByPair   = rxShortsByPair
        , ctxSourceTokens     = sourceTokens
+       , ctxTokenToFiles     = tokenToFiles
        , ctxSourceBodies     = sourceBodies
        , ctxDefLineByQ       = defLineByQ
        , ctxDefAccessByQ     = defAccessByQ
@@ -398,7 +397,10 @@ findingsForFile ctx fp body = case M.lookup fp (ctxModuleByFile ctx) of
     -- internal section helpers, never intended to be cross-module
     -- used; flagging them is pure noise.
     let imports     = scanImports body
-        bodyToks    = bodyTokens body
+        -- Reuse the tokens already computed for this file in 'buildContext'
+        -- ('ctxSourceTokens') rather than re-tokenising the body. Every
+        -- scanned file is a key there, so the fallback never fires.
+        bodyToks    = M.findWithDefault (bodyTokens body) fp (ctxSourceTokens ctx)
         primary     = S.findMin thisMods  -- deterministic representative
         userFacing  = S.filter (not . isAnonymousModule) thisMods
     in concatMap (perImportFindings ctx fp primary bodyToks) imports
@@ -602,8 +604,9 @@ definedButUnused ctx fp thisMod shorts =
 -- stays determinism-safe.
 mentionedCrossFile :: Context -> FilePath -> Text -> Bool
 mentionedCrossFile ctx fp sh =
-  any (\(p, toks) -> p /= fp && S.member sh toks)
-      (M.toList (ctxSourceTokens ctx))
+  case M.lookup sh (ctxTokenToFiles ctx) of
+    Nothing    -> False
+    Just files -> not (S.null (S.delete fp files))
 
 -- | Count whole-token occurrences of @needle@ in @haystack@. A
 -- "whole token" occurrence requires that the character before the
