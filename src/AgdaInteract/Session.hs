@@ -302,9 +302,12 @@ readerLoop h chan = loop 0 []
                      else loop (BS.length leftover) [leftover]
           [] -> loop plen pending  -- BSC.split never returns [], defensive
 
-    -- Upper bound on the bare-prompt probe: @JSON> @ plus generous slack.
+    -- Upper bound on the bare-prompt probe: the prompt itself plus generous
+    -- slack for surrounding whitespace. Anything longer cannot be the prompt,
+    -- so the probe is skipped. Derived from 'promptBS' so it tracks the
+    -- prompt string.
     promptProbeMax :: Int
-    promptProbeMax = 64
+    promptProbeMax = BS.length promptBS + 32
 
     readChunk = either (const BS.empty) id
                   <$> (try (BS.hGetSome h 8192) :: IO (Either SomeException BS.ByteString))

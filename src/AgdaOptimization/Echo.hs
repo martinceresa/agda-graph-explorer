@@ -50,6 +50,7 @@ import           Data.List            ( sortBy )
 import           Data.Ord             ( Down(..), comparing )
 import qualified Data.Text            as T
 import qualified Data.Vector          as V
+import qualified Data.Vector.Unboxed  as U
 import           Data.Vector          ( Vector )
 import           Text.Printf          ( printf )
 import           System.IO            ( hPutStrLn, stderr )
@@ -67,7 +68,8 @@ import           AgdaOptimization.UnionFind ( UF, ufFind )
 import           AgdaOptimization.Cluster ( SimEdge, bfsBoundedLayers, seededUF
                                           , clustersOfSize2, clusterAvgSim )
 import           AgdaGraph.WL         ( ColorVec, Fingerprint, fingerprintAt
-                                      , initialColors, refine, weightedJaccard' )
+                                      , fingerprintSize, initialColors, refine
+                                      , weightedJaccard' )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , emitJsonReport, withHumanOutput )
 
@@ -238,17 +240,18 @@ scorePairs :: Double
 scorePairs thr getFp cs =
   let !n = V.length cs
       -- Select the fingerprints once and precompute their colour-count
-      -- sums, so the inner O(N^2) loop never re-folds an operand.
+      -- sums (eager unboxed vector), so the inner O(N^2) loop never re-folds
+      -- an operand.
       !fps  = V.map getFp cs
-      !sums = V.map (IM.foldl' (+) 0) fps
+      !sums = U.generate n (\i -> fingerprintSize (fps V.! i))
       perI :: Int -> [SimEdge]
       perI !i =
         let !fi = fps V.! i
-            !si = sums V.! i
+            !si = sums U.! i
             go !j !acc
               | j >= n    = acc
               | otherwise =
-                  let !s  = weightedJaccard' si (sums V.! j) fi (fps V.! j)
+                  let !s  = weightedJaccard' si (sums U.! j) fi (fps V.! j)
                       !acc' = if s >= thr then (i, j, s) : acc else acc
                   in go (j + 1) acc'
         in go (i + 1) []

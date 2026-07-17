@@ -37,7 +37,7 @@ import qualified Data.Vector        as V
 import           AgdaGraph.Index    ( Index(..), closureFrom )
 import           AgdaGraph.Schema   ( Provenance(..) )
 import           AgdaGraph.WL       ( ColorVec, Fingerprint, fingerprintAt
-                                    , initialColors, refine )
+                                    , fingerprintSize, initialColors, refine )
 
 --------------------------------------------------------------------------------
 -- Signature / body adjacency split: read the index directly and name the
@@ -84,12 +84,6 @@ splitSigBodyAdj ix = case idxEdgeProvenance ix of
 subtreeUnder :: IM.IntMap IS.IntSet -> Int -> IS.IntSet
 subtreeUnder adj root = closureFrom True adj (IS.singleton root)
 
--- | Number of nodes a fingerprint summarises (its rooted subtree size):
--- the sum of the per-colour counts. Equals @IS.size (subtreeUnder adj i)@
--- for the subtree the fingerprint was built from.
-fingerprintSize :: Fingerprint -> Int
-fingerprintSize = IM.foldl' (+) 0
-
 --------------------------------------------------------------------------------
 -- Signature / body fingerprints (silhouette's per-node WL fingerprint
 -- pair, computed once for the whole graph).
@@ -124,14 +118,14 @@ buildSigBodyFingerprints wlK ix =
       -- vectors). This is the dominant cost and the first similar_* query /
       -- silhouette run forces the whole vector, so parallelising it turns a
       -- serial O(V*(V+E)) build into a per-core one.
-      !sigFps  = V.fromListN n
-                   (parMap rdeepseq
-                      (\i -> fingerprintAt sigCk  (subtreeUnder sigAdj  i)) [0 .. n - 1])
-      !bodyFps = V.fromListN n
-                   (parMap rdeepseq
-                      (\i -> fingerprintAt bodyCk (subtreeUnder bodyAdj i)) [0 .. n - 1])
-      !sigEdges  = IM.foldl' (\ !a s -> a + IS.size s) 0 sigAdj
-      !bodyEdges = IM.foldl' (\ !a s -> a + IS.size s) 0 bodyAdj
+      mkFps ck adj = V.fromListN n
+                       (parMap rdeepseq
+                          (\i -> fingerprintAt ck (subtreeUnder adj i)) [0 .. n - 1])
+      countEdges   = IM.foldl' (\ !a s -> a + IS.size s) 0
+      !sigFps    = mkFps sigCk  sigAdj
+      !bodyFps   = mkFps bodyCk bodyAdj
+      !sigEdges  = countEdges sigAdj
+      !bodyEdges = countEdges bodyAdj
   in SigBodyFingerprints
        { sbfSig           = sigFps
        , sbfBody          = bodyFps

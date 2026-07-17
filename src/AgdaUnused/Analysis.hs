@@ -146,9 +146,9 @@ data Context = Context
     -- qname inside M. Used by the "no downstream user" check.
   , ctxUsedQNames       :: !(M.Map Text (S.Set (Text, Text)))
     -- ^ For each user-module M, the set of (target-module, short-name)
-    -- pairs M references. This is the precise version of
-    -- 'ctxUsedNamesInMod'; the analyser uses it where short-name
-    -- ambiguity (same symbol exported by multiple modules) matters.
+    -- pairs M references. Precise (module-qualified) usage: the analyser
+    -- uses it where short-name ambiguity (same symbol exported by multiple
+    -- modules) matters.
   , ctxUsersOfQName     :: !(M.Map (Text, Text) (S.Set Text))
     -- ^ For each (module, short-name) qname, the set of other modules
     -- that reference it. Used for the public-re-export check.

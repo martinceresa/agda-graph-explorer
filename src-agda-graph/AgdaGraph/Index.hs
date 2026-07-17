@@ -30,9 +30,16 @@ module AgdaGraph.Index
   , ancestors
   , closureFrom
   , unsafeDeps
+
+    -- * Node-key names
+  , stripLineTag
+  , lastComp
+  , baseNameKey
+  , isLocalName
   ) where
 
 import           Control.DeepSeq     ( NFData(..) )
+import           Data.Char           ( isDigit )
 import qualified Data.HashMap.Strict as HM
 import qualified Data.IntMap.Strict  as IM
 import qualified Data.IntSet         as IS
@@ -344,6 +351,37 @@ closureFrom includeSeeds adj seeds =
         in go acc' (IS.foldr (:) rest fresh)
       reachable = go seeds (IS.toList seeds)
   in if includeSeeds then reachable else IS.difference reachable seeds
+
+-- ** Node-key names
+--
+-- The single owner of the producer's node-key naming convention (see
+-- 'AgdaDeps.Deps.nodeKey'), so the daemon's name resolver and the batch
+-- analyses share ONE encoding rather than hand-copying it per module.
+
+-- | Drop the @"\@<line>"@ disambiguator the producer appends to
+-- @where@-/anonymous-module helper names, for name-matching only.
+-- @Mod.QED\@388@ ↦ @Mod.QED@ (v3; pre-v3 @Mod._.QED\@388@ ↦ @Mod._.QED@);
+-- names with no such suffix are returned unchanged.
+stripLineTag :: Text -> Text
+stripLineTag t = case T.breakOnEnd "@" t of
+  (pre, suf) | not (T.null pre), not (T.null suf), T.all isDigit suf
+             -> T.dropEnd 1 pre
+  _          -> t
+
+-- | Final dot-component of a name; the whole input if it has no dot.
+lastComp :: Text -> Text
+lastComp t = let (_, suf) = T.breakOnEnd "." t in if T.null suf then t else suf
+
+-- | The base-name lookup key: final component of the tag-stripped name.
+-- The one function both the base-name index build and its lookup must use,
+-- so they cannot drift.
+baseNameKey :: Text -> Text
+baseNameKey = lastComp . stripLineTag
+
+-- | A @where@-/anonymous-module local helper: its name carries the
+-- producer's @\@<line>@ node-local tag (i.e. 'stripLineTag' changes it).
+isLocalName :: Definition -> Bool
+isLocalName d = stripLineTag (defName d) /= defName d
 
 -- ** Helpers
 

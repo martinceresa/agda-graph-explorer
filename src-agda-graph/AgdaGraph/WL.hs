@@ -32,6 +32,7 @@ module AgdaGraph.WL
     -- * Fingerprints
   , Fingerprint
   , fingerprintAt
+  , fingerprintSize
   , weightedJaccard
   , weightedJaccard'
   ) where
@@ -160,6 +161,13 @@ fingerprintAt cols sub =
   where
     bump !acc i = IM.insertWith (+) (cols V.! i) 1 acc
 
+-- | Total colour count a fingerprint summarises (its rooted-subtree size):
+-- the sum of the per-colour counts. The one operand-sum both
+-- 'weightedJaccard' and the all-pairs / 1-vs-N callers of 'weightedJaccard''
+-- share.
+fingerprintSize :: Fingerprint -> Int
+fingerprintSize = IM.foldl' (+) 0
+
 -- | Weighted Jaccard with the two operands' colour-count sums supplied by
 -- the caller. In an all-pairs (or 1-vs-N) loop the fixed operand's sum is
 -- constant, so precomputing sums once avoids the two extra full folds
@@ -178,5 +186,4 @@ weightedJaccard' !sumA !sumB a b
 -- | Weighted Jaccard. Returns 0 when both fingerprints are empty (treating
 -- empty-vs-empty as undefined rather than perfect overlap).
 weightedJaccard :: Fingerprint -> Fingerprint -> Double
-weightedJaccard a b =
-  weightedJaccard' (IM.foldl' (+) (0 :: Int) a) (IM.foldl' (+) (0 :: Int) b) a b
+weightedJaccard a b = weightedJaccard' (fingerprintSize a) (fingerprintSize b) a b

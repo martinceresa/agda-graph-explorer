@@ -127,17 +127,15 @@ orderPair a b
   | a <= b    = (a, b)
   | otherwise = (b, a)
 
--- | Canonical @(a, b, c)@ with @a <= b <= c@. Branch-based min/mid/max
--- (no list, no 'sort' allocation) — this runs once per candidate triple in
--- the Apriori counting loops.
+-- | Canonical ascending @(a, b, c)@ via a 3-comparator sorting network (no
+-- list, no 'sort' allocation) — runs once per candidate triple in the
+-- Apriori counting loops. Same idiom as @ConceptBundle.orderQuad@.
 orderTriple :: Int -> Int -> Int -> (Int, Int, Int)
-orderTriple a b c
-  | a <= b    = if b <= c then (a, b, c)
-                else if a <= c then (a, c, b)
-                else (c, a, b)
-  | otherwise = if a <= c then (b, a, c)
-                else if b <= c then (b, c, a)
-                else (c, b, a)
+orderTriple a b c =
+  let (a1, b1) = orderPair a  b
+      (a2, c1) = orderPair a1 c
+      (b2, c2) = orderPair b1 c1
+  in (a2, b2, c2)
 
 -- | The item ids in the top @pct%@ of the support-count distribution, ties
 -- at the boundary all included (everything with @count >= threshold@).

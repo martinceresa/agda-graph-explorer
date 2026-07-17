@@ -350,32 +350,6 @@ rankedMatches ld q =
 suggestions :: Loaded -> Text -> Int -> [Definition]
 suggestions ld q lim = take lim (rankedMatches ld q)
 
--- | A where-block / anonymous-module local helper. As of producer
--- @nodeKeyVersion@ 3 such helpers are lifted into their named parent
--- module — the @._.@ anonymous-module marker is stripped — but the
--- @\@\<binding-line\>@ disambiguator the producer appends to them (and
--- only to them; 'AgdaDeps.Deps.nodeKey') survives, so that trailing tag
--- is the node-local signal. Keying on the tag (via 'stripLineTag') also
--- recognises pre-v3 names like @Mod._.helper\@15@, which carry it too.
--- 'querySearch' can drop these on request, since they crowd out
--- top-level results.
-isLocalName :: Definition -> Bool
-isLocalName d = stripLineTag (defName d) /= defName d
-
-lastComp :: Text -> Text
-lastComp t = let (_, suf) = T.breakOnEnd "." t in if T.null suf then t else suf
-
--- | Drop the @"\@<line>"@ disambiguator the producer appends to
--- @where@-/anonymous-module helper names ('AgdaDeps.Deps.nodeKey'), for
--- name-matching purposes only. @Mod.QED\@388@ ↦ @Mod.QED@ (v3; pre-v3
--- @Mod._.QED\@388@ ↦ @Mod._.QED@); names with no such suffix are returned
--- unchanged.
-stripLineTag :: Text -> Text
-stripLineTag t = case T.breakOnEnd "@" t of
-  (pre, suf) | not (T.null pre), not (T.null suf), T.all isDigit suf
-             -> T.dropEnd 1 pre
-  _          -> t
-
 -- | Is @needle@ a segment-aligned dotted suffix of @hay@? True for an
 -- exact match or when @hay@ ends in @"." <> needle@ (so @liveness′@ and
 -- @Theorem3.liveness′@ both match @…Theorem3.liveness′@, but @ness′@

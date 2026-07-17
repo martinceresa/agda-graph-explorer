@@ -58,7 +58,6 @@ import           Control.Exception    (SomeException, evaluate, finally, try)
 import           Control.Monad        (filterM, forM, forever, void, when)
 import           Data.Aeson           (Value, eitherDecode, encode)
 import qualified Data.ByteString.Lazy as BL
-import           Data.Char            (isDigit)
 import           Data.IORef
 import qualified Data.IntMap.Strict   as IM
 import           Data.List            (isInfixOf, isPrefixOf, isSuffixOf, maximumBy, sort, sortOn)
@@ -91,7 +90,8 @@ import           System.Process       (CreateProcess (..), proc,
 
 import           AgdaGraph.GoalCanon   (hashString, word64Hex16)
 import           AgdaGraph.Glob       (globMatch)
-import           AgdaGraph.Index      (Index, buildIndexLean, idxDefs, idxRealCount)
+import           AgdaGraph.Index      (Index, buildIndexLean, idxDefs, idxRealCount
+                                      , baseNameKey, isLocalName)
 import           AgdaGraph.Schema     (Definition (..), ExpandedGraph (..), ReExport (..))
 import           AgdaGraph.Union      (unionExpandedGraphs)
 import           AgdaGraph.Similarity (SigBodyFingerprints,
@@ -743,7 +743,7 @@ loadedFromGraph cfg mGraphFile egProject = do
     , ldRealDefs = rds
     , ldOwnerMap = ownerMap
     , ldBaseNameIndex = M.fromListWith (++)
-        [ (resolveBaseKey (defName d), [d]) | d <- rds ]
+        [ (baseNameKey (defName d), [d]) | d <- rds ]
     , ldSigBodyFp = buildSigBodyFingerprints silhouetteDefaultWlK ix
     , ldSubtermFp = subtermMultisetsVec ix
     , ldAutoResolveUnique = cfgAutoResolveUnique cfg
@@ -822,20 +822,6 @@ stripBuilt t = case T.breakOn ", built" t of
 -- once here so a query touching N lines is O(N log n) rather than
 -- O(N · nDefs). The non-local candidates are pulled out once and shared
 -- across all locals.
--- | Base-name key for 'ldBaseNameIndex': the final dot-component of a name
--- with the producer's @\@\<line\>@ helper disambiguator stripped. MUST stay
--- in lock-step with 'AgdaMcp.Query.stripLineTag' + 'AgdaMcp.Query.lastComp'
--- (the resolver looks up by @lastComp (stripLineTag name)@).
-resolveBaseKey :: T.Text -> T.Text
-resolveBaseKey = lastCompT . stripTagT
-  where
-    stripTagT t = case T.breakOnEnd "@" t of
-      (pre, suf) | not (T.null pre), not (T.null suf), T.all isDigit suf
-                 -> T.dropEnd 1 pre
-      _          -> t
-    lastCompT t = let (_, suf) = T.breakOnEnd "." t
-                  in if T.null suf then t else suf
-
 buildOwnerMap :: [Definition] -> IM.IntMap Definition
 buildOwnerMap rds =
   IM.fromList (mapMaybe owner locals)
@@ -844,7 +830,7 @@ buildOwnerMap rds =
     -- former @maximumBy (comparing defLine)@ over a scan in @rds@ order
     -- (equal max line ⇒ the LAST such def ⇒ the largest position).
     indexed   = zip [0 :: Int ..] rds
-    locals    = [ d | (_, d) <- indexed, isLocalName' d ]
+    locals    = [ d | (_, d) <- indexed, isLocalName d ]
     -- Non-local defs that carry a line, bucketed by module, each bucket a
     -- Vector ascending by (line, position). Instead of scanning every
     -- non-local per local (O(locals·nonLocals)), a local looks up only the
@@ -856,7 +842,7 @@ buildOwnerMap rds =
         (M.fromListWith (++)
            [ (defModule o, [(ln, pos, o)])
            | (pos, o) <- indexed
-           , not (isLocalName' o)
+           , not (isLocalName o)
            , Just ln  <- [defLine o]
            ])
     owner d = do
@@ -889,15 +875,6 @@ buildOwnerMap rds =
                   e@(l,_,_) = vec V.! mid
               in if l <= ln then go (mid + 1) hi (Just e)
                             else go lo (mid - 1) best
-    -- A where-block / anonymous-module local helper. As of producer
-    -- nodeKeyVersion 3 the @._.@ marker is stripped (helpers are lifted
-    -- into their named parent module), but the @\@<binding-line>@
-    -- disambiguator the producer appends to them — and only to them —
-    -- survives and is the node-local signal; keying on it also matches
-    -- pre-v3 names like @Mod._.helper\@15@. Mirrors
-    -- 'AgdaMcp.Query.isLocalName' / 'AgdaMcp.Query.stripLineTag'.
-    isLocalName' d = case T.breakOnEnd "@" (defName d) of
-      (pre, suf) -> not (T.null pre) && not (T.null suf) && T.all isDigit suf
 
 -- | The producer flag list shared by every @agda-deps@ run (all but the
 -- out-dir and the trailing entry positional).

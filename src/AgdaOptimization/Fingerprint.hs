@@ -58,6 +58,7 @@ import           Data.List            ( sortBy, sortOn )
 import           Data.Ord             ( Down(..), comparing )
 import qualified Data.Text            as T
 import qualified Data.Vector          as V
+import qualified Data.Vector.Unboxed  as U
 import           Data.Vector          ( Vector )
 import           Text.Printf          ( printf )
 
@@ -73,7 +74,8 @@ import           AgdaOptimization.FlagSpec ( FlagSpec(..), EnumErr(..)
 import           AgdaOptimization.Cluster ( SimEdge, bfsBoundedLayers, bfsUnbounded
                                           , clustersOfSize2, clusterAvgSim )
 import           AgdaGraph.WL         ( ColorVec, Fingerprint, fingerprintAt
-                                      , initialColors, refine, weightedJaccard' )
+                                      , fingerprintSize, initialColors, refine
+                                      , weightedJaccard' )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , emitJsonReport, withHumanOutput )
 
@@ -383,9 +385,10 @@ data ScoreResult = ScoreResult
 scorePairs :: Double -> Vector Cand -> V.Vector Int -> ScoreResult
 scorePairs thr cs owners =
   let !n = V.length cs
-      -- Precompute each candidate fingerprint's colour-count sum once, so
-      -- the inner O(N^2) loop doesn't re-fold both operands per pair.
-      !sums = V.map (IM.foldl' (+) 0 . cFp) cs
+      -- Precompute each candidate fingerprint's colour-count sum once (as an
+      -- eager unboxed vector), so the inner O(N^2) loop doesn't re-fold both
+      -- operands per pair.
+      !sums = U.generate n (\i -> fingerprintSize (cFp (cs V.! i)))
       -- Per-i: walk j ∈ [i+1, n) and emit (skipCount_i, edges_i). The
       -- list of edges is force-deep'd by 'rdeepseq' below; the
       -- '(Int, [SimEdge])' tuple is strict in the Int and the list
@@ -394,7 +397,7 @@ scorePairs thr cs owners =
       perI !i =
         let !oi = owners V.! i
             !ci = cs V.! i
-            !si = sums V.! i
+            !si = sums U.! i
             go !j !skipAcc !acc
               | j >= n    = (skipAcc, acc)
               | otherwise =
@@ -403,7 +406,7 @@ scorePairs thr cs owners =
                        then go (j + 1) (skipAcc + 1) acc
                        else
                          let !cj = cs V.! j
-                             !s  = weightedJaccard' si (sums V.! j) (cFp ci) (cFp cj)
+                             !s  = weightedJaccard' si (sums U.! j) (cFp ci) (cFp cj)
                              !acc' = if s >= thr then (i, j, s) : acc else acc
                          in go (j + 1) skipAcc acc'
         in go (i + 1) 0 []

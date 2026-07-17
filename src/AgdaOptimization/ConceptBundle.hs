@@ -55,7 +55,7 @@ module AgdaOptimization.ConceptBundle
   , run
   ) where
 
-import           Control.DeepSeq         ( rnf )
+import           Control.DeepSeq         ( NFData, rnf )
 import           Control.Exception       ( evaluate )
 import           Control.Parallel.Strategies ( parMap, rdeepseq )
 import qualified Data.IntMap.Strict      as IM
@@ -588,11 +588,18 @@ orderQuad a b c d =
 bundleChunk :: Int
 bundleChunk = 64
 
--- | Count occurrences of every 2-subset across baskets.
-countPairs :: [Basket] -> IntSet -> Map (Int, Int) Int
-countPairs txs l1 =
+-- | Chunked parallel count: fold each basket chunk into a per-chunk count
+-- map and sum the partials. Shared by the L2/L3/L4 counters, which differ
+-- only in their per-basket accumulator.
+countChunked :: (NFData k, NFData v, Num v, Ord k)
+             => (Map k v -> Basket -> Map k v) -> [Basket] -> Map k v
+countChunked addBk txs =
   Map.unionsWith (+)
     (parMap rdeepseq (foldl' addBk Map.empty) (chunksOf bundleChunk txs))
+
+-- | Count occurrences of every 2-subset across baskets.
+countPairs :: [Basket] -> IntSet -> Map (Int, Int) Int
+countPairs txs l1 = countChunked addBk txs
   where
     addBk !acc (Basket _ is _) =
       let !filtered = filter (`IS.member` l1) is
@@ -604,9 +611,7 @@ countPairs txs l1 =
 
 countTriples :: [Basket] -> IntSet -> Map (Int, Int) Int
              -> Map (Int, Int, Int) Int
-countTriples txs l1 l2sup =
-  Map.unionsWith (+)
-    (parMap rdeepseq (foldl' addBk Map.empty) (chunksOf bundleChunk txs))
+countTriples txs l1 l2sup = countChunked addBk txs
   where
     addBk !acc (Basket _ is _) =
       let !filtered = filter (`IS.member` l1) is
@@ -633,9 +638,7 @@ countTriples txs l1 l2sup =
 
 countQuads :: [Basket] -> IntSet -> Map (Int, Int, Int) Int
            -> Map (Int, Int, Int, Int) Int
-countQuads txs l1 l3sup =
-  Map.unionsWith (+)
-    (parMap rdeepseq (foldl' addBk Map.empty) (chunksOf bundleChunk txs))
+countQuads txs l1 l3sup = countChunked addBk txs
   where
     addBk !acc (Basket _ is _) =
       let !filtered = filter (`IS.member` l1) is
