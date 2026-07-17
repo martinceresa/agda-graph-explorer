@@ -11,8 +11,9 @@
 -- 'V.Vector Definition' so the def payload is O(1) indexed.
 --
 -- All traversal helpers here are strict and rely on 'IntMap.Strict' /
--- 'IntSet' / 'foldl'' / bang patterns. Topo / longest-path / closure
--- routines are the hot path for the optimisation analyses.
+-- 'IntSet' / 'foldl'' / bang patterns. The closure routines
+-- ('closureFrom' / 'descendants' / 'ancestors') are the hot path for the
+-- optimisation analyses.
 module AgdaGraph.Index
   ( -- * Index
     Index(..)
@@ -25,12 +26,10 @@ module AgdaGraph.Index
   , defAt
 
     -- * Traversal
-  , topoSort
   , descendants
   , ancestors
   , closureFrom
   , unsafeDeps
-  , longestPathDP
   ) where
 
 import           Control.DeepSeq     ( NFData(..) )
@@ -39,8 +38,6 @@ import qualified Data.IntMap.Strict  as IM
 import qualified Data.IntSet         as IS
 import           Data.List           ( sortOn )
 import qualified Data.Map.Strict     as M
-import qualified Data.Sequence       as Seq
-import           Data.Sequence       ( Seq, ViewL(..) )
 import qualified Data.Set            as Set
 import           Data.Text           ( Text )
 import qualified Data.Text           as T
@@ -293,53 +290,6 @@ defAt Index{..} i = idxDefs V.! i
 
 -- ** Traversal
 
--- | Topological sort of the dependency graph (edges point user ->
--- usee). Returns either the order or a witness cycle (a non-empty list
--- of node ids that still had positive in-degree after the queue
--- drained — i.e. they participate in at least one cycle).
---
--- Kahn's algorithm over 'IntMap'/'IntSet'. O(V + E).
-topoSort :: Index -> Either [Int] [Int]
-topoSort Index{..} =
-  let -- In-degree from the forward adjacency.
-      inDeg0 :: IM.IntMap Int
-      !inDeg0 = foldl' bump IM.empty
-        [ t
-        | (_, ts) <- IM.toList idxForward
-        , t       <- IS.toList ts
-        ]
-        where
-          bump !acc t = IM.insertWith (+) t 1 acc
-
-      -- Seed every node so that isolated nodes appear in the order too.
-      seeded :: IM.IntMap Int
-      !seeded = foldl' seed inDeg0 [0 .. idxNodeCount - 1]
-        where
-          seed !acc i
-            | IM.member i acc = acc
-            | otherwise       = IM.insert i 0 acc
-
-      initialQ :: Seq Int
-      !initialQ = Seq.fromList
-        [ i | (i, d) <- IM.toAscList seeded, d == 0 ]
-
-      go :: [Int] -> IM.IntMap Int -> Seq Int -> Either [Int] [Int]
-      go !acc !inDeg q = case Seq.viewl q of
-        EmptyL ->
-          if length acc == idxNodeCount
-            then Right (reverse acc)
-            else Left (IM.keys (IM.filter (> 0) inDeg))
-        cur :< rest ->
-          let neighbours = IM.findWithDefault IS.empty cur idxForward
-              (inDeg', enq) = IS.foldl' step (inDeg, []) neighbours
-              step (!m, !buf) n =
-                let !d  = IM.findWithDefault 0 n m - 1
-                    !m' = IM.insert n d m
-                in if d <= 0 then (m', n : buf) else (m', buf)
-              q' = foldl' (Seq.|>) rest enq
-          in go (cur : acc) inDeg' q'
-  in go [] seeded initialQ
-
 -- | Forward transitive closure of a seed set (the set is excluded
 -- from the result unless reachable from a seed via a non-empty path).
 -- Iterative DFS; visits each node at most once.
@@ -379,37 +329,6 @@ closureFrom includeSeeds adj seeds =
         in go acc' (IS.foldr (:) rest fresh)
       reachable = go seeds (IS.toList seeds)
   in if includeSeeds then reachable else IS.difference reachable seeds
-
--- | Depth of each node to the deepest reachable sink, computed in
--- /reverse/ topological order (i.e. sinks first). A sink that's in the
--- given seed set gets depth 0; a non-sink gets @1 + max(depth child)@.
---
--- Nodes that don't reach any seed are absent from the returned map
--- (caller uses 'IM.notMember' to filter — interpret-as-(-1) is a
--- caller convention).
---
--- O(V + E) over the topo order. Returns an empty map if the graph has
--- a cycle (no meaningful longest-path on a non-DAG).
-longestPathDP :: Index -> IS.IntSet -> IM.IntMap Int
-longestPathDP ix sinks = case topoSort ix of
-  Left _   -> IM.empty
-  Right xs ->
-    let rev = reverse xs
-        step !acc n
-          | IS.member n sinks =
-              IM.insert n 0 acc
-          | otherwise =
-              let kids = IM.findWithDefault IS.empty n (idxForward ix)
-                  best = IS.foldl' bestStep Nothing kids
-                  bestStep !mb k = case IM.lookup k acc of
-                    Just d  -> Just $! case mb of
-                      Nothing -> d + 1
-                      Just b  -> max b (d + 1)
-                    Nothing -> mb
-              in case best of
-                   Just d  -> IM.insert n d acc
-                   Nothing -> acc
-    in foldl' step IM.empty rev
 
 -- ** Helpers
 

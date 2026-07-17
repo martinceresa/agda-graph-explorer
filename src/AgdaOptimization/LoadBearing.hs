@@ -21,7 +21,7 @@
 -- Graph orientation: 'idxForward' edges go user -> usee. "Results" sit
 -- at the TOP of the dep tree (no in-edges, or exported, or tagged).
 -- Critical paths therefore walk /forward/ from a result down to a leaf
--- — the opposite direction from what 'longestPathDP' computes. We use
+-- — the opposite direction from a sinks-first longest-path DP. We use
 -- a small local DP that propagates depth forward from each seed.
 --
 -- Cycles: the real corpus is /not/ a DAG (data types co-reference

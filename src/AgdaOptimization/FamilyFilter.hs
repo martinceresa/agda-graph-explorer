@@ -32,15 +32,15 @@ import           AgdaGraph.Index   ( Index, defAt )
 import           AgdaGraph.Schema  ( Definition(..) )
 import           AgdaOptimization.Common ( lastSegment )
 
--- | Strip a qname to its last dot-component, then try to split it into
--- @(stem, idx)@ matching @^(.+)-(\\d+)$@. Returns 'Nothing' for items
--- that aren't part of a numeric-suffix family.
-familyOf :: Index -> Int -> Maybe Text
-familyOf ix i =
-  let !short = lastSegment (defName (defAt ix i))
-  in case parseCaseUnfold (T.unpack short) of
-       Just (stem, _) -> Just (T.pack stem)
-       Nothing        -> Nothing
+-- | Try to split an already-unqualified name into @(stem, idx)@ matching
+-- @^(.+)-(\\d+)$@. Returns 'Nothing' for names that aren't part of a
+-- numeric-suffix family. Takes the short name so callers that already
+-- computed it don't re-derive it.
+familyOfShort :: Text -> Maybe Text
+familyOfShort short =
+  case parseCaseUnfold (T.unpack short) of
+    Just (stem, _) -> Just (T.pack stem)
+    Nothing        -> Nothing
 
 -- | Match @<stem>-<digits>@ at the end of a short name. Right-anchored;
 -- the stem may itself contain dashes (e.g. @cong-of-foo-2@ → stem
@@ -89,8 +89,9 @@ isForcedByFamily ix fraction items =
       -- Classify each item once: its short name and detected family.
       classified :: [(Text, Maybe Text)]
       classified =
-        [ (lastSegment (defName (defAt ix item)), familyOf ix item)
-        | item <- items ]
+        [ (short, familyOfShort short)
+        | item <- items
+        , let short = lastSegment (defName (defAt ix item)) ]
       -- First pass: stems contributed by items with the -N suffix.
       !stems = foldl' addStem Map.empty classified
       addStem :: Map Text Int -> (Text, Maybe Text) -> Map Text Int

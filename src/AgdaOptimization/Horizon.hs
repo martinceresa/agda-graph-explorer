@@ -30,8 +30,8 @@
 -- ---------------------------------------------------------------------
 --
 -- The real corpus contains cycles (data types co-reference their
--- constructors; mutually recursive lemmas; …). 'longestPathDP' on
--- 'Index' bails on a non-DAG. We therefore SCC-condense first
+-- constructors; mutually recursive lemmas; …), so a raw longest-path DP
+-- over 'Index' would bail on a non-DAG. We therefore SCC-condense first
 -- ('Data.Graph.stronglyConnCompR') and run two DPs on the
 -- /condensation/ DAG:
 --

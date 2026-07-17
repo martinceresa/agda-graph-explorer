@@ -29,7 +29,7 @@ module AgdaGraph.Union
   ( unionExpandedGraphs
   ) where
 
-import           Data.List        (sort, sortOn)
+import           Data.List        (sort)
 import qualified Data.Map.Strict  as M
 import           Data.Text        (Text)
 import           Data.Word        (Word64)
@@ -136,11 +136,11 @@ unionExpandedGraphs gs@(g0 : _) =
     byName :: M.Map Text (Definition, [Word64], [Int])
     byName = foldl' merge M.empty allDefsWithArrays
 
-    -- Sorted by node key (the def name) for a stable, deterministic id
-    -- assignment downstream. 'M.toAscList' is already key-sorted, but be
-    -- explicit so the intent survives a future refactor.
+    -- Values in ascending node-key (def-name) order for a stable,
+    -- deterministic id assignment downstream. 'M.elems' already yields
+    -- values key-sorted, so no re-sort is needed.
     sortedByName :: [(Definition, [Word64], [Int])]
-    sortedByName = map snd (sortOn fst (M.toList byName))
+    sortedByName = M.elems byName
 
     mergedDefs :: [Definition]
     mergedDefs = [ d | (d, _, _) <- sortedByName ]

@@ -26,7 +26,7 @@ module AgdaOptimization.Common
 import           Control.Concurrent ( forkIO, killThread, threadDelay )
 import           Control.Exception  ( bracket )
 import           Data.IORef         ( IORef, writeIORef )
-import           Data.List          ( sort, sortOn )
+import           Data.List          ( sortOn )
 import           Data.Ord           ( Down(..) )
 import           Data.Text          ( Text )
 import qualified Data.Text          as T
@@ -69,18 +69,14 @@ isTagged !t =
   || lt == "theorem"
   || T.isInfixOf ".theorem" (T.toLower t)
 
--- | Nodes with no inbound edges.
+-- | Nodes with no inbound edges. A node has an inbound edge iff it is a
+-- key of 'idxReverse' with a non-empty target set, so the terminals are
+-- @[0 .. n-1]@ minus those keys — O(V) instead of a per-node lookup.
 terminals :: Index -> IS.IntSet
 terminals ix =
-  let !n  = idxNodeCount ix
-      !rv = idxReverse ix
-      go !acc i
-        | i >= n = acc
-        | otherwise =
-            let inbound = IM.findWithDefault IS.empty i rv
-            in if IS.null inbound then go (IS.insert i acc) (i + 1)
-                                  else go acc (i + 1)
-  in go IS.empty 0
+  let !n           = idxNodeCount ix
+      !hasInbound  = IM.keysSet (IM.filter (not . IS.null) (idxReverse ix))
+  in IS.difference (IS.fromDistinctAscList [0 .. n - 1]) hasInbound
 
 -- | Node ids whose unqualified name matches the @--exclude-name-regex@
 -- pattern. An empty pattern excludes nothing.
@@ -131,11 +127,17 @@ orderPair a b
   | a <= b    = (a, b)
   | otherwise = (b, a)
 
--- | Canonical @(a, b, c)@ with @a <= b <= c@.
+-- | Canonical @(a, b, c)@ with @a <= b <= c@. Branch-based min/mid/max
+-- (no list, no 'sort' allocation) — this runs once per candidate triple in
+-- the Apriori counting loops.
 orderTriple :: Int -> Int -> Int -> (Int, Int, Int)
-orderTriple a b c = case sort [a, b, c] of
-  [x, y, z] -> (x, y, z)
-  _         -> (a, b, c)  -- unreachable: sort of a 3-list yields a 3-list
+orderTriple a b c
+  | a <= b    = if b <= c then (a, b, c)
+                else if a <= c then (a, c, b)
+                else (c, a, b)
+  | otherwise = if a <= c then (b, a, c)
+                else if b <= c then (b, c, a)
+                else (c, b, a)
 
 -- | The item ids in the top @pct%@ of the support-count distribution, ties
 -- at the boundary all included (everything with @count >= threshold@).
