@@ -31,7 +31,7 @@ import           Control.Exception    ( IOException, try )
 import qualified Data.Aeson           as A
 import           Data.Aeson           ( FromJSON(..), withObject, withText
                                       , (.:), (.:?), (.!=) )
-import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString      as BS
 import qualified Data.Map.Strict      as M
 import           Data.Text            ( Text )
 import qualified Data.Text            as T
@@ -101,7 +101,7 @@ instance FromJSON Access where
 -- | A single definition. Strict fields throughout; this record is built
 -- once per QName and held across the whole analysis.
 data Definition = Definition
-  { defId     :: !Int
+  { defId     :: {-# UNPACK #-} !Int
   , defName   :: !Text
     -- ^ Fully-qualified user-visible name (matches @prettyShow@ output).
   , defModule :: !Text
@@ -129,8 +129,8 @@ data Definition = Definition
     -- list for every def in the escaping module, so as decoded from the wire
     -- this holds only the declaration-level escapes, while an 'Index' def's
     -- 'defUnsafe' also carries its module's option escapes.
-  , defX      :: !Double
-  , defY      :: !Double
+  , defX      :: {-# UNPACK #-} !Double
+  , defY      :: {-# UNPACK #-} !Double
   , defOrigin :: !(Maybe Text)
     -- ^ Consumer-internal source tag, NOT on the wire (always decodes to
     -- 'Nothing'): 'Nothing' for the project graph, @Just label@ for a def
@@ -344,6 +344,9 @@ instance FromJSON ExpandedGraph where
             \test/packed/README.md for the packed layout and the gap."
           else do
             defs   <- o .:  "definitions"
+            -- Edges arrive as 2-element JSON arrays; aeson's tuple instance
+            -- decodes each straight to a @(Text,Text)@ (a malformed array is a
+            -- clean decode error, not a Haskell 'error'). Field type pins it.
             edges  <- o .:  "definitionEdges"
             mfiles <- o .:  "moduleFiles"
             mods   <- o .:  "modules"
@@ -358,12 +361,14 @@ instance FromJSON ExpandedGraph where
             prov   <- o .:? "definitionEdgesProvenance" .!= []
             sths   <- o .:? "definitionSubtermHashes"   .!= []
             stds   <- o .:? "definitionSubtermDepths"   .!= []
-            let !pairs = map toPair edges
-                !nE    = length pairs
-                !nP    = length prov
-                !nD    = length defs
-                !nS    = length sths
-                !nT    = length stds
+            -- Lengths only feed the parallel-array checks below; keep them
+            -- lazy so the O(defs)/O(edges) spine walks fire only when the
+            -- corresponding optional array is actually present.
+            let nE = length edges
+                nP = length prov
+                nD = length defs
+                nS = length sths
+                nT = length stds
             -- Optional fields, but if present the producer MUST emit
             -- the parallel-array invariant. Mismatch is a producer bug;
             -- surface it with a clear decode error rather than silently
@@ -389,7 +394,7 @@ instance FromJSON ExpandedGraph where
                    \(producer bug)"
             pure ExpandedGraph
                 { egDefinitions      = defs
-                , egDefinitionEdges  = pairs
+                , egDefinitionEdges  = edges
                 , egModules          = mods
                 , egEntryModule      = entry
                 , egExternalModules  = exts
@@ -495,12 +500,6 @@ instance A.ToJSON ExpandedGraph where
     ++ [ "moduleOptionEscapes" A..= egModuleOptionEscapes g
        | not (M.null (egModuleOptionEscapes g)) ]
 
--- | Edges arrive as @[a, b]@ JSON arrays of length 2. Anything else is a
--- producer bug; surface it as a decode error rather than a Haskell crash.
-toPair :: [Text] -> (Text, Text)
-toPair [a, b] = (a, b)
-toPair xs     = error $ "expected pair, got list of length " ++ show (length xs)
-
 -- | True iff @subtermHashes@ and @subtermDepths@ have a per-def length
 -- mismatch somewhere. Used purely as a sanity check on the producer's
 -- parallel-array invariant.
@@ -515,7 +514,7 @@ lengthMismatch xs ys =
 -- consumer gets a clean diagnostic instead of an uncaught 'IOException'.
 loadExpandedGraph :: FilePath -> IO (Either String ExpandedGraph)
 loadExpandedGraph p = do
-  r <- try (BL.readFile p) :: IO (Either IOException BL.ByteString)
+  r <- try (BS.readFile p) :: IO (Either IOException BS.ByteString)
   pure $ case r of
     Left e   -> Left ("cannot read graph file: " ++ show e)
-    Right bs -> A.eitherDecode bs
+    Right bs -> A.eitherDecodeStrict' bs

@@ -36,7 +36,7 @@ import           Control.DeepSeq     ( NFData(..) )
 import qualified Data.HashMap.Strict as HM
 import qualified Data.IntMap.Strict  as IM
 import qualified Data.IntSet         as IS
-import           Data.List           ( sortOn )
+import           Data.List           ( mapAccumL, sortOn )
 import qualified Data.Map.Strict     as M
 import qualified Data.Set            as Set
 import           Data.Text           ( Text )
@@ -131,19 +131,28 @@ buildIndex ExpandedGraph{..} =
       realMap :: HM.HashMap Text Int
       !realMap = HM.fromList [ (defName d, defId d) | d <- realDefs ]
 
-      -- (2) Discover edge-only QNames; allocate trailing ids.
-      addNew :: (HM.HashMap Text Int, Int) -> Text
-             -> (HM.HashMap Text Int, Int)
-      addNew (!m, !n) t
-        | HM.member t m = (m, n)
-        | otherwise     = (HM.insert t n m, n + 1)
+      -- (2) One pass over the edges: allocate trailing ids for edge-only
+      -- QNames AND build forward/reverse adjacency together. Each edge's
+      -- endpoints are interned (yielding their id) before its adjacency is
+      -- inserted, so a single fold replaces the former "discover ids, then
+      -- resolve both endpoints again per edge" two-pass shape — no redundant
+      -- 'HM.lookup'. 'IM.alter' allocates the singleton set only for a
+      -- source's first edge (the same result as @insertWith IS.union@).
+      intern :: HM.HashMap Text Int -> Int -> Text
+             -> (HM.HashMap Text Int, Int, Int)
+      intern !m !n t = case HM.lookup t m of
+        Just i  -> (m, n, i)
+        Nothing -> (HM.insert t n m, n + 1, n)
 
-      addPair :: (HM.HashMap Text Int, Int) -> (Text, Text)
-              -> (HM.HashMap Text Int, Int)
-      addPair acc (a, b) = addNew (addNew acc a) b
+      edgeStep (!m, !n, !f, !r) (a, b) =
+        let (m1, n1, ai) = intern m  n  a
+            (m2, n2, bi) = intern m1 n1 b
+            !f' = IM.alter (Just . maybe (IS.singleton bi) (IS.insert bi)) ai f
+            !r' = IM.alter (Just . maybe (IS.singleton ai) (IS.insert ai)) bi r
+        in (m2, n2, f', r')
 
-      (nameToId, total) =
-        foldl' addPair (realMap, nReal) egDefinitionEdges
+      (nameToId, total, forward, reverseAdj) =
+        foldl' edgeStep (realMap, nReal, IM.empty, IM.empty) egDefinitionEdges
 
       nSynth :: Int
       !nSynth = total - nReal
@@ -187,27 +196,33 @@ buildIndex ExpandedGraph{..} =
                                         (Set.fromList (defUnsafe d ++ esc)) }
         where esc = M.findWithDefault [] (defModule d) egModuleOptionEscapes
 
-      defsVec :: V.Vector Definition
-      !defsVec = V.fromListN total
-                   (map augmentUnsafe (realDefs ++ syntheticDefs))
+      -- Augment each def's 'defUnsafe' (above) AND intern its 'defModule' so
+      -- all defs in one module share a single 'Text' object — aeson allocates
+      -- a fresh copy per JSON occurrence, so a module with N defs otherwise
+      -- retains N identical module-name strings for the snapshot's lifetime.
+      -- One pass; the memo maps the canonical (first-seen) module name to
+      -- itself. Value-preserving (Text equality is unchanged).
+      buildDefs :: [Definition] -> [Definition]
+      buildDefs = snd . mapAccumL stepDef HM.empty
+        where
+          stepDef !memo d0 =
+            let d = augmentUnsafe d0
+            in case HM.lookup (defModule d) memo of
+                 Just m  -> (memo, d { defModule = m })
+                 Nothing -> let !k = defModule d
+                            in (HM.insert k k memo, d)
 
-      -- (4) Adjacency. Drop any edge whose endpoints we somehow can't
-      -- resolve (shouldn't happen post-step-2, but be defensive).
+      defsVec :: V.Vector Definition
+      !defsVec = V.fromListN total (buildDefs (realDefs ++ syntheticDefs))
+
+      -- Endpoint resolution for the provenance pass below. Every edge
+      -- endpoint was interned in step (2), so 'HM.lookup' always hits;
+      -- 'Maybe' is kept only to stay defensive.
       resolvePair :: (Text, Text) -> Maybe (Int, Int)
       resolvePair (a, b) = do
         ai <- HM.lookup a nameToId
         bi <- HM.lookup b nameToId
         pure (ai, bi)
-
-      (!forward, !reverseAdj) =
-        foldl' insBoth (IM.empty, IM.empty) egDefinitionEdges
-        where
-          insBoth (!f, !r) e = case resolvePair e of
-            Just (s, t) ->
-              ( IM.insertWith IS.union s (IS.singleton t) f
-              , IM.insertWith IS.union t (IS.singleton s) r
-              )
-            Nothing     -> (f, r)
 
       -- Provenance map. 'Nothing' when the producer didn't emit per-edge
       -- tags (preserves the wire format for analyses that don't care).
