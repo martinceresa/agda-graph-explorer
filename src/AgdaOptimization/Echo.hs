@@ -67,7 +67,7 @@ import           AgdaOptimization.UnionFind ( UF, ufFind )
 import           AgdaOptimization.Cluster ( SimEdge, bfsBoundedLayers, seededUF
                                           , clustersOfSize2, clusterAvgSim )
 import           AgdaGraph.WL         ( ColorVec, Fingerprint, fingerprintAt
-                                      , initialColors, refine, weightedJaccard )
+                                      , initialColors, refine, weightedJaccard' )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , emitJsonReport, withHumanOutput )
 
@@ -237,15 +237,18 @@ scorePairs :: Double
            -> [SimEdge]
 scorePairs thr getFp cs =
   let !n = V.length cs
+      -- Select the fingerprints once and precompute their colour-count
+      -- sums, so the inner O(N^2) loop never re-folds an operand.
+      !fps  = V.map getFp cs
+      !sums = V.map (IM.foldl' (+) 0) fps
       perI :: Int -> [SimEdge]
       perI !i =
-        let !ci = cs V.! i
-            !fi = getFp ci
+        let !fi = fps V.! i
+            !si = sums V.! i
             go !j !acc
               | j >= n    = acc
               | otherwise =
-                  let !cj = cs V.! j
-                      !s  = weightedJaccard fi (getFp cj)
+                  let !s  = weightedJaccard' si (sums V.! j) fi (fps V.! j)
                       !acc' = if s >= thr then (i, j, s) : acc else acc
                   in go (j + 1) acc'
         in go (i + 1) []

@@ -28,6 +28,7 @@ module AgdaGraph.Similarity
   , subtermMultisetsVec
   ) where
 
+import           Control.Parallel.Strategies ( parMap, rdeepseq )
 import qualified Data.IntMap.Strict as IM
 import qualified Data.IntSet        as IS
 import           Data.Vector        ( Vector )
@@ -118,10 +119,19 @@ buildSigBodyFingerprints wlK ix =
       !sigCk  = refine ix nbrSig  wlK (initialColors ix nbrSig)  :: ColorVec
       !bodyCk = refine ix nbrBody wlK (initialColors ix nbrBody) :: ColorVec
       !n = idxNodeCount ix
-      !sigFps  = V.generate n (\i -> fingerprintAt sigCk  (subtreeUnder sigAdj  i))
-      !bodyFps = V.generate n (\i -> fingerprintAt bodyCk (subtreeUnder bodyAdj i))
-      !sigEdges  = sum (map IS.size (IM.elems sigAdj))
-      !bodyEdges = sum (map IS.size (IM.elems bodyAdj))
+      -- Each node's rooted-subtree closure + fingerprint is an independent
+      -- O(V+E) computation; spark them (order-preserving parMap → identical
+      -- vectors). This is the dominant cost and the first similar_* query /
+      -- silhouette run forces the whole vector, so parallelising it turns a
+      -- serial O(V*(V+E)) build into a per-core one.
+      !sigFps  = V.fromListN n
+                   (parMap rdeepseq
+                      (\i -> fingerprintAt sigCk  (subtreeUnder sigAdj  i)) [0 .. n - 1])
+      !bodyFps = V.fromListN n
+                   (parMap rdeepseq
+                      (\i -> fingerprintAt bodyCk (subtreeUnder bodyAdj i)) [0 .. n - 1])
+      !sigEdges  = IM.foldl' (\ !a s -> a + IS.size s) 0 sigAdj
+      !bodyEdges = IM.foldl' (\ !a s -> a + IS.size s) 0 bodyAdj
   in SigBodyFingerprints
        { sbfSig           = sigFps
        , sbfBody          = bodyFps
