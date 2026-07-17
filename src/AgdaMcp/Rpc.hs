@@ -85,6 +85,7 @@ errorResponse i code msg =
 -- send, or 'Nothing' for notifications (no reply on the wire).
 runStdioLoop :: (RpcMsg -> IO (Maybe Value)) -> IO ()
 runStdioLoop dispatch = do
+  hSetBuffering stdin  (BlockBuffering Nothing)
   hSetBuffering stdout (BlockBuffering Nothing)
   hSetBuffering stderr LineBuffering
   hSetEncoding  stderr utf8
@@ -106,6 +107,7 @@ runStdioLoop dispatch = do
     isWsByte w = w == 32 || w == 9 || w == 13 || w == 10
 
     writeMsg v = do
-      BL.hPut stdout (encode v)
-      BS.hPut  stdout "\n"
-      hFlush   stdout
+      -- One buffered put (encoded reply + newline) rather than two; the
+      -- per-reply flush stays so the client sees each response promptly.
+      BL.hPut stdout (encode v <> "\n")
+      hFlush  stdout
