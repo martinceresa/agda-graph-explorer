@@ -61,7 +61,7 @@ import qualified Data.ByteString.Lazy as BL
 import           Data.Char            (isDigit)
 import           Data.IORef
 import qualified Data.IntMap.Strict   as IM
-import           Data.List            (isInfixOf, isPrefixOf, isSuffixOf, maximumBy, sort)
+import           Data.List            (isInfixOf, isPrefixOf, isSuffixOf, maximumBy, sort, sortOn)
 import qualified Data.Map.Strict      as M
 import           Data.Maybe           (catMaybes, fromMaybe, isJust, mapMaybe)
 import qualified Data.Set             as S
@@ -817,15 +817,55 @@ buildOwnerMap :: [Definition] -> IM.IntMap Definition
 buildOwnerMap rds =
   IM.fromList (mapMaybe owner locals)
   where
-    locals     = filter isLocalName' rds
-    nonLocals  = filter (not . isLocalName') rds
+    -- Tag each def with its position in @rds@ so the tie-break matches the
+    -- former @maximumBy (comparing defLine)@ over a scan in @rds@ order
+    -- (equal max line ⇒ the LAST such def ⇒ the largest position).
+    indexed   = zip [0 :: Int ..] rds
+    locals    = [ d | (_, d) <- indexed, isLocalName' d ]
+    -- Non-local defs that carry a line, bucketed by module, each bucket a
+    -- Vector ascending by (line, position). Instead of scanning every
+    -- non-local per local (O(locals·nonLocals)), a local looks up only the
+    -- buckets of its enclosing modules and binary-searches each for the
+    -- best candidate at or above its line.
+    byModule :: M.Map T.Text (V.Vector (Int, Int, Definition))
+    byModule =
+      M.map (V.fromList . sortOn (\(l, p, _) -> (l, p)))
+        (M.fromListWith (++)
+           [ (defModule o, [(ln, pos, o)])
+           | (pos, o) <- indexed
+           , not (isLocalName' o)
+           , Just ln  <- [defLine o]
+           ])
     owner d = do
       ln <- defLine d
-      case [ o | o <- nonLocals
-               , enclosingModule (defModule o) (defModule d)
-               , maybe False (<= ln) (defLine o) ] of
+      let bests = [ b
+                  | k        <- enclosingKeys (defModule d)
+                  , Just vec <- [M.lookup k byModule]
+                  , Just b   <- [bestLE ln vec]
+                  ]
+      case bests of
         [] -> Nothing
-        os -> Just (defId d, maximumBy (comparing defLine) os)
+        _  -> let (_, _, o) = maximumBy (comparing (\(l, p, _) -> (l, p))) bests
+              in Just (defId d, o)
+    -- Segment-aligned module prefixes of @m@ including @m@ itself — exactly
+    -- the modules @enclosingModule _ m@ accepts.
+    enclosingKeys m =
+      let parts = T.splitOn "." m
+      in [ T.intercalate "." (take i parts) | i <- [1 .. length parts] ]
+    -- Rightmost element with @line <= ln@ in a (line,position)-ascending
+    -- vector — the largest (line, position) at or below the helper's line,
+    -- matching the old @maximumBy (comparing defLine)@ within one bucket.
+    bestLE :: Int -> V.Vector (Int, Int, Definition)
+           -> Maybe (Int, Int, Definition)
+    bestLE ln vec = go 0 (V.length vec - 1) Nothing
+      where
+        go lo hi best
+          | lo > hi   = best
+          | otherwise =
+              let mid       = (lo + hi) `div` 2
+                  e@(l,_,_) = vec V.! mid
+              in if l <= ln then go (mid + 1) hi (Just e)
+                            else go lo (mid - 1) best
     -- A where-block / anonymous-module local helper. As of producer
     -- nodeKeyVersion 3 the @._.@ marker is stripped (helpers are lifted
     -- into their named parent module), but the @\@<binding-line>@
@@ -835,10 +875,6 @@ buildOwnerMap rds =
     -- 'AgdaMcp.Query.isLocalName' / 'AgdaMcp.Query.stripLineTag'.
     isLocalName' d = case T.breakOnEnd "@" (defName d) of
       (pre, suf) -> not (T.null pre) && not (T.null suf) && T.all isDigit suf
-    -- @outer@ is @inner@ or a (segment-aligned) module prefix of it
-    -- (mirrors the @enclosingModule@ in 'AgdaMcp.Query.ownerOf').
-    enclosingModule outer inner =
-      outer == inner || (outer <> ".") `T.isPrefixOf` inner
 
 -- | The producer flag list shared by every @agda-deps@ run (all but the
 -- out-dir and the trailing entry positional).
