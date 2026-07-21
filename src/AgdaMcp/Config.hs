@@ -73,6 +73,10 @@ data Opts = Opts
     -- ^ IDF-weight the lemma ranker (Phase-1a, @--rank-idf@; off ⇒ baseline).
   , oPremiseSelect :: Bool
     -- ^ Phase-2 k-NN premise selection (@--premise-select@; off ⇒ lexical).
+  , oNoHintBatch :: Bool
+    -- ^ Disable the Phase-3a hint-batch tier (@--no-hint-batch@; benchmark A/B).
+  , oNoAutoLadder :: Bool
+    -- ^ Disable the Phase-3b auto_all ladder (@--no-auto-ladder@; benchmark A/B).
   , oQueryLog :: Bool
   , oAutoResolve :: Bool
   , oEnableInteract :: Bool
@@ -141,6 +145,8 @@ data FileConfig = FileConfig
   , fcStrictProducer :: Maybe Bool
   , fcRankIdf       :: Maybe Bool
   , fcPremiseSelect :: Maybe Bool
+  , fcNoHintBatch   :: Maybe Bool
+  , fcNoAutoLadder  :: Maybe Bool
   , fcNoQueryLog    :: Maybe Bool
   , fcNoAutoResolve :: Maybe Bool
   , fcEnableInteract :: Maybe Bool
@@ -181,6 +187,8 @@ instance FromJSON FileConfig where
     fcStrictProducer <- o .:? "strict-producer"
     fcRankIdf       <- o .:? "rank-idf"
     fcPremiseSelect <- o .:? "premise-select"
+    fcNoHintBatch   <- o .:? "no-hint-batch"
+    fcNoAutoLadder  <- o .:? "no-auto-ladder"
     fcNoQueryLog    <- o .:? "no-query-log"
     fcNoAutoResolve <- o .:? "no-auto-resolve"
     fcEnableInteract <- o .:? "enable-interact"
@@ -234,6 +242,8 @@ applyConfig FileConfig{..} o = o
   , oStrictProducer   = fromMaybe (oStrictProducer o) fcStrictProducer
   , oRankIdf          = fromMaybe (oRankIdf o) fcRankIdf
   , oPremiseSelect    = fromMaybe (oPremiseSelect o) fcPremiseSelect
+  , oNoHintBatch      = fromMaybe (oNoHintBatch o) fcNoHintBatch
+  , oNoAutoLadder     = fromMaybe (oNoAutoLadder o) fcNoAutoLadder
   , oQueryLog = maybe (oQueryLog o) not fcNoQueryLog
   , oAutoResolve = maybe (oAutoResolve o) not fcNoAutoResolve
   , oEnableInteract = fromMaybe (oEnableInteract o) fcEnableInteract

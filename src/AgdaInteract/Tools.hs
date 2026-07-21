@@ -470,7 +470,8 @@ runAuto ss a = withGoal ss a $ \sess file e iid -> do
   let inScope                = hintInScope mLd file <$> msrc
       (probeCands, oosCands) = prepGoalHints mLd inScope k ctxTypes (geType e)
       hints                  = map fst probeCands
-  res <- autoSolve True sess file iid secs hints
+      batchOK                = not (cfgNoHintBatch (ssConfig ss))
+  res <- autoSolve True batchOK sess file iid secs hints
   case res of
     AutoGive mh s -> fmap (headline mh <>) <$> applyHoleEdit ss (writeFlag a) file e s
     -- No solution: surface Agda's error if the plain probe sent one, else
@@ -584,7 +585,8 @@ autoBatchMax = 4
 --   1. __plain__, full budget — closes trivial holes fast. Skipped when
 --      @tryPlain@ is 'False' (the 'runAutoAll' hinted pass, where a cheap plain
 --      pass already failed — Phase 3b, so plain is not re-run).
---   2. __batch__: the top @'autoBatchMax'@ @hints@ in ONE call, full budget.
+--   2. __batch__: the top @'autoBatchMax'@ @hints@ in ONE call, full budget
+--      (skipped when @batchOK@ is 'False' — the @--no-hint-batch@ A/B toggle).
 --      The @hints@ are pre-validated in-scope short names (Phase-1c
 --      'prepGoalHints'), so the call does not abort, and this is the only tier
 --      that lets Mimer /combine/ two lemmas — sequential probes structurally
@@ -598,15 +600,16 @@ autoBatchMax = 4
 -- Stops at the first 'GiveAction'. Every probe is wall-clock-bounded
 -- ('probeBudgetMicros'), so a diverging normalization resets the session
 -- instead of wedging it.
-autoSolve :: Bool -> Session -> FilePath -> Int -> Int -> [Text] -> IO AutoResult
-autoSolve tryPlain sess file iid secs hints = do
+autoSolve :: Bool -> Bool -> Session -> FilePath -> Int -> Int -> [Text] -> IO AutoResult
+autoSolve tryPlain batchOK sess file iid secs hints = do
     r0 <- if tryPlain then probe secs ("-t " ++ show secs) else pure (PNone Nothing)
     case r0 of
       PGive t    -> pure (AutoGive Plain t)
       PAbort m   -> pure (AutoAbort m)
       PNone mErr
-        | null hints -> pure (AutoNone mErr [])
-        | otherwise  -> do
+        | null hints   -> pure (AutoNone mErr [])
+        | not batchOK  -> tryHints hints [] mErr   -- --no-hint-batch: skip tier 2
+        | otherwise    -> do
             rB <- probe secs ("-t " ++ show secs ++ " " ++ unwords (map T.unpack batch))
             case rB of
               PGive t  -> pure (AutoGive (ViaBatch batch) t)
@@ -683,37 +686,49 @@ runAutoAll ss a = do
                   let secs = max 1 (argInt a "timeout" 5)
                       k    = max 0 (argInt a "hints" 6)
                       cb   = codeBlocksFor file orig
+                      cfg  = ssConfig ss
+                      batchOK = not (cfgNoHintBatch cfg)
                   mLd <- either (const Nothing) (Just . fst) <$> ensureFresh ss
                   let inScope = Just (hintInScope mLd file orig)
-                  -- Phase-3b budget ladder. PASS 1: plain only, cheap 1 s budget,
-                  -- over ALL goals, NO hints — closes trivial holes without the
-                  -- per-goal live context round-trip + ranking, and fails the
-                  -- rest fast so the full budget is spent only on the residue.
-                  (eds1, ok1, surv1, _, mAbort1) <-
-                    autoAllLoop True sess file cb 1 [ (e, []) | e <- es ]
-                  -- PASS 2: hinted (skip plain — pass 1 already ran it), full
-                  -- budget, over the SURVIVORS only. The scope predicate (1c) is
-                  -- built once; per survivor rank (1a/1b) + live context types
-                  -- (1d) + scope-partition into the k in-scope hints to probe
-                  -- plus the out-of-scope remainder to report.
-                  perGoal <- if isJust mAbort1 then pure []
-                             else forM surv1 $ \e -> do
-                               ctxTypes <- maybe (pure []) (ctxTypesOf sess file) (geIid e)
-                               let (probe, oos) = prepGoalHints mLd inScope k ctxTypes (geType e)
-                               pure (e, probe, oos)
-                  let esWithHints = [ (e, probe)      | (e, probe, _)   <- perGoal ]
-                      preOos       = concat [ oos          | (_, _, oos)    <- perGoal ]
-                      allCands     = concat [ probe ++ oos | (_, probe, oos) <- perGoal ]
-                  (eds2, ok2, unsolved, oosBounced, mAbort2) <-
-                    if isJust mAbort1 then pure ([], [], surv1, [], mAbort1)
-                    else autoAllLoop False sess file cb secs esWithHints
+                      -- Per goal: live context types (1d) + rank (1a/1b) +
+                      -- scope-partition (1c) into in-scope probe hints + the OOS
+                      -- remainder. The one expensive-per-goal step.
+                      fetchHints e = do
+                        ctxTypes <- maybe (pure []) (ctxTypesOf sess file) (geIid e)
+                        let (probe, oos) = prepGoalHints mLd inScope k ctxTypes (geType e)
+                        pure (e, probe, oos)
+                      splitPer per = ( [ (e, probe)      | (e, probe, _)   <- per ]
+                                     , concat [ oos          | (_, _, oos)    <- per ]
+                                     , concat [ probe ++ oos | (_, probe, oos) <- per ] )
+                  (edits, solved, unsolved, preOos, oosBounced, allCands, mAbort) <-
+                    if cfgNoAutoLadder cfg
+                      then do
+                        -- Phase-3b OFF: one full-budget pass (fetch every goal's
+                        -- hints, then plain+batch+per-hint at the full budget).
+                        per <- forM es fetchHints
+                        let (esH, preO, cands) = splitPer per
+                        (eds, ok, bad, ob, ab) <- autoAllLoop True batchOK sess file cb secs esH
+                        pure (eds, ok, bad, preO, ob, cands, ab)
+                      else do
+                        -- Phase-3b ladder. PASS 1: plain only, cheap 1 s over ALL
+                        -- goals, NO hints — closes trivial holes without the
+                        -- per-goal context round-trip + ranking, fails the rest
+                        -- fast so the full budget hits only the residue.
+                        (eds1, ok1, surv1, _, ab1) <-
+                          autoAllLoop True batchOK sess file cb 1 [ (e, []) | e <- es ]
+                        -- PASS 2: hinted (skip plain — pass 1 ran it), full
+                        -- budget, over the SURVIVORS only; fetch hints lazily.
+                        per <- if isJust ab1 then pure [] else forM surv1 fetchHints
+                        let (esH, preO, cands) = splitPer per
+                        (eds2, ok2, bad2, ob2, ab2) <-
+                          if isJust ab1 then pure ([], [], surv1, [], ab1)
+                          else autoAllLoop False batchOK sess file cb secs esH
+                        pure ( eds1 ++ eds2, ok1 ++ ok2, bad2, preO, ob2, cands
+                             , case ab1 of Just _ -> ab1; Nothing -> ab2 )
                   -- The in-session gives diverge from disk (which stays
                   -- untouched unless write:true) — reload on next use.
                   markSessionDirty ss file
-                  let edits   = eds1 ++ eds2
-                      solved  = ok1 ++ ok2
-                      mAbort  = case mAbort1 of Just _ -> mAbort1; Nothing -> mAbort2
-                      hintMap = M.toList (M.fromListWith (\_ old -> old) allCands)
+                  let hintMap = M.toList (M.fromListWith (\_ old -> old) allCands)
                       oosBlock  = oosNote "auto_all" hintMap
                                           (nub (map fst preOos ++ oosBounced))
                       abortBlock = maybe "" ("\n" <>) mAbort   -- a wedge reset the session
@@ -742,15 +757,16 @@ runAutoAll ss a = do
 -- hole-range edits in ORIGINAL-text offsets (the in-session gives never
 -- move the on-disk text). Continue-on-failure — unlike @construct@, an
 -- unsolved goal is a /result/ here, not an abort.
-autoAllLoop :: Bool -> Session -> FilePath -> CodeBlocks -> Int -> [(GoalEntry, [(Text, Definition)])]
+autoAllLoop :: Bool -> Bool -> Session -> FilePath -> CodeBlocks -> Int
+            -> [(GoalEntry, [(Text, Definition)])]
             -> IO ([(Int, Int, Text)], [Text], [GoalEntry], [Text], Maybe Text)
-autoAllLoop tryPlain sess file cb secs = go [] [] [] []
+autoAllLoop tryPlain batchOK sess file cb secs = go [] [] [] []
   where
     go eds ok bad oos []               = pure (reverse eds, reverse ok, reverse bad, reverse oos, Nothing)
     go eds ok bad oos ((e, hintCands) : rest) = case (geIid e, geRange e) of
       (Just iid, Just (GoalRange s en))
         | isInsideCode cb (rpPos s) -> do
-            res <- autoSolve tryPlain sess file iid secs (map fst hintCands)
+            res <- autoSolve tryPlain batchOK sess file iid secs (map fst hintCands)
             case res of
               AutoGive _ t ->
                 go ((rpPos s, rpPos en, t) : eds)

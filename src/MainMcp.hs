@@ -66,7 +66,7 @@ defOpts = Opts
   , oHashes = True, oSigs = True, oNormSigs = False, oShowImpl = False
   , oMinDepth = 3, oAuto = True, oWatch = True, oIncremental = True, oQueryLog = True
   , oRequireWellTyped = False, oStrictProducer = False, oRankIdf = False
-  , oPremiseSelect = False
+  , oPremiseSelect = False, oNoHintBatch = False, oNoAutoLadder = False
   , oAutoResolve = True
   , oEnableInteract = False, oAgdaBin = Nothing, oInteractArgs = []
   , oInteractHeapMb = 0, oMaxSessions = 2, oSessionIdleSecs = 0
@@ -119,6 +119,8 @@ parseOpts (x : xs) o = case x of
   "--strict-producer" -> parseOpts xs o { oStrictProducer = True }
   "--rank-idf" -> parseOpts xs o { oRankIdf = True }
   "--premise-select" -> parseOpts xs o { oPremiseSelect = True }
+  "--no-hint-batch" -> parseOpts xs o { oNoHintBatch = True }
+  "--no-auto-ladder" -> parseOpts xs o { oNoAutoLadder = True }
   "--no-query-log"    -> parseOpts xs o { oQueryLog = False }
   "--no-auto-resolve" -> parseOpts xs o { oAutoResolve = False }
   "--enable-interact" -> parseOpts xs o { oEnableInteract = True }
@@ -236,6 +238,8 @@ buildConfig o = do
         , cfgStrictProducer = oStrictProducer o
         , cfgRankIdf = oRankIdf o
         , cfgPremiseSelect = oPremiseSelect o
+        , cfgNoHintBatch = oNoHintBatch o
+        , cfgNoAutoLadder = oNoAutoLadder o
         , cfgQueryLog     = oQueryLog o
         , cfgAutoResolveUnique = oAutoResolve o
         , cfgEnableInteract = oEnableInteract o
@@ -354,6 +358,10 @@ usage = unlines
   , "                        recommend the premises of proved theorems similar to the goal"
   , "                        (~3x any-hit@6 on stdlib scale). Off by default; needs edge"
   , "                        provenance + signatures in the graph."
+  , "  --no-hint-batch       Disable the auto hint-batch tier (Phase-3a): plain then"
+  , "                        per-hint only, no batched-hint call. Benchmark A/B toggle."
+  , "  --no-auto-ladder      Disable the auto_all budget ladder (Phase-3b): one full-"
+  , "                        budget pass over all goals. Benchmark A/B toggle."
   , "  --no-query-log        Disable per-query telemetry (else appends one JSON line"
   , "                        per tools/call to <out-dir>/query-log.jsonl; on by default"
   , "                        in live mode, off in preloaded mode)."

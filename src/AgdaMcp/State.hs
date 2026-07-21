@@ -132,6 +132,8 @@ data Config = Config
   , cfgStrictProducer :: !Bool           -- ^ strict @agda-deps@: drop @--keep-going@ (any error ⇒ serve stale) and enable @--incremental@ (needs Agda >= 2.9). See 'buildBaseArgs'.
   , cfgRankIdf      :: !Bool             -- ^ IDF-weight the lemma ranker (Phase-1a): builds 'ldIdf' from the snapshot's signature vocabulary and threads it into every @find_lemma@/@auto@ ranking. Off ⇒ empty map ⇒ baseline coverage (the shipped default until measured).
   , cfgPremiseSelect :: !Bool            -- ^ Phase-2 dependency-informed premise selection: builds 'ldCorpus' (proved theorems' premises) and blends k-NN premise votes into @find_lemma@/@auto@ ranking. Measured to roughly triple any-hit\@6 on stdlib-scale graphs; off by default (needs edge provenance + signatures).
+  , cfgNoHintBatch  :: !Bool             -- ^ disable the Phase-3a hint-batch probe tier in @auto@ (plain → per-hint only, no batched-hint call). Default off (batching on). A benchmark A/B toggle.
+  , cfgNoAutoLadder :: !Bool             -- ^ disable the Phase-3b @auto_all@ budget ladder (single full-budget pass over all goals, not the cheap-plain-then-hinted-survivors two-pass). Default off (ladder on). A benchmark A/B toggle.
   , cfgQueryLog     :: !Bool             -- ^ append one JSON line per @tools/call@ to @cfgOutDir/query-log.jsonl@.
   , cfgAutoResolveUnique :: !Bool        -- ^ auto-resolve a name to the sole "did you mean" candidate (tier 3 of 'AgdaMcp.Query.resolveDefNote').
   , cfgEnableInteract :: !Bool           -- ^ expose the write-side interaction-bridge tools (load/goal_type/give/…).
@@ -173,6 +175,8 @@ defaultConfig = Config
   , cfgStrictProducer = False
   , cfgRankIdf      = False
   , cfgPremiseSelect = False
+  , cfgNoHintBatch  = False
+  , cfgNoAutoLadder = False
   , cfgQueryLog     = True
   , cfgAutoResolveUnique = True
   , cfgEnableInteract = False
