@@ -29,6 +29,7 @@ library agda-graph
                     AgdaGraph.Similarity
                     AgdaGraph.GoalCanon
                     AgdaGraph.LemmaRank
+                    AgdaGraph.PremiseBench
                     AgdaGraph.ConfigCore
                     AgdaGraph.Interaction.Protocol
                     AgdaGraph.Interaction.Iotcm
@@ -210,6 +211,7 @@ executable agda-optimization
                        AgdaOptimization.Strata
                        AgdaOptimization.TermCluster
                        AgdaOptimization.ConceptBundle
+                       AgdaOptimization.HintBench
                        AgdaOptimization.FamilyFilter
                        AgdaOptimization.Common
                        AgdaOptimization.Condense

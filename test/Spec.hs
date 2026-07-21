@@ -31,6 +31,9 @@ import           AgdaGraph.GoalCanon   ( matchTokens, nameTokens, shapeTokens
                                        , weightedCoverage, stripQualifiers )
 import           AgdaGraph.LemmaRank   ( RankEnv(..), rankLemmaCandidates
                                        , goalCarrierSegments, moduleSegments )
+import           AgdaGraph.PremiseBench ( benchRows, scoreStrategy, lookupStrategy
+                                       , defaultBenchOpts, noRowReason
+                                       , BenchReport(..) )
 import           AgdaInteract.Guard
 import           AgdaInteract.Literate
 import           AgdaInteract.GoalId
@@ -46,8 +49,10 @@ import qualified AgdaRepair.Strategy   as RS
 import           Data.Aeson            ( eitherDecode, encode )
 import qualified Data.Map.Strict       as Map
 import           AgdaGraph.Schema      ( ExpandedGraph(..), Definition(..), ReExport(..)
-                                       , State(..), Kind(..), Access(..) )
-import           AgdaGraph.Index       ( buildIndex, lookupId, unsafeDeps, defAt )
+                                       , State(..), Kind(..), Access(..)
+                                       , loadExpandedGraph )
+import           AgdaGraph.Index       ( buildIndex, lookupId, unsafeDeps, defAt
+                                       , idxRealCount )
 import           AgdaUnused.Analysis   ( Finding(..), FindingKind(..), analyse )
 
 ----------------------------------------------------------------------
@@ -91,6 +96,7 @@ main = do
   sequence_ (map ($ fails) moduleOptionEscapeTests)
   sequence_ (map ($ fails) lemmaRankTests)
   sequence_ (map ($ fails) strategyTests)
+  premiseBenchTests fails
   replayTests fails
   n <- readIORef fails
   if n == 0
@@ -729,6 +735,57 @@ strategyTests =
       , mkDef "Data.Nat.Base.\8469"     "Data.Nat.Base"     KDatatype Nothing
       , mkDef "Data.Integer.Base.\8484" "Data.Integer.Base" KDatatype Nothing
       ] Map.empty
+
+----------------------------------------------------------------------
+-- hint-bench — leave-one-out premise-selection recall floor.
+--
+-- Reads the committed signature+provenance fixture (.agda-explore/deps.json),
+-- scores the shipped `baseline` strategy, and pins any-hit@6 at or above the
+-- recorded floor so a ranking "cleanup" that regresses recall fails CI. Plus
+-- the two graceful-degradation contracts (no provenance / no signatures →
+-- zero rows, not a crash), synthesised off the same fixture so they don't
+-- depend on a second file staying signature-free.
+
+-- | The recorded any-hit@6 floor for `baseline` on .agda-explore/deps.json.
+-- Equal to the current value, so any downward move trips the test — raise or
+-- lower it only deliberately, alongside a fixture or ranker change.
+premiseBenchFloor :: Double
+premiseBenchFloor = 0.2
+
+premiseBenchTests :: IORef Int -> IO ()
+premiseBenchTests ref = do
+  e <- loadExpandedGraph ".agda-explore/deps.json"
+  case e of
+    Left err ->
+      check ("hint-bench: .agda-explore/deps.json decodes (" ++ err ++ ")") False ref
+    Right g -> do
+      let ix    = buildIndex g
+          env   = RankEnv [ defAt ix i | i <- [0 .. idxRealCount ix - 1] ] Map.empty
+          opts  = defaultBenchOpts
+          rows  = benchRows ix opts
+      check "hint-bench: fixture yields a non-empty corpus" (not (null rows)) ref
+      case lookupStrategy "baseline" env opts of
+        Nothing    -> check "hint-bench: baseline strategy is registered" False ref
+        Just strat -> do
+          let rep = scoreStrategy opts strat rows
+              a6  = maybe 0 id (lookup 6 (brpAnyHitAt rep))
+          check ("hint-bench: baseline any-hit@6 (" ++ show a6
+                   ++ ") >= floor " ++ show premiseBenchFloor)
+            (a6 >= premiseBenchFloor - 1e-9) ref
+      -- Graceful degradation: no per-edge provenance → no premise ground
+      -- truth → zero rows (the classifier names provenance).
+      let ixNoProv   = buildIndex g { egEdgeProvenance = [] }
+          rowsNoProv = benchRows ixNoProv opts
+      check "hint-bench: no edge provenance yields zero rows" (null rowsNoProv) ref
+      check "hint-bench: no-provenance reason mentions provenance"
+        (maybe False ("provenance" `T.isInfixOf`) (noRowReason ixNoProv rowsNoProv)) ref
+      -- Graceful degradation: no signatures → no goal text → zero rows.
+      let ixNoSig   = buildIndex g { egDefinitions = map (\d -> d { defSig = Nothing })
+                                                         (egDefinitions g) }
+          rowsNoSig = benchRows ixNoSig opts
+      check "hint-bench: no signatures yields zero rows" (null rowsNoSig) ref
+      check "hint-bench: no-signature reason mentions signatures"
+        (maybe False ("signatures" `T.isInfixOf`) (noRowReason ixNoSig rowsNoSig)) ref
 
 ----------------------------------------------------------------------
 -- Fixture replay — the protocol-skew tripwire.

@@ -16,10 +16,15 @@ One shared library and four executables:
   in-memory `Index`; the shared substrate for the JSON-consuming executables.
 - **`agda-unused`** — flags unused imports / definitions / blanket opens /
   public re-exports from the expanded JSON.
-- **`agda-optimization`** — 18 subcommand-driven graph-level analyses:
+- **`agda-optimization`** — 19 subcommand-driven graph-level analyses:
   `motif`, `load-bearing`, `polyglot`, `fingerprint`, `debt`, `basket`,
   `ledger`, `echo`, `gravity`, `pyre`, `chokepoint`, `silhouette`, `entwine`,
-  `fiedler`, `horizon`, `strata`, `term-cluster`, `concept-bundle`.
+  `fiedler`, `horizon`, `strata`, `term-cluster`, `concept-bundle`,
+  `hint-bench`. The last is an offline eval harness (not a graph analysis):
+  leave-one-out premise-selection recall of the shared lemma ranker
+  (`AgdaGraph.PremiseBench`) — every proved theorem's body-provenance edges
+  are ground-truth premises, so a ranking change is scored without a live
+  `agda` run.
 - **`agda-goals`** — *process driver* (not a `Backend`): drives
   `agda --interaction-json` over the root files via a pool of persistent
   `AgdaInteract.Session`s (shared with `agda-explore`'s bridge; one per RTS
@@ -171,6 +176,9 @@ src/
     TermCluster.hs              AST subterm fingerprint clusters
                                 (reads definitionSubtermHashes).
     ConceptBundle.hs            Apriori over signature-provenance edges.
+    HintBench.hs                `hint-bench` CLI skin over AgdaGraph.PremiseBench
+                                (flags + human/JSON render); empty corpus (no
+                                provenance / no signatures) exits clean.
     FamilyFilter.hs             forced-by-elaborator suppressor; imported by
                                 Basket + ConceptBundle.
     Common.hs                   shared name/graph helpers, the Apriori itemset
@@ -314,6 +322,14 @@ src-agda-graph/AgdaGraph/       Shared library.
                                 (baseComponent/moduleComponent).
   LemmaRank.hs                  find_lemma ranking core: carrier-affinity +
                                 token-coverage scoring over a RankEnv.
+  PremiseBench.hs               pure leave-one-out eval of the lemma ranker
+                                (backs `agda-optimization hint-bench` +
+                                test/Spec.hs): benchRows (proved theorem →
+                                goal sig + body-provenance premise set),
+                                Strategy registry (baseline = rankLemmaCandidates),
+                                scoreStrategy (recall@k / any-hit@k / MRR,
+                                parMap rdeepseq, -N-deterministic). No provenance
+                                / no signatures ⇒ zero rows.
   WL.hs                         Weisfeiler–Leman refinement / hashing /
                                 fingerprints / weighted Jaccard.
   Similarity.hs                 shared structural-similarity cores so

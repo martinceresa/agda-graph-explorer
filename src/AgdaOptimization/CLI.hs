@@ -67,6 +67,7 @@ import qualified AgdaOptimization.Horizon     as Horizon
 import qualified AgdaOptimization.Strata      as Strata
 import qualified AgdaOptimization.TermCluster  as TermCluster
 import qualified AgdaOptimization.ConceptBundle as ConceptBundle
+import qualified AgdaOptimization.HintBench     as HintBench
 
 defaultGlobal :: GlobalOpts
 defaultGlobal = defaultGlobalOpts
@@ -92,6 +93,7 @@ subcommands =
   , ("strata",       "declared-hierarchy module cohesion: LCOM' / instability / abstractness")
   , ("term-cluster", "AST-level subterm fingerprint clusters (needs --with-term-hashes)")
   , ("concept-bundle", "frequent itemsets over signature-provenance edges")
+  , ("hint-bench",   "leave-one-out premise-selection recall of the lemma ranker")
   ]
 
 usage :: String
@@ -191,6 +193,7 @@ subFlags sub = case sub of
     , Right "k-max", Right "top-n", Right "exclude-top-frequency"
     , Right "no-forced-suppress", Right "forced-suppress"
     , Right "forced-fraction" ]
+  "hint-bench"   -> renderFlagHelp HintBench.flagSpecs
   _ -> ["(no flags listed for this subcommand)"]
 
 -- | Build a flag-help block from a spec list by selecting and
@@ -535,6 +538,9 @@ runSubcommand sub path mCfg g subArgs = case sub of
   "concept-bundle" -> withOpts ConceptBundle.defaultOptions
                                ConceptBundle.applyConfig
                                ConceptBundle.parseOptions ConceptBundle.run
+  "hint-bench"   -> withOpts HintBench.defaultOptions
+                             HintBench.applyConfig
+                             HintBench.parseOptions   HintBench.run
   _              -> hPutStrLn stderr ("agda-optimization: unreachable subcommand: " ++ sub)
                  >> exitFailure
   where
