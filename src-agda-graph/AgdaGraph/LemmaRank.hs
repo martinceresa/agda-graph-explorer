@@ -28,8 +28,13 @@
 -- plain coverage/Jaccard order.
 module AgdaGraph.LemmaRank
   ( RankEnv(..)
+  , mkRankEnv
+  , RankOpts(..)
+  , defaultRankOpts
   , LemmaScore
   , rankLemmaCandidates
+  , rankLemmaCandidatesWith
+  , computeIdf
   , goalCarrierSegments
   , carrierSegmentsFor
   , carrierMap
@@ -48,17 +53,45 @@ import           Data.Text        ( Text )
 import qualified Data.Text        as T
 
 import           AgdaGraph.Schema    ( Definition(..), Kind(..) )
-import           AgdaGraph.GoalCanon ( conclusionOf, matchTokens, nameTokens
-                                     , shapeTokens, weightedCoverage
-                                     , tokenJaccard, isOpToken
+import           AgdaGraph.GoalCanon ( conclusionOf, headSymbol, matchTokens
+                                     , nameTokens, goalFeatures, weightedCoverageIdf
+                                     , idfOf, tokenJaccard, isOpToken
                                      , baseComponent, moduleComponent )
 
 -- | Everything the ranker needs from a loaded graph snapshot, as plain
 -- data (no @Loaded@ / @AgdaMcp.State@ dependency, so it is testable).
 data RankEnv = RankEnv
-  { reDefs    :: ![Definition]       -- ^ the snapshot's real defs (@ldRealDefs@).
-  , reAliases :: !(Map Text Text)    -- ^ @renaming@ re-export aliases (@ldAliases@); may be empty.
+  { reDefs    :: ![Definition]         -- ^ the snapshot's real defs (@ldRealDefs@).
+  , reAliases :: !(Map Text Text)      -- ^ @renaming@ re-export aliases (@ldAliases@); may be empty.
+  , reIdf     :: !(Map Text Double)    -- ^ per-token IDF weights ('computeIdf'); __empty__ = plain
+                                       -- coverage (today's behaviour, so existing callers are unchanged).
   }
+
+-- | A 'RankEnv' with no IDF weighting — the common case (every caller bar the
+-- daemon's IDF path). Set 'reIdf' with a record update when a graph carries an
+-- IDF map. Keeps a new 'RankEnv' field from rippling to every call site.
+mkRankEnv :: [Definition] -> Map Text Text -> RankEnv
+mkRankEnv defs aliases = RankEnv defs aliases Map.empty
+
+-- | Ranking knobs that select between Phase-1 experiments and the shipped
+-- default. Head-symbol handling (1b) lives here rather than in 'RankEnv'
+-- because it is a sort-only concern, not corpus data; IDF (1a) lives in
+-- 'RankEnv' because it is derived from the corpus.
+data RankOpts = RankOpts
+  { roHeadDemote :: !Bool
+    -- ^ Demote (never drop) candidates whose conclusion head symbol differs
+    -- from the goal's — a leading tier above coverage. Unknown head on either
+    -- side never demotes.
+  , roHeadFilter :: !Bool
+    -- ^ Hard-drop head-mismatched candidates instead of merely demoting them
+    -- (the stricter 1b variant; measured against 'roHeadDemote').
+  } deriving (Show)
+
+-- | The shipped ranker's behaviour: no head-symbol demotion or filtering.
+-- Combined with an empty 'reIdf', 'rankLemmaCandidates' is byte-for-byte the
+-- pre-Phase-1 ranker.
+defaultRankOpts :: RankOpts
+defaultRankOpts = RankOpts { roHeadDemote = False, roHeadFilter = False }
 
 -- | @(weightedCoverage, tokenJaccard, carrierAffinity, negate bagSize)@.
 -- Sorted descending (via 'Down'), so higher coverage — then higher Jaccard,
@@ -72,23 +105,75 @@ type LemmaScore = (Double, Double, Int, Int)
 rankLemmaCandidates
   :: RankEnv -> (Definition -> Bool) -> Double -> Text -> [Text]
   -> [(LemmaScore, Definition)]
-rankLemmaCandidates env candKeep minSim goal ctxTypes =
-  sortBy (comparing (\(sc, d) -> (Down sc, defName d)))
+rankLemmaCandidates = rankLemmaCandidatesWith defaultRankOpts
+
+-- | 'rankLemmaCandidates' generalised over 'RankOpts' — the entry point the
+-- @hint-bench@ Phase-1 strategies vary. Coverage uses 'weightedCoverageIdf'
+-- with @'reIdf' env@ (empty ⇒ plain coverage, so the returned 'LemmaScore' a
+-- client sees is unchanged when IDF is off). Head-symbol handling is a
+-- __sort-only__ tier: with 'roHeadDemote', a leading @headMatches@ boolean
+-- floats head-matching candidates above mismatched ones without touching the
+-- coverage number; with 'roHeadFilter', mismatched candidates are dropped
+-- outright. An unknown head on either side never demotes or drops.
+rankLemmaCandidatesWith
+  :: RankOpts -> RankEnv -> (Definition -> Bool) -> Double -> Text -> [Text]
+  -> [(LemmaScore, Definition)]
+rankLemmaCandidatesWith ropts env candKeep minSim goal ctxTypes =
+  sortBy (comparing sortKey)
     [ (sc, d)
     | d <- reDefs env, candKeep d
     , Just sig <- [defSig d]
-    , let bag = matchTokens keep (conclusionOf sig) `Set.union` nameTokens (defName d)
-          cov = weightedCoverage gtoks bag
+    , let bag = defBag keep (defName d) sig
+          cov = weightedCoverageIdf idf gtoks bag
           jac = tokenJaccard gtoks bag
           aff = Set.size (Set.intersection carrierSegs (moduleSegments (defModule d)))
           sc  = (cov, jac, aff, negate (Set.size bag))
-    , cov >= minSim ]
+    , cov >= minSim
+    , not (roHeadFilter ropts) || headMatches (candHead d) ]
   where
     keep t      = t `Set.member` vocab
     vocab       = envVocab env
-    gtoks       = matchTokens keep concl `Set.union` shapeTokens concl
+    idf         = reIdf env
+    gtoks       = goalFeatures keep goal
     concl       = conclusionOf goal
+    gHead       = headSymbol concl
     carrierSegs = goalCarrierSegments env goal ctxTypes
+    candHead d  = defSig d >>= (headSymbol . conclusionOf)
+    -- True (no demotion / no drop) when either head is unknown, else head equality.
+    headMatches ch = case (gHead, ch) of
+      (Just a, Just b) -> a == b
+      _                -> True
+    -- Head-match tier, ahead of coverage. Off ⇒ the boolean is a constant
+    -- 'True' and @||@ short-circuits, so 'candHead' is never forced (zero
+    -- head-symbol cost) and the order falls through to @Down sc@ — identical
+    -- to today.
+    sortKey (sc, d) =
+      ( Down (not (roHeadDemote ropts) || headMatches (candHead d))
+      , Down sc, defName d )
+
+-- | Per-token inverse document frequency over a def list's signature token
+-- bags, keyed by base-name token. @idf t = 1 + log (N / df t)@ where @N@ is
+-- the number of signature-carrying defs and @df t@ how many of their bags
+-- contain @t@: a token in every def keeps weight 1 (no boost, none dropped),
+-- a rare token is boosted, and a token absent from the corpus resolves to the
+-- 1.0 default. The bag matches 'rankLemmaCandidatesWith' exactly
+-- (@matchTokens ∪ nameTokens@) so the weighting lines up with what is scored.
+-- Empty def list ⇒ empty map ⇒ plain coverage.
+computeIdf :: [Definition] -> Map Text Double
+computeIdf defs = idfOf [ defBag keep (defName d) sig | d <- defs, Just sig <- [defSig d] ]
+  where keep t = t `Set.member` vocabOf defs
+
+-- | The retrieval token bag of a definition: its conclusion's match tokens
+-- (qualifier-stripped, @keep@-filtered) unioned with its name tokens. The one
+-- definition shared by 'rankLemmaCandidatesWith' (what is scored) and
+-- 'computeIdf' (what IDF weights), so the two cannot drift.
+defBag :: (Text -> Bool) -> Text -> Text -> Set Text
+defBag keep name sig =
+  matchTokens keep (conclusionOf sig) `Set.union` nameTokens name
+
+-- | The base-name vocabulary of a def list (what 'matchTokens' keeps).
+vocabOf :: [Definition] -> Set Text
+vocabOf defs = Set.fromList [ baseComponent (defName d) | d <- defs ]
 
 -- | The non-generic module-path segments implied by a goal's carrier
 -- tokens: the value/type identifiers of its conclusion (and of each live
@@ -158,5 +243,5 @@ carrierMap RankEnv{..} =
     | k <- Map.keys reAliases ]
 
 envVocab :: RankEnv -> Set Text
-envVocab env = Set.fromList [ baseComponent (defName d) | d <- reDefs env ]
+envVocab = vocabOf . reDefs
 

@@ -42,7 +42,7 @@ import           Data.Aeson           ( (.=) )
 
 import           AgdaGraph.Schema     ( Definition )
 import           AgdaGraph.Index      ( Index(..), defAt )
-import           AgdaGraph.LemmaRank  ( RankEnv(..) )
+import           AgdaGraph.LemmaRank  ( RankEnv, mkRankEnv )
 import           AgdaGraph.PremiseBench
 
 import           AgdaOptimization.FlagSpec ( FlagSpec(..), SwitchVal(..), EnumErr(..)
@@ -65,6 +65,10 @@ data Options = Options
     -- ^ Coverage floor for the ranker (mirrors the @auto@ hint path's 0.4).
   , optDropCtors :: !Bool
     -- ^ Drop constructor \/ record premises from the ground truth.
+  , optKnnK      :: !Int
+    -- ^ Phase-2 k-NN neighbourhood size (@knn@ \/ @blend@ strategies).
+  , optKnnAlpha  :: !Double
+    -- ^ Phase-2 blend weight (@blend@ strategy): @α·knn + (1-α)·lexical@.
   } deriving (Show)
 
 defaultOptions :: Options
@@ -73,6 +77,8 @@ defaultOptions = Options
   , optCutoffs   = [3, 6, 10]
   , optMinSim    = 0.4
   , optDropCtors = True
+  , optKnnK      = 32
+  , optKnnAlpha  = 0.5
   }
 
 -- | Declarative flag spec; drives 'parseOptions', 'applyConfig', and the
@@ -88,6 +94,10 @@ flagSpecs =
   , SwitchFlag "keep-ctors" "--keep-ctors     keep constructor/record premises in the ground truth"
       SwitchPreGuard (\o -> o { optDropCtors = False })
       (Just "keep-ctors") (\v o -> o { optDropCtors = not v })
+  , IntFlag "knn-k" "--knn-k=N        Phase-2 k-NN neighbourhood size (default 32)"
+      (\n o -> o { optKnnK = n })
+  , DblFlag "knn-alpha" "--knn-alpha=F    Phase-2 blend weight α·knn+(1-α)·lexical (default 0.5)"
+      (\x o -> o { optKnnAlpha = x })
   ]
 
 -- | Hand-rolled CLI parser for the @hint-bench@ subcommand.
@@ -109,14 +119,18 @@ run ix gOpts opts@Options{..} = do
         { boCutoffs   = optCutoffs
         , boMinSim    = optMinSim
         , boDropCtors = optDropCtors
+        , boKnnK      = optKnnK
+        , boKnnAlpha  = optKnnAlpha
         }
       !rows = benchRows ix benchOpts
 
   case rows of
     [] -> emitEmpty gOpts opts (noRowReason ix rows)
     _  -> do
-      -- Build the ranker corpus only when there are rows to rank.
-      strats <- resolveStrategies optStrategy (RankEnv (realDefsOf ix) mempty) benchOpts
+      -- Build the ranker corpus only when there are rows to rank. The IDF map
+      -- is per-strategy (built in 'strategyRegistry'), so the base env is empty;
+      -- the rows double as the k-NN training corpus (Phase 2).
+      strats <- resolveStrategies optStrategy rows (mkRankEnv (realDefsOf ix) mempty) benchOpts
       let reports = map (\s -> scoreStrategy benchOpts s rows) strats
       case gOutFormat gOpts of
         OutJson  -> emitJsonReport (gOutPath gOpts)
@@ -129,11 +143,11 @@ realDefsOf :: Index -> [Definition]
 realDefsOf ix = [ defAt ix i | i <- [0 .. idxRealCount ix - 1] ]
 
 -- | Resolve @--strategy@ to the concrete strategies, or exit with the
--- list of available names.
-resolveStrategies :: Text -> RankEnv -> BenchOpts -> IO [Strategy]
-resolveStrategies name env opts
-  | name == "all" = pure (strategyRegistry env opts)
-  | otherwise = case lookupStrategy name env opts of
+-- list of available names. @rows@ double as the k-NN training corpus.
+resolveStrategies :: Text -> [BenchRow] -> RankEnv -> BenchOpts -> IO [Strategy]
+resolveStrategies name rows env opts
+  | name == "all" = pure (strategyRegistry rows env opts)
+  | otherwise = case lookupStrategy name rows env opts of
       Just s  -> pure [s]
       Nothing -> do
         hPutStrLn stderr $

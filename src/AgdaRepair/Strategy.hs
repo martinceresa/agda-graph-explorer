@@ -25,6 +25,7 @@ module AgdaRepair.Strategy
   , candidatesFor
   , nearMissSuggestions
   , inScopeNames
+  , importedModules
   , importCandidates
   , resolveImportModules
   , importLineFor
@@ -78,7 +79,7 @@ buildEnv defs aliases = Env
   , envVocab      = LR.envVocab rankEnv
   }
   where
-    rankEnv      = LR.RankEnv defs aliases
+    rankEnv      = LR.mkRankEnv defs aliases  -- carrier/vocab only; IDF unused here
     defEntries   = [ (stripUnderscores (baseName d), [EntryDef d]) | d <- defs ]
     aliasEntries = [ (stripUnderscores alias, [EntryAlias alias host])
                    | qkey <- M.keys aliases, let (alias, host) = splitHostAlias qkey ]

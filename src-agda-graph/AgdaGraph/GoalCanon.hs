@@ -33,12 +33,16 @@ module AgdaGraph.GoalCanon
 
     -- * Conclusion / token extraction (find_lemma)
   , conclusionOf
+  , headSymbol
   , tokenJaccard
     -- * Match-oriented tokens (find_lemma retrieval)
   , matchTokens
   , nameTokens
   , shapeTokens
+  , goalFeatures
   , weightedCoverage
+  , weightedCoverageIdf
+  , idfOf
   , isOpToken
   , stripQualifiers
 
@@ -50,6 +54,7 @@ module AgdaGraph.GoalCanon
 import           Control.DeepSeq  ( NFData(..) )
 import           Data.Char        ( isSpace, isAsciiLower, isUpper, isAlphaNum, isDigit )
 import           Data.List        ( nub, sort )
+import           Data.Maybe       ( listToMaybe )
 import           Data.Set         ( Set )
 import qualified Data.Set         as Set
 import           Data.Text        ( Text )
@@ -359,6 +364,48 @@ weightedCoverage goal bag
     den = sum [ w t | t <- Set.toList goal ]
     num = sum [ w t | t <- Set.toList goal, t `Set.member` bag ]
 
+-- | 'weightedCoverage' with an extra per-token IDF multiplier: a token's
+-- weight is its operator base (2 for a symbol, 1 for an identifier) times
+-- @Map.findWithDefault 1.0 t idf@. So a rare identifier (a large IDF) out-votes
+-- a ubiquitous one (@suc@\/@zero@, IDF ≈ 1). An __empty__ IDF map (or a token
+-- absent from it) leaves every weight at its operator base, making this
+-- byte-for-byte 'weightedCoverage' — the invariant the shipped ranker relies
+-- on when IDF is off. See 'AgdaGraph.LemmaRank.computeIdf' for the map.
+weightedCoverageIdf :: Map.Map Text Double -> Set Text -> Set Text -> Double
+weightedCoverageIdf idf goal bag
+  | den == 0  = 0
+  | otherwise = num / den
+  where
+    w t = (if isOpToken t then 2 else 1) * Map.findWithDefault 1.0 t idf
+    den = sum [ w t | t <- Set.toList goal ]
+    num = sum [ w t | t <- Set.toList goal, t `Set.member` bag ]
+
+-- | The retrieval feature bag of a (goal or signature) string: the match
+-- tokens of its /conclusion/ (@keep@-filtered) unioned with the algebraic
+-- 'shapeTokens'. The one definition of "a goal's tokens" — shared by the
+-- lemma ranker ('AgdaGraph.LemmaRank.rankLemmaCandidatesWith') and Phase-2
+-- premise selection ('AgdaGraph.PremiseSelect.featuresOf'), so
+-- @sim(goal, n)@ compares like against like by construction.
+goalFeatures :: (Text -> Bool) -> Text -> Set Text
+goalFeatures keep s =
+  matchTokens keep concl `Set.union` shapeTokens concl
+  where concl = conclusionOf s
+
+-- | Inverse document frequency over a set of token \"documents\":
+-- @idf t = 1 + log (N / df t)@, where @N@ is the number of documents and
+-- @df t@ how many contain @t@. A token in every document keeps weight 1 (no
+-- boost, none dropped); a rare one is boosted; the empty corpus is the empty
+-- map. Shared by the token-IDF ('AgdaGraph.LemmaRank.computeIdf', over
+-- signature bags) and the premise-IDF ('AgdaGraph.PremiseSelect', over premise
+-- sets), so the two weightings cannot drift.
+idfOf :: [Set Text] -> Map.Map Text Double
+idfOf docs
+  | n == 0    = Map.empty
+  | otherwise = Map.map (\c -> 1 + log (fromIntegral n / fromIntegral c)) df
+  where
+    n  = length docs
+    df = Map.fromListWith (+) [ (t, 1 :: Int) | d <- docs, t <- Set.toList d ]
+
 ----------------------------------------------------------------------
 -- Structural shape recognition (find_lemma, operator-only goals).
 --
@@ -467,3 +514,52 @@ shapeTokens concl =
     ifSet b xs = if b then Set.fromList xs else Set.empty
     listSame (x : y : _) = x == y
     listSame _           = False
+
+----------------------------------------------------------------------
+-- Head symbol (find_lemma head-symbol pre-filter).
+
+-- | The /head symbol/ of a (rendered) conclusion: the outermost thing the
+-- goal is "about", used to keep an @_≤_@ goal from spending hint slots on
+-- @_≡_@ lemmas. Precedence:
+--
+--   1. the first top-level (depth-0) __relation__ operator, if any
+--      (@m + n ≡ n + m@ → @≡@, @xs ≤ ys@ → @≤@) — the connective binds
+--      looser than the arithmetic beneath it, so it is the head;
+--   2. else the first top-level operator (@a + b@ → @+@);
+--   3. else the first top-level identifier — the applied predicate / type
+--      constructor (@Even n@ → @Even@, @Sorted xs@ → @Sorted@).
+--
+-- Operators are underscore-normalised (so @_≤_@ matches @≤@) and qualifiers
+-- stripped, reusing 'flattenShape'. Textual and lenient: 'Nothing' when the
+-- conclusion flattens to nothing recognisable, so a caller comparing two
+-- heads treats an unparsed side as "no signal" and never demotes on it.
+headSymbol :: Text -> Maybe Text
+headSymbol concl = listToMaybe (rels ++ topOps ++ topIds)
+  where
+    top    = topLevel (flattenShape concl)
+    topOps = [ v | TOp v <- top ]
+    topIds = [ v | TId v <- top ]
+    rels   = [ v | v <- topOps, v `Set.member` headRelSet ]
+
+-- | The depth-0 tokens of a shape-token stream (brackets drop the enclosed
+-- run), so an arrow / operator nested inside @(…)@ never counts as the head.
+topLevel :: [ShapeTok] -> [ShapeTok]
+topLevel = go (0 :: Int)
+  where
+    go _ [] = []
+    go d (t : ts) = case t of
+      TLParen           -> go (d + 1) ts
+      TRParen           -> go (d - 1) ts
+      _ | d == 0        -> t : go d ts
+        | otherwise     -> go d ts
+
+-- | Operators that read as a goal's top-level relation (underscore-stripped,
+-- so @_≡_@ ↦ @≡@). Curated and generous — a missed relation only costs a
+-- head-match opportunity, never a wrong demotion, so erring toward inclusion
+-- is safe.
+headRelSet :: Set Text
+headRelSet = Set.fromList
+  [ "≡", "≢", "≈", "≉", "=", "≠", "∼", "~", "≅", "≃", "≡ᵇ"
+  , "≤", "<", "≥", ">", "≮", "≰", "≱", "≲", "≳"
+  , "∈", "∉", "∋", "⊆", "⊂", "⊇", "⊃", "⊈", "⊑", "⊒"
+  , "↔", "⇔", "≟", "∣", "⇒", "⊢" ]

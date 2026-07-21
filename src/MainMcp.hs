@@ -65,7 +65,8 @@ defOpts = Opts
   , oOut = Nothing, oDeps = Nothing, oUnused = Nothing
   , oHashes = True, oSigs = True, oNormSigs = False, oShowImpl = False
   , oMinDepth = 3, oAuto = True, oWatch = True, oIncremental = True, oQueryLog = True
-  , oRequireWellTyped = False, oStrictProducer = False
+  , oRequireWellTyped = False, oStrictProducer = False, oRankIdf = False
+  , oPremiseSelect = False
   , oAutoResolve = True
   , oEnableInteract = False, oAgdaBin = Nothing, oInteractArgs = []
   , oInteractHeapMb = 0, oMaxSessions = 2, oSessionIdleSecs = 0
@@ -116,6 +117,8 @@ parseOpts (x : xs) o = case x of
   "--no-incremental"  -> parseOpts xs o { oIncremental = False }
   "--require-well-typed" -> parseOpts xs o { oRequireWellTyped = True }
   "--strict-producer" -> parseOpts xs o { oStrictProducer = True }
+  "--rank-idf" -> parseOpts xs o { oRankIdf = True }
+  "--premise-select" -> parseOpts xs o { oPremiseSelect = True }
   "--no-query-log"    -> parseOpts xs o { oQueryLog = False }
   "--no-auto-resolve" -> parseOpts xs o { oAutoResolve = False }
   "--enable-interact" -> parseOpts xs o { oEnableInteract = True }
@@ -231,6 +234,8 @@ buildConfig o = do
         , cfgIncremental  = oIncremental o
         , cfgRequireWellTyped = oRequireWellTyped o
         , cfgStrictProducer = oStrictProducer o
+        , cfgRankIdf = oRankIdf o
+        , cfgPremiseSelect = oPremiseSelect o
         , cfgQueryLog     = oQueryLog o
         , cfgAutoResolveUnique = oAutoResolve o
         , cfgEnableInteract = oEnableInteract o
@@ -342,6 +347,13 @@ usage = unlines
   , "                        graph (holes still refresh). Off by default."
   , "  --strict-producer     Run agda-deps strictly: drop --keep-going for its"
   , "                        --incremental cache (faster rebuilds; needs Agda >= 2.9)."
+  , "  --rank-idf            IDF-weight the lemma ranker (find_lemma/auto hints):"
+  , "                        rare identifiers out-vote ubiquitous ones. Off by default"
+  , "                        (baseline coverage) pending a hint-bench measurement."
+  , "  --premise-select      Blend k-NN premise selection into find_lemma/auto ranking:"
+  , "                        recommend the premises of proved theorems similar to the goal"
+  , "                        (~3x any-hit@6 on stdlib scale). Off by default; needs edge"
+  , "                        provenance + signatures in the graph."
   , "  --no-query-log        Disable per-query telemetry (else appends one JSON line"
   , "                        per tools/call to <out-dir>/query-log.jsonl; on by default"
   , "                        in live mode, off in preloaded mode)."

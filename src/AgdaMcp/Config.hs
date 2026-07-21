@@ -69,6 +69,10 @@ data Opts = Opts
   , oIncremental :: Bool
   , oRequireWellTyped :: Bool
   , oStrictProducer :: Bool
+  , oRankIdf :: Bool
+    -- ^ IDF-weight the lemma ranker (Phase-1a, @--rank-idf@; off ⇒ baseline).
+  , oPremiseSelect :: Bool
+    -- ^ Phase-2 k-NN premise selection (@--premise-select@; off ⇒ lexical).
   , oQueryLog :: Bool
   , oAutoResolve :: Bool
   , oEnableInteract :: Bool
@@ -135,6 +139,8 @@ data FileConfig = FileConfig
   , fcNoIncremental :: Maybe Bool
   , fcRequireWellTyped :: Maybe Bool
   , fcStrictProducer :: Maybe Bool
+  , fcRankIdf       :: Maybe Bool
+  , fcPremiseSelect :: Maybe Bool
   , fcNoQueryLog    :: Maybe Bool
   , fcNoAutoResolve :: Maybe Bool
   , fcEnableInteract :: Maybe Bool
@@ -173,6 +179,8 @@ instance FromJSON FileConfig where
     fcNoIncremental <- o .:? "no-incremental"
     fcRequireWellTyped <- o .:? "require-well-typed"
     fcStrictProducer <- o .:? "strict-producer"
+    fcRankIdf       <- o .:? "rank-idf"
+    fcPremiseSelect <- o .:? "premise-select"
     fcNoQueryLog    <- o .:? "no-query-log"
     fcNoAutoResolve <- o .:? "no-auto-resolve"
     fcEnableInteract <- o .:? "enable-interact"
@@ -224,6 +232,8 @@ applyConfig FileConfig{..} o = o
   , oIncremental = maybe (oIncremental o) not fcNoIncremental
   , oRequireWellTyped = fromMaybe (oRequireWellTyped o) fcRequireWellTyped
   , oStrictProducer   = fromMaybe (oStrictProducer o) fcStrictProducer
+  , oRankIdf          = fromMaybe (oRankIdf o) fcRankIdf
+  , oPremiseSelect    = fromMaybe (oPremiseSelect o) fcPremiseSelect
   , oQueryLog = maybe (oQueryLog o) not fcNoQueryLog
   , oAutoResolve = maybe (oAutoResolve o) not fcNoAutoResolve
   , oEnableInteract = fromMaybe (oEnableInteract o) fcEnableInteract

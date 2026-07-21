@@ -28,12 +28,17 @@ import qualified Data.Set             as Set
 import           AgdaGraph.Interaction.Protocol
 import qualified AgdaGraph.Interaction.Iotcm as Iotcm
 import           AgdaGraph.GoalCanon   ( matchTokens, nameTokens, shapeTokens
-                                       , weightedCoverage, stripQualifiers )
-import           AgdaGraph.LemmaRank   ( RankEnv(..), rankLemmaCandidates
+                                       , weightedCoverage, weightedCoverageIdf
+                                       , headSymbol, stripQualifiers )
+import           AgdaGraph.LemmaRank   ( mkRankEnv, RankOpts(..), defaultRankOpts
+                                       , rankLemmaCandidates, rankLemmaCandidatesWith
+                                       , computeIdf
                                        , goalCarrierSegments, moduleSegments )
 import           AgdaGraph.PremiseBench ( benchRows, scoreStrategy, lookupStrategy
                                        , defaultBenchOpts, noRowReason
                                        , BenchReport(..) )
+import           AgdaGraph.PremiseSelect ( CorpusRow(..), buildCorpus, featuresOf
+                                        , premiseVotes, blendScores, alphaFor )
 import           AgdaInteract.Guard
 import           AgdaInteract.Literate
 import           AgdaInteract.GoalId
@@ -95,6 +100,8 @@ main = do
   sequence_ (map ($ fails) taintTests)
   sequence_ (map ($ fails) moduleOptionEscapeTests)
   sequence_ (map ($ fails) lemmaRankTests)
+  sequence_ (map ($ fails) phase1RankTests)
+  sequence_ (map ($ fails) phase2SelectTests)
   sequence_ (map ($ fails) strategyTests)
   premiseBenchTests fails
   replayTests fails
@@ -653,7 +660,7 @@ lemmaRankTests =
   , check "carrier: a renaming alias's host module supplies the segment"
       (Set.member "Nat" (goalCarrierSegments aliasEnv "\8469" []))
   , checkEq "carrier: empty env → empty segments (no-renames determinism pin)"
-      Set.empty (goalCarrierSegments (RankEnv [] Map.empty) goalPlusZero [])
+      Set.empty (goalCarrierSegments (mkRankEnv [] Map.empty) goalPlusZero [])
   , checkEq "rank: with no carrier signal, order is the pre-R20 alphabetical tie-break"
       [ "Data.Integer.Properties.+-identity\691"
       , "Data.Nat.Properties.+-identity\691"
@@ -665,7 +672,7 @@ lemmaRankTests =
   where
     goalPlusZero = "n + zero \8801 n"                     -- n + zero ≡ n
     idr = "Algebra.RightIdentity Relation.Binary.PropositionalEquality._\8801_ "
-    arenaEnv = RankEnv
+    arenaEnv = mkRankEnv
       [ mkDef "Data.Nat.Properties.+-identity\691"     "Data.Nat.Properties"     KFunction
               (Just (idr <> "0 Data.Nat._+_"))
       , mkDef "Data.Integer.Properties.+-identity\691" "Data.Integer.Properties" KFunction
@@ -674,8 +681,100 @@ lemmaRankTests =
               (Just (idr <> "Data.Sign.+ Data.Sign._*_"))
       , mkDef "Agda.Builtin.Nat.Nat.zero"              "Agda.Builtin.Nat"        KConstructor Nothing
       ] Map.empty
-    natEnv   = RankEnv [ mkDef "Data.Nat.Base.\8469" "Data.Nat.Base" KDatatype Nothing ] Map.empty
-    aliasEnv = RankEnv [] (Map.singleton "Data.Nat.Base.\8469" "Agda.Builtin.Nat.Nat")
+    natEnv   = mkRankEnv [ mkDef "Data.Nat.Base.\8469" "Data.Nat.Base" KDatatype Nothing ] Map.empty
+    aliasEnv = mkRankEnv [] (Map.singleton "Data.Nat.Base.\8469" "Agda.Builtin.Nat.Nat")
+
+----------------------------------------------------------------------
+-- Phase-1 ranking upgrades: head symbol (1b), IDF weighting (1a).
+
+phase1RankTests :: [Check]
+phase1RankTests =
+  [ -- 1b. headSymbol: a relation operator heads a relational goal…
+    checkEq "headSymbol: ≡ heads an equality goal"
+      (Just "\8801") (headSymbol "m + n \8801 n + m")
+  , checkEq "headSymbol: ≤ heads an order goal"
+      (Just "\8804") (headSymbol "xs \8804 ys")
+  , -- …an applied predicate is headed by its constructor…
+    checkEq "headSymbol: an applied predicate is headed by its identifier"
+      (Just "Even") (headSymbol "Even n")
+  , -- …a bare operator application by that operator, and nothing by nothing.
+    checkEq "headSymbol: a bare op application is headed by the op"
+      (Just "+") (headSymbol "n + zero")
+  , checkEq "headSymbol: an empty conclusion has no head"
+      Nothing (headSymbol "")
+
+    -- 1b. head-filter drops a head-mismatched candidate the baseline keeps.
+    -- At minSim 0 both defs qualify; the ≤ lemma is dropped for an ≡ goal.
+  , checkEq "head: baseline (no head handling) keeps both candidates"
+      ["M.eqLem", "M.leLem"]
+      (map (defName . snd) (rankLemmaCandidates headEnv (const True) 0 "a \8801 b" []))
+  , checkEq "head-filter: drops the ≤-headed candidate for an ≡ goal"
+      ["M.eqLem"]
+      (map (defName . snd)
+           (rankLemmaCandidatesWith defaultRankOpts { roHeadFilter = True }
+                                    headEnv (const True) 0 "a \8801 b" []))
+
+    -- 1a. weightedCoverageIdf with an empty map is exactly weightedCoverage.
+  , check "idf: empty map ⇒ weightedCoverageIdf == weightedCoverage"
+      (weightedCoverageIdf Map.empty gset bset == weightedCoverage gset bset)
+    -- 1a. a token in one of three defs outweighs one in all three; a
+    -- ubiquitous token keeps weight 1 (1 + log 1).
+  , check "idf: a rare token outweighs a ubiquitous one"
+      (Map.findWithDefault 0 "Rare" idfMap > Map.findWithDefault 0 "Common" idfMap)
+  , check "idf: a token in every def keeps weight 1"
+      (abs (Map.findWithDefault 0 "Common" idfMap - 1) < 1e-9)
+  ]
+  where
+    headEnv = mkRankEnv
+      [ mkDef "M.eqLem" "M" KFunction (Just "x \8801 y")
+      , mkDef "M.leLem" "M" KFunction (Just "x \8804 y")
+      ] Map.empty
+    gset = Set.fromList ["\8801", "f"]
+    bset = Set.fromList ["\8801", "x"]
+    idfMap = computeIdf
+      [ mkDef "M.f" "M" KFunction (Just "Common Rare")
+      , mkDef "M.g" "M" KFunction (Just "Common Other")
+      , mkDef "M.h" "M" KFunction (Just "Common Third")
+      ]
+
+----------------------------------------------------------------------
+-- Phase-2 dependency-informed premise selection (k-NN).
+
+phase2SelectTests :: [Check]
+phase2SelectTests =
+  [ -- featuresOf pulls the goal's operator + algebraic shape (bound vars dropped).
+    check "featuresOf: a commutativity goal yields ≡ and the Commutative shape"
+      (Set.member "\8801" f && Set.member "Commutative" f)
+
+    -- premiseVotes: the premise of the most-similar neighbour out-votes a
+    -- premise seen only in a less-similar one. Goal features match n1 exactly
+    -- ({≡,+}), overlap n2 partially ({≡,*}) — so n1's lemA beats n2's lemC.
+  , check "premiseVotes: a near neighbour's premise out-votes a far one's"
+      (Map.findWithDefault 0 "lemA" votes > Map.findWithDefault 0 "lemC" votes)
+  , check "premiseVotes: leave-one-out drops the excluded row's private premise"
+      (Map.notMember "lemSelf" (premiseVotes 8 corpus (/= "self") goalF))
+
+    -- blendScores: min-max normalise each side, then α·knn + (1-α)·lexical.
+  , check "blendScores: α=0.5 averages the two normalised signals"
+      (let b = blendScores 0.5 (Map.fromList [("a",1),("b",0)])
+                                (Map.fromList [("b",1),("c",0)])
+       in abs (Map.findWithDefault 0 "a" b - 0.5) < 1e-9
+          && abs (Map.findWithDefault 0 "b" b - 0.5) < 1e-9
+          && abs (Map.findWithDefault 0 "c" b - 0)   < 1e-9)
+
+    -- alphaFor: pure lexical below the corpus-size floor, base α above.
+  , checkEq "alphaFor: 0 below the corpus floor"  0   (alphaFor 10  0.5)
+  , checkEq "alphaFor: base α above the floor"    0.5 (alphaFor 100 0.5)
+  ]
+  where
+    f      = featuresOf Set.empty "m + n \8801 n + m"
+    goalF  = featuresOf Set.empty "m + n \8801 n + m"       -- {≡, +, Commutative}
+    corpus = buildCorpus Set.empty Map.empty
+      [ CorpusRow "n1"   (Set.fromList ["\8801", "+"]) (Set.fromList ["lemA", "lemB"])
+      , CorpusRow "n2"   (Set.fromList ["\8801", "*"]) (Set.fromList ["lemC"])
+      , CorpusRow "self" (Set.fromList ["\8801", "+"]) (Set.fromList ["lemSelf"])
+      ]
+    votes  = premiseVotes 8 corpus (const True) goalF
 
 ----------------------------------------------------------------------
 -- Alias-aware, carrier-ranked, import-only write-side resolvers.
@@ -760,11 +859,11 @@ premiseBenchTests ref = do
       check ("hint-bench: .agda-explore/deps.json decodes (" ++ err ++ ")") False ref
     Right g -> do
       let ix    = buildIndex g
-          env   = RankEnv [ defAt ix i | i <- [0 .. idxRealCount ix - 1] ] Map.empty
+          env   = mkRankEnv [ defAt ix i | i <- [0 .. idxRealCount ix - 1] ] Map.empty
           opts  = defaultBenchOpts
           rows  = benchRows ix opts
       check "hint-bench: fixture yields a non-empty corpus" (not (null rows)) ref
-      case lookupStrategy "baseline" env opts of
+      case lookupStrategy "baseline" rows env opts of
         Nothing    -> check "hint-bench: baseline strategy is registered" False ref
         Just strat -> do
           let rep = scoreStrategy opts strat rows
@@ -828,6 +927,16 @@ replayTests ref = do
   check "refine.jsonl: GiveStr \"suc ?\" at id 0"
     (case [s | ReplyGiveAction 0 (GiveStr s) <- refineRs] of
        (s:_) -> s == "suc ?"
+       _     -> False) ref
+
+  -- auto-batch.jsonl (Phase-3a) → a multi-hint Cmd_autoOne batch returns the
+  -- COMBINED term `trans' eq1 eq2`, which no single hint reaches. Pins the
+  -- batch semantics verified on this agda (2.8.0 dir); a future agda that
+  -- aborts the batch instead would drop the GiveAction and fail this.
+  batchRs <- parseLines "test/interaction/2.8.0/auto-batch.jsonl"
+  check "auto-batch.jsonl: batch combines two hints into `trans' eq1 eq2`"
+    (case [s | ReplyGiveAction 0 (GiveStr s) <- batchRs] of
+       (s:_) -> s == "trans' eq1 eq2"
        _     -> False) ref
 
   -- make-case.jsonl → MakeCase id 0, Function, 2 clauses

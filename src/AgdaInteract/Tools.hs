@@ -42,8 +42,9 @@ import           Data.Aeson              (FromJSON (..), Value, object, withObje
                                           (.:), (.=))
 import           Data.Aeson.Types        (parseMaybe)
 import           Data.IORef              (newIORef, readIORef, writeIORef)
-import           Data.List               (isPrefixOf, nub, sortOn, stripPrefix)
+import           Data.List               (isPrefixOf, nub, partition, sortOn, stripPrefix)
 import qualified Data.Map.Strict         as M
+import qualified Data.Set                as Set
 import           Data.Maybe              (fromMaybe, isJust, isNothing,
                                           mapMaybe)
 import           Data.Text               (Text)
@@ -61,7 +62,7 @@ import           Text.Read               (readMaybe)
 
 import           AgdaGraph.Interaction.Iotcm
 import           AgdaGraph.Interaction.Protocol
-import           AgdaGraph.Schema        (Definition)
+import           AgdaGraph.Schema        (Definition, defModule)
 import           AgdaInteract.Batch
 import           AgdaInteract.Edit
 import           AgdaInteract.GoalId
@@ -460,24 +461,33 @@ runAuto :: ToolRunner
 runAuto ss a = withGoal ss a $ \sess file e iid -> do
   let secs = max 1 (argInt a "timeout" 5)
       k    = max 0 (argInt a "hints" 6)
-  -- One graph snapshot: hint names to seed Mimer, paired with the def each
-  -- came from so an out-of-scope hint can be reported with its import line.
-  mLd <- either (const Nothing) (Just . fst) <$> ensureFresh ss
-  let hintCands = case mLd of Just ld | k > 0 -> goalHintCands ld k (geType e); _ -> []
-      hints     = map fst hintCands
-  res <- autoSolve sess file iid secs hints
+  -- One graph snapshot for hint ranking. Feed the goal's live context binder
+  -- types (1d) and the file's import scope (1c): fetch 2k candidates, probe
+  -- the first k in-scope, report the out-of-scope remainder with import lines.
+  mLd      <- either (const Nothing) (Just . fst) <$> ensureFresh ss
+  ctxTypes <- ctxTypesOf sess file iid
+  msrc     <- either (const Nothing) Just <$> readSourceStamped ss file
+  let inScope                = hintInScope mLd file <$> msrc
+      (probeCands, oosCands) = prepGoalHints mLd inScope k ctxTypes (geType e)
+      hints                  = map fst probeCands
+  res <- autoSolve True sess file iid secs hints
   case res of
     AutoGive mh s -> fmap (headline mh <>) <$> applyHoleEdit ss (writeFlag a) file e s
     -- No solution: surface Agda's error if the plain probe sent one, else
-    -- the no-solution note (listing the hints we tried), then flag any hint
-    -- that was skipped because it is out of the file's import scope.
-    AutoNone mErr oos ->
-      pure (Left (fromMaybe (noSolution hints) mErr <> oosNote "auto" hintCands oos))
+    -- the no-solution note (listing the hints we tried), then flag the
+    -- out-of-scope candidates (pre-filtered here, plus any a probe bounced).
+    AutoNone mErr bounced ->
+      pure (Left (fromMaybe (noSolution hints) mErr
+                    <> oosNote "auto" (probeCands ++ oosCands)
+                               (nub (map fst oosCands ++ bounced))))
     -- Budget expiry / session death: the session is reset.
     AutoAbort m -> pure (Left m)
   where
-    headline Nothing  = "Mimer filled the goal:\n\n"
-    headline (Just h) = "Mimer filled the goal via lemma `" <> h <> "`:\n\n"
+    headline Plain         = "Mimer filled the goal:\n\n"
+    headline (ViaHint h)   = "Mimer filled the goal via lemma `" <> h <> "`:\n\n"
+    headline (ViaBatch hs) = "Mimer filled the goal via graph hints ("
+                               <> T.intercalate ", " [ "`" <> h <> "`" | h <- hs ]
+                               <> "):\n\n"
     noSolution hs =
       "auto/Mimer found no solution for this goal"
         <> (if null hs then ""
@@ -503,9 +513,54 @@ oosNote tool cands oos =
       Just d  -> " — add `" <> RS.importLineFor d <> "`"
       Nothing -> ""
 
+-- | The "hint is in the file's import scope" predicate (Phase-1c), built ONCE
+-- from the file's source text and module map — both loop-invariant across a
+-- file's goals, so 'runAutoAll' builds this before its per-goal loop.
+-- Conservative: a candidate is out of scope only when the file neither names
+-- it (a @using@\/@renaming@ entry or a top-level def, via 'RS.inScopeNames')
+-- nor opens its defining module at all ('RS.importedModules'), nor is that
+-- module defined in the file itself. An unrestricted @open import M@ therefore
+-- reads as in-scope, so the costly error (a false "out of scope", which would
+-- drop a usable hint) is avoided; a @using@ list that happens to exclude the
+-- name only costs one fast bounced probe, exactly as today.
+hintInScope :: Maybe Loaded -> FilePath -> Text -> (Text, Definition) -> Bool
+hintInScope mLd file src = inScope
+  where
+    named    = RS.inScopeNames src
+    imported = Set.fromList (RS.importedModules src)
+    fileMods = case mLd of
+      Just ld -> Set.fromList [ m | (m, f) <- M.toList (ldModFiles ld), f == file ]
+      Nothing -> Set.empty
+    inScope (nm, d) =
+         nm            `Set.member` named
+      || defModule d   `Set.member` imported
+      || defModule d   `Set.member` fileMods
+
+-- | Rank and scope-partition a goal's Mimer hint candidates. Ranks via
+-- 'goalHintCands' (Phase 1a/1b through the shared ranker; @ctxTypes@ is 1d),
+-- then fetches @2k@ candidates and keeps the first @k@ __in-scope__ to probe
+-- (1c), returning the out-of-scope remainder to report. The scope predicate is
+-- built once by the caller ('hintInScope'); 'Nothing' (no source text) ⇒ the
+-- top @k@ unpartitioned (today's behaviour). No snapshot ⇒ no hints.
+prepGoalHints :: Maybe Loaded -> Maybe ((Text, Definition) -> Bool) -> Int -> [Text] -> Text
+              -> ([(Text, Definition)], [(Text, Definition)])
+prepGoalHints mLd mInScope k ctxTypes goalTy
+  | k <= 0    = ([], [])
+  | otherwise =
+      let cands = maybe [] (\ld -> goalHintCands ld (2 * k) goalTy ctxTypes) mLd
+      in case mInScope of
+           Just inScope -> let (inS, oos) = partition inScope cands in (take k inS, oos)
+           Nothing      -> (take k cands, [])
+
+-- | Which probe closed the goal, for the headline.
+data HintProv
+  = Plain            -- ^ the unhinted probe.
+  | ViaHint !Text    -- ^ a single lemma hint (the per-hint fallback).
+  | ViaBatch ![Text] -- ^ the in-scope hint batch in one call (may combine ≥2 lemmas).
+
 -- | Outcome of a (possibly hint-guided) Mimer search at one goal.
 data AutoResult
-  = AutoGive (Maybe Text) Text  -- ^ term found; @Just h@ = via lemma hint @h@, @Nothing@ = unhinted
+  = AutoGive HintProv Text      -- ^ term found; the 'HintProv' says how.
   | AutoNone (Maybe Text) [Text]
       -- ^ nothing found; @Just@ = an Agda error from the plain probe, plus
       --   the hints whose probe Agda rejected as out of scope (in try order).
@@ -519,29 +574,58 @@ data ProbeResult
   | PNone  !(Maybe Text)    -- ^ no term; optional Agda error
   | PAbort !Text            -- ^ wall-budget expiry / session death
 
--- | Mimer at one goal: plain first (closes trivial holes fast), then each
--- lemma hint on its own. An unknown/out-of-scope hint aborts the entire
--- Mimer call on Agda 2.9 (verified), so hints must NOT be batched — but
--- scope resolution happens before search, so a bad hint fails ~instantly.
--- Stops at the first 'GiveAction'; hint probes use a smaller budget (a real
--- hint solves near-instantly). A hint probe that fails with a not-in-scope
--- error is recorded (not discarded) so 'runAuto' can flag it. Every
--- probe is bounded as wall-clock ('probeBudgetMicros'), so a goal whose
--- normalization diverges resets the session instead of wedging it.
-autoSolve :: Session -> FilePath -> Int -> Int -> [Text] -> IO AutoResult
-autoSolve sess file iid secs hints = do
-    r0 <- probe secs ("-t " ++ show secs)
+-- | Max hints in the Phase-3a batch call. Small on purpose (see 'autoSolve'):
+-- big batches abort on a single mis-scoped hint; 2–4 combine reliably.
+autoBatchMax :: Int
+autoBatchMax = 4
+
+-- | Mimer at one goal, in three probe tiers (Phase-3a):
+--
+--   1. __plain__, full budget — closes trivial holes fast. Skipped when
+--      @tryPlain@ is 'False' (the 'runAutoAll' hinted pass, where a cheap plain
+--      pass already failed — Phase 3b, so plain is not re-run).
+--   2. __batch__: the top @'autoBatchMax'@ @hints@ in ONE call, full budget.
+--      The @hints@ are pre-validated in-scope short names (Phase-1c
+--      'prepGoalHints'), so the call does not abort, and this is the only tier
+--      that lets Mimer /combine/ two lemmas — sequential probes structurally
+--      cannot. Verified on Agda 2.8 (a multi-hint in-scope call returns a
+--      @GiveAction@; a single out-of-scope name still errors @[NotInScope]@,
+--      hence tier 3).
+--   3. __per-hint fallback__: each hint alone, smaller budget — catches a batch
+--      abort from a hint the scope parser wrongly validated, and pins the OOS
+--      hints for reporting.
+--
+-- Stops at the first 'GiveAction'. Every probe is wall-clock-bounded
+-- ('probeBudgetMicros'), so a diverging normalization resets the session
+-- instead of wedging it.
+autoSolve :: Bool -> Session -> FilePath -> Int -> Int -> [Text] -> IO AutoResult
+autoSolve tryPlain sess file iid secs hints = do
+    r0 <- if tryPlain then probe secs ("-t " ++ show secs) else pure (PNone Nothing)
     case r0 of
-      PGive t   -> pure (AutoGive Nothing t)
-      PAbort m  -> pure (AutoAbort m)
-      PNone mErr -> tryHints hints [] mErr
+      PGive t    -> pure (AutoGive Plain t)
+      PAbort m   -> pure (AutoAbort m)
+      PNone mErr
+        | null hints -> pure (AutoNone mErr [])
+        | otherwise  -> do
+            rB <- probe secs ("-t " ++ show secs ++ " " ++ unwords (map T.unpack batch))
+            case rB of
+              PGive t  -> pure (AutoGive (ViaBatch batch) t)
+              PAbort m -> pure (AutoAbort m)
+              PNone _  -> tryHints hints [] mErr
   where
+    -- Batch only the top few hints, not all k: the scope parser (Phase 1c) is
+    -- approximate, and ONE false-in-scope name aborts the whole batch call
+    -- (verified: an out-of-scope hint errors [NotInScope] before search). A
+    -- small, best-ranked batch keeps "all truly in-scope" likely so Mimer can
+    -- combine them (verified: `trans' eq1 eq2` solves what no single hint does);
+    -- the per-hint fallback below still tries all k regardless.
+    batch    = take autoBatchMax hints
     hintSecs = max 1 (min 3 secs)
     tryHints []       oos mErr = pure (AutoNone mErr (reverse oos))
     tryHints (h : hs) oos mErr = do
       r <- probe hintSecs ("-t " ++ show hintSecs ++ " " ++ T.unpack h)
       case r of
-        PGive t   -> pure (AutoGive (Just h) t)
+        PGive t   -> pure (AutoGive (ViaHint h) t)
         PAbort m  -> pure (AutoAbort m)
         PNone hErr -> tryHints hs (if maybe False (RD.hintOutOfScope h) hErr
                                      then h : oos else oos) mErr
@@ -598,22 +682,40 @@ runAutoAll ss a = do
                 Right orig -> do
                   let secs = max 1 (argInt a "timeout" 5)
                       k    = max 0 (argInt a "hints" 6)
-                  -- One graph snapshot; per-goal Mimer hint (name, def) pairs
-                  -- off each type — the def lets an out-of-scope hint be
-                  -- reported with its import line.
+                      cb   = codeBlocksFor file orig
                   mLd <- either (const Nothing) (Just . fst) <$> ensureFresh ss
-                  let hintsFor e
-                        | k == 0    = []
-                        | otherwise = maybe [] (\ld -> goalHintCands ld k (geType e)) mLd
-                      esWithHints = [ (e, hintsFor e) | e <- es ]
-                  (edits, solved, unsolved, oosAll, mAbort) <-
-                    autoAllLoop sess file (codeBlocksFor file orig) secs esWithHints
+                  let inScope = Just (hintInScope mLd file orig)
+                  -- Phase-3b budget ladder. PASS 1: plain only, cheap 1 s budget,
+                  -- over ALL goals, NO hints — closes trivial holes without the
+                  -- per-goal live context round-trip + ranking, and fails the
+                  -- rest fast so the full budget is spent only on the residue.
+                  (eds1, ok1, surv1, _, mAbort1) <-
+                    autoAllLoop True sess file cb 1 [ (e, []) | e <- es ]
+                  -- PASS 2: hinted (skip plain — pass 1 already ran it), full
+                  -- budget, over the SURVIVORS only. The scope predicate (1c) is
+                  -- built once; per survivor rank (1a/1b) + live context types
+                  -- (1d) + scope-partition into the k in-scope hints to probe
+                  -- plus the out-of-scope remainder to report.
+                  perGoal <- if isJust mAbort1 then pure []
+                             else forM surv1 $ \e -> do
+                               ctxTypes <- maybe (pure []) (ctxTypesOf sess file) (geIid e)
+                               let (probe, oos) = prepGoalHints mLd inScope k ctxTypes (geType e)
+                               pure (e, probe, oos)
+                  let esWithHints = [ (e, probe)      | (e, probe, _)   <- perGoal ]
+                      preOos       = concat [ oos          | (_, _, oos)    <- perGoal ]
+                      allCands     = concat [ probe ++ oos | (_, probe, oos) <- perGoal ]
+                  (eds2, ok2, unsolved, oosBounced, mAbort2) <-
+                    if isJust mAbort1 then pure ([], [], surv1, [], mAbort1)
+                    else autoAllLoop False sess file cb secs esWithHints
                   -- The in-session gives diverge from disk (which stays
                   -- untouched unless write:true) — reload on next use.
                   markSessionDirty ss file
-                  let hintMap = M.toList (M.fromListWith (\_ old -> old)
-                                            (concatMap snd esWithHints))
-                      oosBlock  = oosNote "auto_all" hintMap (nub oosAll)
+                  let edits   = eds1 ++ eds2
+                      solved  = ok1 ++ ok2
+                      mAbort  = case mAbort1 of Just _ -> mAbort1; Nothing -> mAbort2
+                      hintMap = M.toList (M.fromListWith (\_ old -> old) allCands)
+                      oosBlock  = oosNote "auto_all" hintMap
+                                          (nub (map fst preOos ++ oosBounced))
                       abortBlock = maybe "" ("\n" <>) mAbort   -- a wedge reset the session
                       survivors
                         | null unsolved = oosBlock <> abortBlock
@@ -640,15 +742,15 @@ runAutoAll ss a = do
 -- hole-range edits in ORIGINAL-text offsets (the in-session gives never
 -- move the on-disk text). Continue-on-failure — unlike @construct@, an
 -- unsolved goal is a /result/ here, not an abort.
-autoAllLoop :: Session -> FilePath -> CodeBlocks -> Int -> [(GoalEntry, [(Text, Definition)])]
+autoAllLoop :: Bool -> Session -> FilePath -> CodeBlocks -> Int -> [(GoalEntry, [(Text, Definition)])]
             -> IO ([(Int, Int, Text)], [Text], [GoalEntry], [Text], Maybe Text)
-autoAllLoop sess file cb secs = go [] [] [] []
+autoAllLoop tryPlain sess file cb secs = go [] [] [] []
   where
     go eds ok bad oos []               = pure (reverse eds, reverse ok, reverse bad, reverse oos, Nothing)
     go eds ok bad oos ((e, hintCands) : rest) = case (geIid e, geRange e) of
       (Just iid, Just (GoalRange s en))
         | isInsideCode cb (rpPos s) -> do
-            res <- autoSolve sess file iid secs (map fst hintCands)
+            res <- autoSolve tryPlain sess file iid secs (map fst hintCands)
             case res of
               AutoGive _ t ->
                 go ((rpPos s, rpPos en, t) : eds)

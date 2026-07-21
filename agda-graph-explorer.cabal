@@ -30,6 +30,7 @@ library agda-graph
                     AgdaGraph.GoalCanon
                     AgdaGraph.LemmaRank
                     AgdaGraph.PremiseBench
+                    AgdaGraph.PremiseSelect
                     AgdaGraph.ConfigCore
                     AgdaGraph.Interaction.Protocol
                     AgdaGraph.Interaction.Iotcm

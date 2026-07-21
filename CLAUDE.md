@@ -211,8 +211,18 @@ src/
                                 last run's per-entry graphs, mtime-diff to
                                 re-run only changed entries); cold-start
                                 fallback (ssColdError); the interaction-session
-                                registry (ssSessions).
-    Query.hs                    pure point queries over Index.
+                                registry (ssSessions). Builds ldIdf (computeIdf)
+                                only under cfgRankIdf / --rank-idf (1a; else
+                                empty ⇒ baseline ranking), and ldCorpus
+                                (PremiseSelect) only under cfgPremiseSelect /
+                                --premise-select (2; else Nothing ⇒ lexical).
+    Query.hs                    pure point queries over Index. rankGoalCandidates
+                                (find_lemma) is purely lexical + ldIdf;
+                                goalHintCands (auto hints) takes ctxTypes (1d) and
+                                blends Phase-2 k-NN premise votes (premiseBlend,
+                                k=32 α=0.9) when ldCorpus is present — the
+                                find_lemma/auto split (they answer different
+                                questions: statement-match vs. premise-use).
     Tools.hs                    MCP lifecycle + read-side tool catalogue +
                                 tools/call dispatch; `unused` shells to
                                 agda-unused; appends interactTools (gated on
@@ -280,7 +290,18 @@ src/
                                 diagnostics; give_file authors whole-file/append
                                 content; new_module scaffolds + resolves imports
                                 off the index; lemmas runs queryFindLemma off a
-                                live goal type.
+                                live goal type. auto/auto_all seed hints via
+                                prepGoalHints: rank (1a/1b) with the goal's live
+                                context types (1d, ctxTypesOf), then
+                                partitionHintScope (1c) keeps the first k in-scope
+                                to probe and reports the rest with import lines
+                                (fetch 2k, take k in-scope). autoSolve probes in
+                                tiers (3a): plain → a small in-scope hint batch in
+                                one call (combines lemmas; autoBatchMax) → per-hint
+                                fallback; tryPlain=False skips the plain tier.
+                                runAutoAll is a 3b two-pass ladder: cheap plain 1s
+                                over all goals, then hinted full-budget over the
+                                survivors (hints fetched lazily there).
                                 Also hosts the `repair` loop driver (runRepair /
                                 repairLoop / firstWorking / accepts) so it can
                                 reuse loadRenamedTemp/applyOrDiff/interpretCheck
@@ -318,18 +339,38 @@ src-agda-graph/AgdaGraph/       Shared library.
                                 hashString + find_lemma retrieval tokens
                                 (matchTokens qualifier-strip/vocab-keep,
                                 nameTokens, algebraic shapeTokens,
-                                weightedCoverage) + qname splitters
-                                (baseComponent/moduleComponent).
+                                weightedCoverage + IDF-weighted
+                                weightedCoverageIdf [1a], headSymbol [1b top-level
+                                relation/type-constructor of a conclusion]) +
+                                qname splitters (baseComponent/moduleComponent).
   LemmaRank.hs                  find_lemma ranking core: carrier-affinity +
-                                token-coverage scoring over a RankEnv.
+                                token-coverage scoring over a RankEnv (whose
+                                reIdf empty ⇒ plain coverage). rankLemmaCandidatesWith
+                                takes RankOpts (head-symbol demote/filter, 1b);
+                                computeIdf builds the per-token IDF map (1a).
+                                Both off/empty ⇒ byte-identical to the pre-Phase-1
+                                ranker (pinned in test/Spec.hs).
   PremiseBench.hs               pure leave-one-out eval of the lemma ranker
                                 (backs `agda-optimization hint-bench` +
                                 test/Spec.hs): benchRows (proved theorem →
                                 goal sig + body-provenance premise set),
-                                Strategy registry (baseline = rankLemmaCandidates),
+                                Strategy registry (baseline + Phase-1 variants
+                                idf/head/head-filter/idf+head),
                                 scoreStrategy (recall@k / any-hit@k / MRR,
                                 parMap rdeepseq, -N-deterministic). No provenance
-                                / no signatures ⇒ zero rows.
+                                / no signatures ⇒ zero rows. Strategies:
+                                baseline + Phase-1 (idf/head/…) + Phase-2
+                                (knn/blend over AgdaGraph.PremiseSelect).
+  PremiseSelect.hs              Phase-2 dependency-informed premise selection
+                                (MaSh/CoqHammer k-NN): buildCorpus (proved
+                                theorems' feature bags + body-provenance
+                                premises), premiseVotes (top-k similar theorems'
+                                premises, weighted by token+premise IDF),
+                                blendScores (α·knn + (1-α)·lexical), alphaFor
+                                (ramp to lexical on a small corpus). Measured to
+                                ~3× any-hit@6 over lexical at stdlib scale — the
+                                first Phase that WON. Feeds `auto` hints only,
+                                NOT find_lemma (they answer different questions).
   WL.hs                         Weisfeiler–Leman refinement / hashing /
                                 fingerprints / weighted Jaccard.
   Similarity.hs                 shared structural-similarity cores so
@@ -439,13 +480,19 @@ plugin/                         Claude Code plugin: agda-explore MCP server +
   refreshed goals in one round-trip. `auto` runs Mimer via
   `Cmd_autoOne Rewrite InteractionId Range String` — the leading `Rewrite` is
   mandatory (omit it and Agda "cannot read"); the trailing string carries
-  Mimer options (`-t <secs>` bounds the search, verified on Agda 2.9) **and
+  Mimer options (`-t <secs>` bounds the search, verified on Agda 2.8) **and
   lemma hints** as space-separated identifiers. Plain Mimer won't try an
   in-scope lemma at any budget, so `auto` (+ `construct` auto steps) seed the
   top `find_lemma` candidates (`Query.goalHintCands`) as hints. An
-  unknown/out-of-scope or *qualified* hint aborts the whole call (Agda 2.9),
-  so hints must be in-scope short names tried ONE AT A TIME — scope
-  resolution is instant, so a bad hint fails before searching. Don't batch.
+  unknown/out-of-scope or *qualified* hint aborts the whole call (verified on
+  Agda 2.8: `[NotInScope]` before search — instant, session survives). Phase-3a
+  therefore probes plain → **a small batch of pre-validated in-scope hints in
+  one call** (the only tier that lets Mimer *combine* two lemmas — verified:
+  `trans' eq1 eq2` solves what no single hint does; pinned by
+  `test/interaction/2.8.0/auto-batch.jsonl`) → **per-hint fallback** (catches a
+  batch abort from a hint the approximate scope parser wrongly validated). The
+  batch is bounded (`autoBatchMax`) because ONE bad name aborts the whole
+  batch; the per-hint fallback still tries every hint.
 
 - **`repair`'s three invariants are enforced structurally — don't relax them.**
   (1) *Spec preservation*: repair is __import-only__ — the sole edit inserts an

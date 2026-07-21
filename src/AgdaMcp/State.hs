@@ -90,6 +90,8 @@ import           System.Process       (CreateProcess (..), proc,
 
 import           AgdaGraph.GoalCanon   (hashString, word64Hex16)
 import           AgdaGraph.Glob       (globMatch)
+import           AgdaGraph.LemmaRank  (computeIdf, envVocab, mkRankEnv)
+import qualified AgdaGraph.PremiseSelect as PS
 import           AgdaGraph.Index      (Index, buildIndexLean, idxDefs, idxRealCount
                                       , baseNameKey, isLocalName)
 import           AgdaGraph.Schema     (Definition (..), ExpandedGraph (..), ReExport (..))
@@ -128,6 +130,8 @@ data Config = Config
   , cfgIncremental  :: !Bool             -- ^ multi-entry incremental rebuilds: re-run @agda-deps@ only for entries whose closure a change touches, reusing the others' retained graphs (a RAM-for-speed trade). Off ⇒ every rebuild is full and nothing is retained.
   , cfgRequireWellTyped :: !Bool         -- ^ only promote a well-typed rebuild: a build with failed modules is withheld while a prior snapshot exists (serve-stale); holes still promote. See 'commitOrKeep'.
   , cfgStrictProducer :: !Bool           -- ^ strict @agda-deps@: drop @--keep-going@ (any error ⇒ serve stale) and enable @--incremental@ (needs Agda >= 2.9). See 'buildBaseArgs'.
+  , cfgRankIdf      :: !Bool             -- ^ IDF-weight the lemma ranker (Phase-1a): builds 'ldIdf' from the snapshot's signature vocabulary and threads it into every @find_lemma@/@auto@ ranking. Off ⇒ empty map ⇒ baseline coverage (the shipped default until measured).
+  , cfgPremiseSelect :: !Bool            -- ^ Phase-2 dependency-informed premise selection: builds 'ldCorpus' (proved theorems' premises) and blends k-NN premise votes into @find_lemma@/@auto@ ranking. Measured to roughly triple any-hit\@6 on stdlib-scale graphs; off by default (needs edge provenance + signatures).
   , cfgQueryLog     :: !Bool             -- ^ append one JSON line per @tools/call@ to @cfgOutDir/query-log.jsonl@.
   , cfgAutoResolveUnique :: !Bool        -- ^ auto-resolve a name to the sole "did you mean" candidate (tier 3 of 'AgdaMcp.Query.resolveDefNote').
   , cfgEnableInteract :: !Bool           -- ^ expose the write-side interaction-bridge tools (load/goal_type/give/…).
@@ -167,6 +171,8 @@ defaultConfig = Config
   , cfgIncremental  = True
   , cfgRequireWellTyped = False
   , cfgStrictProducer = False
+  , cfgRankIdf      = False
+  , cfgPremiseSelect = False
   , cfgQueryLog     = True
   , cfgAutoResolveUnique = True
   , cfgEnableInteract = False
@@ -239,6 +245,17 @@ data Loaded = Loaded
     -- ^ The real (non-synthetic) defs as a list, materialised once at
     -- snapshot construction. The point queries rescan this many times per
     -- request; the snapshot is immutable, so it is built once here instead.
+  , ldIdf       :: !(M.Map Text Double)
+    -- ^ Per-token IDF weights over 'ldRealDefs' ('computeIdf'), for the
+    -- Phase-1a IDF-weighted ranker. Populated only under 'cfgRankIdf';
+    -- __empty__ otherwise, which makes the ranker byte-for-byte the baseline
+    -- coverage order (the shipped default).
+  , ldCorpus    :: !(Maybe PS.Corpus)
+    -- ^ The Phase-2 k-NN premise-selection training corpus (proved theorems'
+    -- feature bags + body-provenance premise sets). 'Just' only under
+    -- 'cfgPremiseSelect'; 'Nothing' otherwise, so the ranker stays pure
+    -- lexical (the shipped default). Measured on stdlib-scale graphs to
+    -- roughly triple any-hit\@6 over lexical alone (see Improving.Auto.md).
   , ldOwnerMap  :: !(IM.IntMap Definition)
     -- ^ Precomputed enclosing-owner lookup for @where@-/anonymous-module
     -- locals: a local def's id ('defId') to its owning top-level def (see
@@ -688,8 +705,24 @@ loadedFromGraph cfg mGraphFile egProject = do
   -- never changes); the similarity caches below stay lazy by design.
   let !rds      = V.toList (V.take (idxRealCount ix) (idxDefs ix))
       !ownerMap = buildOwnerMap rds
+      -- Token IDF over the snapshot's signature bags, computed at most once
+      -- (a shared thunk) and reused by both Phase-1a's ldIdf and the Phase-2
+      -- corpus, so enabling both flags does not fold it twice.
+      tokenIdf  = computeIdf rds
+      -- Phase-1a IDF weights: built only when enabled, else empty (baseline).
+      !idf      = if cfgRankIdf cfg then tokenIdf else M.empty
+      -- Phase-2 k-NN corpus: built only when enabled (needs provenance +
+      -- signatures), else Nothing (pure-lexical ranking, the default). The
+      -- vocab is cached on the corpus so per-query goal features reuse it.
+      !corpus   = if cfgPremiseSelect cfg
+                    then let vocab = envVocab (mkRankEnv rds M.empty)
+                         in Just (PS.buildCorpus vocab tokenIdf
+                                    (PS.corpusRowsFromIndex True vocab ix))
+                    else Nothing
   _   <- evaluate (force (length rds))
   _   <- evaluate (force (IM.size ownerMap))
+  _   <- evaluate (force (M.size idf))
+  _   <- evaluate (force corpus)
   now <- getCurrentTime
   sig <- scanSources (cfgIncludes cfg)
   -- Coverage is a project concern: diff on-disk sources against the PROJECT
@@ -737,6 +770,8 @@ loadedFromGraph cfg mGraphFile egProject = do
     , ldProducer = egProducer eg
     , ldNodeKeyV = nkv
     , ldRealDefs = rds
+    , ldIdf      = idf
+    , ldCorpus   = corpus
     , ldOwnerMap = ownerMap
     , ldBaseNameIndex = M.fromListWith (++)
         [ (baseNameKey (defName d), [d]) | d <- rds ]

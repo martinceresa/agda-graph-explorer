@@ -66,6 +66,7 @@ import           AgdaGraph.GoalCanon (conclusionOf, matchTokens,
 import           AgdaGraph.LemmaRank (RankEnv (..), LemmaScore,
                                      rankLemmaCandidates, goalCarrierSegments,
                                      moduleSegments)
+import qualified AgdaGraph.PremiseSelect as PS
 
 import           AgdaMcp.State      (Loaded (..))
 
@@ -1218,7 +1219,7 @@ queryFindLemma ld lim minSim mKindTxt mModPrefix mGoal mAnchor ctxTypes =
           -- so the "rebuild" note fires only on a truly sig-less graph.)
           anySig   = any (isJust . defSig) (realDefs ld)
           ranked   = take lim (rankGoalCandidates ld candKeep minSim goal ctxTypes)
-          carrier  = goalCarrierSegments (RankEnv (realDefs ld) (ldAliases ld)) goal ctxTypes
+          carrier  = goalCarrierSegments (RankEnv (realDefs ld) (ldAliases ld) (ldIdf ld)) goal ctxTypes
           shapeNote
             | Set.null gshape = ""
             | otherwise       = "; shape: " <> renderTokens gshape
@@ -1274,11 +1275,20 @@ queryFindLemma ld lim minSim mKindTxt mModPrefix mGoal mAnchor ctxTypes =
 -- @renaming@ aliases as a 'RankEnv'. @ctxTypes@ are the goal's live context
 -- binder types (@[]@ on the read side); they steer carrier affinity only.
 -- Empty when the graph carries no signatures.
+--
+-- __Purely lexical__: it answers "which lemma's /statement/ matches this
+-- goal", so @find_lemma@ ranks the goal-closing lemma. Phase-2 k-NN premise
+-- selection is deliberately __not__ applied here — testing showed it /hurts/
+-- this task (it recommends the lemmas a proof would /use/, not the lemma that
+-- /matches/ the goal, so an exact statement match like @+-identityʳ@ for
+-- @n + 0 ≡ n@ gets diluted). It is applied instead in 'goalHintCands' (the
+-- @auto@ hint path), the task hint-bench actually measures.
 rankGoalCandidates
   :: Loaded -> (Definition -> Bool) -> Double -> Text -> [Text]
   -> [(LemmaScore, Definition)]
 rankGoalCandidates ld candKeep minSim goal ctxTypes =
-  rankLemmaCandidates (RankEnv (realDefs ld) (ldAliases ld)) candKeep minSim goal ctxTypes
+  rankLemmaCandidates (RankEnv (realDefs ld) (ldAliases ld) (ldIdf ld))
+                      candKeep minSim goal ctxTypes
 
 -- | Ranked @(base-name, source def)@ pairs to seed Mimer hints for a goal,
 -- most relevant first, deduped on the base name (keeping the first, i.e.
@@ -1286,20 +1296,69 @@ rankGoalCandidates ld candKeep minSim goal ctxTypes =
 -- qualified hint, and an out-of-scope hint aborts the whole search — so
 -- `auto` tries them one at a time); the paired 'Definition' lets `auto`
 -- name the defining module of an out-of-scope hint without a second
--- graph query. A modest coverage floor keeps junk out. Context-free
--- (@ctxTypes = []@) — but inherits the carrier-affinity tiebreak, so the
--- carrier-matching instance is tried first. Empty on a signature-less graph.
-goalHintCands :: Loaded -> Int -> Text -> [(Text, Definition)]
-goalHintCands ld n goal =
-  take n (ordNubOn fst [ (baseComponent (defName d), d)
-                       | (_, d) <- rankGoalCandidates ld (const True) 0.4 goal [] ])
+-- graph query. A modest coverage floor keeps junk out. @ctxTypes@ are the
+-- goal's live context binder types (Phase-1d): they steer the carrier-affinity
+-- tiebreak toward the goal's actual carrier type (@[]@ ⇒ context-free).
+-- Empty on a signature-less graph.
+--
+-- Unlike free-text @find_lemma@ ('rankGoalCandidates'), this is where Phase-2
+-- k-NN premise selection lands (when 'cfgPremiseSelect' populates 'ldCorpus'):
+-- hints are the lemmas a /proof/ of the goal would use, so ranking by "what
+-- similar proved theorems reached for" (blended with lexical coverage at
+-- @α = 0.9@) roughly triples any-hit\@6 on stdlib-scale graphs. Falls back to
+-- the pure lexical order when the corpus is absent.
+goalHintCands :: Loaded -> Int -> Text -> [Text] -> [(Text, Definition)]
+goalHintCands ld n goal ctxTypes =
+  take n (ordNubOn fst [ (baseComponent (defName d), d) | d <- rankedDefs ])
   where
+    lexRanked = map snd (rankGoalCandidates ld (const True) 0.4 goal ctxTypes)
+    rankedDefs = case ldCorpus ld of
+      Nothing     -> lexRanked
+      Just corpus -> premiseBlend ld corpus goal lexRanked
     ordNubOn key = go Set.empty
       where
         go _    []       = []
         go seen (x : xs)
           | key x `Set.member` seen = go seen xs
           | otherwise               = x : go (Set.insert (key x) seen) xs
+
+-- | Phase-2 k-NN premise blend for the @auto@ hint path: re-rank the lexical
+-- candidates by @α·knn + (1-α)·lexical@, and prepend any voted premise that
+-- lexical dropped below its coverage floor (k-NN's whole point — surfacing a
+-- premise whose own signature barely matches the goal). @lexTop@ is the
+-- already-ranked lexical candidate defs (its list position is the lexical
+-- score, high-to-low). Parameters are the hint-bench-fitted @k = 32@,
+-- @α = 0.9@ (knn-dominant, lexical fallback for zero-vote goals).
+premiseBlend :: Loaded -> PS.Corpus -> Text -> [Definition] -> [Definition]
+premiseBlend ld corpus goal lexTop =
+  sortBy (comparing (\d -> (Down (M.findWithDefault 0 (defName d) blended), defName d)))
+         cands
+  where
+    fgoal   = PS.featuresOf (PS.cVocab corpus) goal
+    votes   = PS.premiseVotes premiseKnnK corpus (const True) fgoal
+    -- lexical component: rank position, descending (top = highest). blendScores
+    -- min-max-normalises it, so any positive-monotone scale works — no divisor.
+    nLex    = length lexTop
+    lexScore = M.fromList
+      [ (defName d, fromIntegral (nLex - i)) | (i, d) <- zip [0 :: Int ..] lexTop ]
+    -- α ramps to 0 (pure lexical) on a small corpus, exactly as offline.
+    alpha   = PS.alphaFor (length (PS.cRows corpus)) premiseAlpha
+    blended = PS.blendScores alpha votes lexScore
+    -- candidate set: the lexical top plus any voted premise it dropped.
+    votedDefs = [ d | nm <- M.keys votes, Just d <- [lookupDef (ldIndex ld) nm] ]
+    seen    = Set.fromList (map defName lexTop)
+    cands   = lexTop ++ [ d | d <- votedDefs, not (defName d `Set.member` seen) ]
+
+-- | Phase-2 daemon k-NN parameters, fixed at the values hint-bench fitted on
+-- stdlib-scale graphs (see @Improving.Auto.md@): @k = 32@ neighbours, blend
+-- weight @α = 0.9@ (knn-dominant, with a lexical fallback for zero-vote goals
+-- and, via 'PS.alphaFor', for small corpora). Not user knobs — bench artifacts;
+-- re-fit with @agda-optimization hint-bench --strategy blend --knn-k/--knn-alpha@.
+premiseKnnK :: Int
+premiseKnnK = 32
+
+premiseAlpha :: Double
+premiseAlpha = 0.9
 
 -- ---------------------------------------------------------------------
 -- search / stats

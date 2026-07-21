@@ -54,16 +54,23 @@ module AgdaGraph.PremiseBench
 
 import           Control.DeepSeq  ( NFData(..) )
 import           Control.Parallel.Strategies ( parListChunk, rdeepseq, withStrategy )
-import qualified Data.IntMap.Strict as IM
 import           Data.Maybe       ( isJust )
 import           Data.Set         ( Set )
 import qualified Data.Set         as Set
 import           Data.Text        ( Text )
 
-import           AgdaGraph.Schema    ( Definition(..), Kind(..), Provenance(..)
-                                     , State(..) )
+import           Data.Ord         ( Down(..), comparing )
+import           Data.List        ( sortBy )
+import qualified Data.Map.Strict  as Map
+
+import           AgdaGraph.Schema    ( Definition(..), State(..) )
 import           AgdaGraph.Index     ( Index(..), defAt )
-import           AgdaGraph.LemmaRank ( RankEnv(..), rankLemmaCandidates )
+import           AgdaGraph.LemmaRank ( RankEnv(..), mkRankEnv, RankOpts(..)
+                                     , defaultRankOpts, rankLemmaCandidatesWith
+                                     , computeIdf, envVocab )
+import           AgdaGraph.PremiseSelect ( CorpusRow(..), buildCorpus, featuresOf
+                                         , bodyPremises, premiseVotes, blendScores
+                                         , alphaFor )
 
 -- ---------------------------------------------------------------------
 -- Corpus
@@ -94,6 +101,12 @@ data BenchOpts = BenchOpts
     -- ^ Drop constructor / record premises from @B(d)@ — Mimer builds
     -- those for free, so they are noise in a lemma-recall measurement.
     -- Toggle off to measure the raw premise set.
+  , boKnnK      :: !Int
+    -- ^ Phase-2 k-NN neighbourhood size (the top-@k@ similar theorems whose
+    -- premises vote); feeds the @knn@ / @blend@ strategies.
+  , boKnnAlpha  :: !Double
+    -- ^ Phase-2 blend weight for the @blend@ strategy: @α·knn + (1-α)·lexical@
+    -- (ramped to 0 on a small corpus, see 'alphaFor').
   } deriving (Show)
 
 defaultBenchOpts :: BenchOpts
@@ -101,6 +114,8 @@ defaultBenchOpts = BenchOpts
   { boCutoffs   = [3, 6, 10]
   , boMinSim    = 0.4
   , boDropCtors = True
+  , boKnnK      = 32
+  , boKnnAlpha  = 0.5
   }
 
 -- | The leave-one-out corpus for a graph. Empty when the graph carries no
@@ -112,37 +127,19 @@ defaultBenchOpts = BenchOpts
 -- to the ones its type mentions) that are themselves 'Defined',
 -- signature-carrying real defs — optionally minus constructors / records.
 benchRows :: Index -> BenchOpts -> [BenchRow]
-benchRows ix opts = case idxEdgeProvenance ix of
-  Nothing   -> []
-  Just prov ->
-    [ BenchRow
-        { brName     = defName d
-        , brGoal     = sig
-        , brPremises = prems
-        }
-    | i <- [0 .. idxRealCount ix - 1]
-    , let d = defAt ix i
-    , defState d == Defined
-    , Just sig <- [defSig d]
-    , let prems = premisesOf ix opts prov i
-    , not (Set.null prems)
-    ]
-
--- | @B(d)@ for the real def with id @i@: the 'ProvBody' edge targets that
--- are 'Defined', signature-carrying defs (constructors / records dropped
--- when 'boDropCtors'). Synthetic edge-only nodes never carry a signature,
--- so the signature guard already excludes them.
-premisesOf :: Index -> BenchOpts -> IM.IntMap (IM.IntMap Provenance) -> Int -> Set Text
-premisesOf ix BenchOpts{..} prov i =
-  Set.fromList
-    [ defName t
-    | (tid, ProvBody) <- IM.toList (IM.findWithDefault IM.empty i prov)
-    , let t = defAt ix tid
-    , tid /= i
-    , defState t == Defined
-    , Just _ <- [defSig t]
-    , not (boDropCtors && defKind t `elem` [KConstructor, KRecord])
-    ]
+benchRows ix opts =
+  [ BenchRow
+      { brName     = defName d
+      , brGoal     = sig
+      , brPremises = prems
+      }
+  | i <- [0 .. idxRealCount ix - 1]
+  , let d = defAt ix i
+  , defState d == Defined
+  , Just sig <- [defSig d]
+  , let prems = bodyPremises (boDropCtors opts) ix i
+  , not (Set.null prems)
+  ]
 
 -- | Human explanation of an empty corpus, for the CLI's clean exit.
 -- Takes the already-computed rows (the caller holds them) rather than
@@ -176,35 +173,68 @@ data Strategy = Strategy
   , stratRank :: BenchRow -> [Text]
   }
 
--- | The registered strategies for a graph. @baseline@ is the shipped
--- 'rankLemmaCandidates' (context-free, carrier-affinity tiebreak intact),
--- excluding the row's own theorem from its candidates. Phase 1/2 variants
--- append here.
-strategyRegistry :: RankEnv -> BenchOpts -> [Strategy]
-strategyRegistry env opts =
-  [ Strategy "baseline" (baselineRank env (boMinSim opts)) ]
-
--- | Today's ranker as a strategy: rank every signature-carrying def
--- (bar @d@ itself) by 'rankLemmaCandidates' at the given coverage floor,
--- with no live context types.
-baselineRank :: RankEnv -> Double -> BenchRow -> [Text]
-baselineRank env minSim row =
-  map (defName . snd)
-      (rankLemmaCandidates env candKeep minSim (brGoal row) [])
+-- | The registered strategies for a graph, all scored on the same rows.
+-- @baseline@ is the shipped ranker (empty IDF, no head handling); the
+-- Phase-1 experiments are @idf@ (1a token IDF weighting), @head@ /
+-- @head-filter@ (1b head-symbol demotion vs. hard filter), and @idf+head@;
+-- the Phase-2 experiments are @knn@ (pure dependency-informed premise voting)
+-- and @blend@ (@knn@ blended with lexical coverage at 'boKnnAlpha'). The rows
+-- double as the k-NN training corpus (each is a proved theorem with its
+-- premises). Each strategy excludes the row's own theorem (leave-one-out) and
+-- passes no live context types (1d is not offline-scorable).
+strategyRegistry :: [BenchRow] -> RankEnv -> BenchOpts -> [Strategy]
+strategyRegistry rows env opts =
+  [ Strategy "baseline"    (rankWith defaultRankOpts env)
+  , Strategy "idf"         (rankWith defaultRankOpts envIdf)
+  , Strategy "head"        (rankWith headDemote      env)
+  , Strategy "head-filter" (rankWith headFilter      env)
+  , Strategy "idf+head"    (rankWith headDemote      envIdf)
+  , Strategy "knn"         (knnRank 1.0)
+  , Strategy "blend"       (knnRank (alphaFor (length rows) (boKnnAlpha opts)))
+  ]
   where
-    candKeep d = defName d /= brName row
+    minSim     = boMinSim opts
+    idfMap     = computeIdf (reDefs env)
+    envIdf     = env { reIdf = idfMap }
+    headDemote = defaultRankOpts { roHeadDemote = True }
+    headFilter = defaultRankOpts { roHeadFilter = True }
+    rankWith ropts e row =
+      map (defName . snd)
+          (rankLemmaCandidatesWith ropts e (\d -> defName d /= brName row)
+                                    minSim (brGoal row) [])
+    -- Phase 2: rank premises by k-NN votes from similar theorems, optionally
+    -- blended with the lexical coverage score at weight @alpha@ (1 ⇒ pure knn).
+    -- The corpus (rows' features + premises) is built once, shared across rows.
+    vocab   = envVocab env
+    corpus  = buildCorpus vocab idfMap
+                [ CorpusRow (brName r) (featuresOf vocab (brGoal r)) (brPremises r)
+                | r <- rows ]
+    knnRank alpha row =
+      let fgoal      = featuresOf vocab (brGoal row)
+          keepName n = n /= brName row
+          votes      = premiseVotes (boKnnK opts) corpus keepName fgoal
+          scores
+            | alpha >= 1 = votes
+            | otherwise  =
+                let lexical = Map.fromList
+                            [ (defName d, cov)
+                            | ((cov, _, _, _), d) <- rankLemmaCandidatesWith
+                                defaultRankOpts env (\d -> defName d /= brName row)
+                                minSim (brGoal row) [] ]
+                in blendScores alpha votes lexical
+      in map fst (sortBy (comparing (\(nm, sc) -> (Down sc, nm))) (Map.toList scores))
 
 -- | The registered strategy names, for @--help@ / error listing. Strategy
--- names are env-independent, so a throwaway empty 'RankEnv' is enough to
--- enumerate them (keep it that way — a name that varied with the graph
--- would make this list silently wrong).
+-- names are env-independent, so throwaway empty rows / 'RankEnv' enumerate
+-- them (keep it that way — a name that varied with the graph would make this
+-- list silently wrong).
 strategyNames :: [Text]
-strategyNames = map stratName (strategyRegistry (RankEnv [] mempty) defaultBenchOpts)
+strategyNames = map stratName (strategyRegistry [] (mkRankEnv [] mempty) defaultBenchOpts)
 
 -- | Resolve a strategy by name against a graph's registry.
-lookupStrategy :: Text -> RankEnv -> BenchOpts -> Maybe Strategy
-lookupStrategy nm env opts =
-  case filter ((== nm) . stratName) (strategyRegistry env opts) of
+lookupStrategy :: Text -> [BenchRow] -> RankEnv -> BenchOpts -> Maybe Strategy
+lookupStrategy nm rows env opts =
+  case filter ((== nm) . stratName) (strategyRegistry rows env opts) of
     (s : _) -> Just s
     []      -> Nothing
 
