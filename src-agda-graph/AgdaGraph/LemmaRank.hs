@@ -39,14 +39,15 @@ module AgdaGraph.LemmaRank
   , carrierSegmentsFor
   , carrierMap
   , envVocab
+  , vocabOf
   , moduleSegments
   , genericSegments
   ) where
 
-import           Data.List        ( sortBy )
+import           Data.List        ( sortOn )
 import qualified Data.Map.Strict  as Map
 import           Data.Map.Strict  ( Map )
-import           Data.Ord         ( Down(..), comparing )
+import           Data.Ord         ( Down(..) )
 import           Data.Set         ( Set )
 import qualified Data.Set         as Set
 import           Data.Text        ( Text )
@@ -119,7 +120,7 @@ rankLemmaCandidatesWith
   :: RankOpts -> RankEnv -> (Definition -> Bool) -> Double -> Text -> [Text]
   -> [(LemmaScore, Definition)]
 rankLemmaCandidatesWith ropts env candKeep minSim goal ctxTypes =
-  sortBy (comparing sortKey)
+  sortOn sortKey
     [ (sc, d)
     | d <- reDefs env, candKeep d
     , Just sig <- [defSig d]

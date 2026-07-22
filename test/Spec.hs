@@ -16,12 +16,14 @@ module Main (main) where
 import           Control.Monad        ( unless )
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Lazy.Char8 as BLC
+import qualified Data.Text.Encoding  as TE
+import qualified Data.Yaml            as Y
 import           Data.IORef
-import           Data.List            ( elemIndex )
+import           Data.List            ( elemIndex, intercalate )
 import           Data.Maybe           ( listToMaybe, mapMaybe )
 import           Data.Text            ( Text )
 import qualified Data.Text            as T
-import           System.Exit          ( exitFailure, exitSuccess )
+import           System.Exit          ( ExitCode(..), exitFailure, exitSuccess )
 import           System.IO            ( hPutStrLn, stderr )
 
 import qualified Data.Set             as Set
@@ -48,16 +50,27 @@ import           AgdaInteract.Edit
 import           AgdaInteract.Batch    ( Step(..), wildcardCheck, allGiveSteps
                                        , checkInspectArgs, checkScratchOp
                                        , inspectOps, scratchOps )
+import qualified AgdaAuto.CLI          as AA
+import qualified AgdaAuto.Config       as AC
+import           AgdaInteract.AutoReport ( AutoAllOutcome(..), GoalReport(..)
+                                         , GoalOutcome(..), HintProv(..)
+                                         , noGoalsOutcome, renderAutoAll, oosNote
+                                         , annotationEdits )
+import           AgdaAuto.Report       ( outcomeExit, outcomeJson, renderHumanReport
+                                       , Summary(..), summarize, worstExit, ledgerLines )
+import           AgdaInteract.Annotate ( Annotation(..), renderMarker, parseMarker
+                                       , stripMarker, annotateHole, holeHints
+                                       , sanitize, commentBalanced )
 import qualified AgdaRepair.Diagnostic as RD
 import qualified AgdaRepair.Edit       as RE
 import qualified AgdaRepair.Strategy   as RS
-import           Data.Aeson            ( eitherDecode, encode )
+import           Data.Aeson            ( Value, eitherDecode, encode, object, (.=) )
 import qualified Data.Map.Strict       as Map
 import           AgdaGraph.Schema      ( ExpandedGraph(..), Definition(..), ReExport(..)
                                        , State(..), Kind(..), Access(..)
                                        , loadExpandedGraph )
 import           AgdaGraph.Index       ( buildIndex, lookupId, unsafeDeps, defAt
-                                       , idxRealCount )
+                                       , idxRealCount, moduleDependencyOrder )
 import           AgdaUnused.Analysis   ( Finding(..), FindingKind(..), analyse )
 
 ----------------------------------------------------------------------
@@ -103,6 +116,12 @@ main = do
   sequence_ (map ($ fails) phase1RankTests)
   sequence_ (map ($ fails) phase2SelectTests)
   sequence_ (map ($ fails) strategyTests)
+  sequence_ (map ($ fails) autoCliTests)
+  sequence_ (map ($ fails) autoRenderTests)
+  sequence_ (map ($ fails) autoReportTests)
+  sequence_ (map ($ fails) annotateTests)
+  sequence_ (map ($ fails) aggregateTests)
+  sequence_ (map ($ fails) moduleTopoTests)
   premiseBenchTests fails
   replayTests fails
   n <- readIORef fails
@@ -845,6 +864,359 @@ strategyTests =
 -- zero rows, not a crash), synthesised off the same fixture so they don't
 -- depend on a second file staying signature-free.
 
+----------------------------------------------------------------------
+-- agda-auto CLI + config layer.
+--
+-- Pure surface only: the flag parser threads a seed 'AutoOpts', and the
+-- config overlay is a no-op except where a field is set. The merge order
+-- defaults < config < CLI is the contract these pin (the live ladder is
+-- covered by test/auto/smoke.sh, which CI does not run).
+
+autoCliTests :: [Check]
+autoCliTests =
+  [ checkEq "parseArgs [] is identity on the seed"
+      (Right AA.defaultOpts) (AA.parseArgs [] AA.defaultOpts)
+  , check "default annotate is on" (AA.aoAnnotate AA.defaultOpts)
+  , check "--write sets aoWrite"
+      (rOr False AA.aoWrite (AA.parseArgs ["--write"] AA.defaultOpts))
+  , check "--no-annotate clears annotate"
+      (rOr True (not . AA.aoAnnotate) (AA.parseArgs ["--no-annotate"] AA.defaultOpts))
+  , checkEq "--timeout N (space form)"
+      (Right 10) (AA.aoTimeout <$> AA.parseArgs ["--timeout", "10"] AA.defaultOpts)
+  , checkEq "--timeout=N via preprocess"
+      (Right 10) (AA.aoTimeout <$> AA.parseArgs (AA.preprocess ["--timeout=10"]) AA.defaultOpts)
+  , checkEq "--hints=0 via preprocess"
+      (Right 0) (AA.aoHints <$> AA.parseArgs (AA.preprocess ["--hints=0"]) AA.defaultOpts)
+  , checkEq "-i repeats and appends in order"
+      (Right ["a", "b"]) (AA.aoIncludes <$> AA.parseArgs ["-i", "a", "-i", "b"] AA.defaultOpts)
+  , checkEq "--overlay-graph repeats"
+      (Right ["g1", "g2"])
+      (AA.aoOverlays <$> AA.parseArgs ["--overlay-graph", "g1", "--overlay-graph", "g2"] AA.defaultOpts)
+  , checkEq "positional bare file → aoFiles"
+      (Right ["Foo.agda"]) (AA.aoFiles <$> AA.parseArgs ["Foo.agda"] AA.defaultOpts)
+  , checkEq "flags and files interleave, files keep order"
+      (Right ["A.agda", "B.agda"])
+      (AA.aoFiles <$> AA.parseArgs ["A.agda", "--write", "B.agda"] AA.defaultOpts)
+  , check "--graph sets the path"
+      (rOr False ((== Just "d.json") . AA.aoGraph) (AA.parseArgs ["--graph", "d.json"] AA.defaultOpts))
+  , check "unknown flag is an error"
+      (isLeft (AA.parseArgs ["--nope"] AA.defaultOpts))
+  , check "a short unknown flag is an error"
+      (isLeft (AA.parseArgs ["-x"] AA.defaultOpts))
+  , check "value-flag with no value is an error"
+      (isLeft (AA.parseArgs ["--timeout"] AA.defaultOpts))
+  -- defaults < config < CLI.
+  , checkEq "config overlays a scalar onto defaults"
+      5000 (AA.aoWallBudget (AC.applyConfig cfgWall AA.defaultOpts))
+  , check "empty config is a no-op"
+      (AC.applyConfig AC.emptyFileConfig AA.defaultOpts == AA.defaultOpts)
+  , check "CLI overrides config for a scalar (write)"
+      (rOr False AA.aoWrite (AA.parseArgs ["--write"] (AC.applyConfig cfgNoWrite AA.defaultOpts)))
+  , checkEq "config list is the base; CLI appends after it"
+      (Right ["cfgInc", "cliInc"])
+      (AA.aoIncludes <$> AA.parseArgs ["-i", "cliInc"] (AC.applyConfig cfgInc AA.defaultOpts))
+  -- --repair / --fixpoint / --ledger flags.
+  , check "--repair sets aoRepair"
+      (rOr False AA.aoRepair (AA.parseArgs ["--repair"] AA.defaultOpts))
+  , check "--fixpoint sets aoFixpoint"
+      (rOr False AA.aoFixpoint (AA.parseArgs ["--fixpoint"] AA.defaultOpts))
+  , checkEq "--ledger sets the path"
+      (Right (Just "l.jsonl")) (AA.aoLedger <$> AA.parseArgs ["--ledger", "l.jsonl"] AA.defaultOpts)
+  , check "config sets a fixpoint flag; empty config leaves it"
+      (AA.aoFixpoint (AC.applyConfig (AC.emptyFileConfig { AC.fcFixpoint = Just True }) AA.defaultOpts))
+  -- `--show-defaults` emits valid YAML that decodes to a FileConfig and, applied
+  -- to the defaults, is a no-op overlay: the dump both parses and faithfully
+  -- reflects the built-in defaults (guards against key typos / value drift).
+  , check "--show-defaults YAML parses and round-trips to defaultOpts"
+      (case Y.decodeEither' (TE.encodeUtf8 (T.pack AA.defaultsYaml)) of
+         Left _   -> False
+         Right fc -> AC.applyConfig fc AA.defaultOpts == AA.defaultOpts)
+  ]
+  where
+    rOr d f    = either (const d) f
+    isLeft     = either (const True) (const False)
+    cfgWall    = AC.emptyFileConfig { AC.fcWallBudget = Just 5000 }
+    cfgNoWrite = AC.emptyFileConfig { AC.fcWrite = Just False }
+    cfgInc     = AC.emptyFileConfig { AC.fcIncludes = Just ["cfgInc"] }
+
+----------------------------------------------------------------------
+-- renderAutoAll: the pure prose the MCP `auto_all` tool emits.
+--
+-- The live byte-identity of the refactor is checked against a real daemon in
+-- test/auto/smoke.sh; these pins lock the pure function so a later edit can't
+-- drift it, and cover the OOS-import-line and abort branches that are hard to
+-- produce live. The dashes are U+2014 (—) and the ellipsis U+2026 (…), matching
+-- the renderer source exactly.
+
+autoRenderTests :: [Check]
+autoRenderTests =
+  [ checkEq "render: no open goals"
+      "Loaded Foo.agda — no open goals; nothing for Mimer to try."
+      (renderAutoAll (noGoalsOutcome "Foo.agda"))
+  , checkEq "render: all solved (headline + trailing blank line)"
+      "Mimer solved 1 of 1 open goal(s): g0.\n\n"
+      (renderAutoAll base { aoGoalCount = 1, aoSolved = ["g0"], aoNew = Just "x" })
+  , checkEq "render: solved none + survivors line"
+      ( "Mimer solved none of the 2 open goal(s) in Foo.agda (per-goal budget 5s)."
+          <> "\nMimer found nothing for: g0, g1 — try a `construct` refine step, "
+          <> "`lemmas goal=…`, or `construct` an explicit give." )
+      (renderAutoAll base { aoGoalCount = 2, aoUnsolved = ["g0", "g1"] })
+  , checkEq "render: mixed — headline + survivors + OOS import line + abort"
+      ( "Mimer solved 1 of 3 open goal(s): g0."
+          <> "\nMimer found nothing for: g1, g2 — try a `construct` refine step, "
+          <> "`lemmas goal=…`, or `construct` an explicit give."
+          <> "\nNote — 1 graph-ranked hint(s) are not in the file's import scope, "
+          <> "so Mimer could not try them:\n"
+          <> "  - `+-suc` — add `open import Data.Nat.Properties using (+-suc)`\n"
+          <> "Add the import(s) and re-run `auto_all`, or run `repair file=…` to add them for you."
+          <> "\nsession died"
+          <> "\n\n" )
+      (renderAutoAll base
+         { aoGoalCount = 3, aoSecs = 7, aoSolved = ["g0"], aoUnsolved = ["g1", "g2"]
+         , aoAllCands = [("+-suc", sucDef)], aoOosNames = ["+-suc"]
+         , aoAbort = Just "session died", aoNew = Just "..." })
+  , checkEq "oosNote empty in → blank out" "" (oosNote "auto" [] [])
+  , check "oosNote names a known def's import line"
+      ("open import Data.Nat.Properties using (+-suc)"
+         `T.isInfixOf` oosNote "auto" [("+-suc", sucDef)] ["+-suc"])
+  , check "oosNote omits an import line for an unknown name"
+      (not ("open import" `T.isInfixOf` oosNote "auto" [] ["mystery"]))
+  ]
+  where
+    base   = (noGoalsOutcome "Foo.agda") { aoNoGoals = False, aoSecs = 5 }
+    sucDef = mkDef "Data.Nat.Properties.+-suc" "Data.Nat.Properties" KFunction Nothing
+
+----------------------------------------------------------------------
+-- AgdaAuto.Report: exit-code policy + JSON contract + human table.
+--
+-- The JSON field names are a public contract; the golden pin below is the
+-- tripwire (compared as decoded Values, so key order is irrelevant but any
+-- rename/add/drop/value change trips it).
+
+autoReportTests :: [Check]
+autoReportTests =
+  [ checkEq "exit: no goals → success"  ExitSuccess     (outcomeExit (noGoalsOutcome "F.agda"))
+  , checkEq "exit: all solved → success" ExitSuccess    (outcomeExit (oc [solvedG] Nothing))
+  , checkEq "exit: an unsolved hole → 1" (ExitFailure 1) (outcomeExit (oc [solvedG, unsolvedG] Nothing))
+  , checkEq "exit: a skipped hole → 1"   (ExitFailure 1) (outcomeExit (oc [skippedG] Nothing))
+  , checkEq "exit: abort → 1 even with a solve"
+      (ExitFailure 1) (outcomeExit (oc [solvedG] (Just "session died")))
+  , check "json matches the golden (field-name/value tripwire)"
+      (case eitherDecode (BLC.pack goldenReportJson) :: Either String Value of
+         Right gold -> outcomeJson True "DIFF" (oc [solvedG, unsolvedG, skippedG] Nothing) == gold
+         Left  _    -> False)
+  , check "json round-trips through its own encoding"
+      (let v = outcomeJson True "DIFF" (oc [solvedG, unsolvedG, skippedG] Nothing)
+       in (eitherDecode (encode v) :: Either String Value) == Right v)
+  , checkEq "human report header"
+      "F.agda: 3 hole(s) — 1 filled, 1 unsolved, 1 skipped"
+      (head (T.lines (renderHumanReport (oc [solvedG, unsolvedG, skippedG] Nothing))))
+  , check "human report names a solving lemma"
+      ("g0 9:7  filled — via lemma `+-comm`"
+         `T.isInfixOf` renderHumanReport (oc [solvedG] Nothing))
+  , check "human report flags an unsolved hole with hint counts"
+      ("g1 12:5  UNSOLVED — 1 hint(s) tried, 1 out of scope"
+         `T.isInfixOf` renderHumanReport (oc [unsolvedG] Nothing))
+  -- A solve via a hole-supplied hint is tagged "(from hole)".
+  , check "human report tags a from-hole solve"
+      ("via lemma `+-comm` (from hole)" `T.isInfixOf` renderHumanReport (oc [holeSolvedG] Nothing))
+  , check "human report does not tag a graph solve as from-hole"
+      (not ("(from hole)" `T.isInfixOf` renderHumanReport (oc [solvedG] Nothing)))
+
+  -- annotationEdits (shared by agda-auto + MCP annotate:true).
+  , check "annotationEdits: a marker edit for an unsolved hole"
+      (case annotationEdits True 5 bigOrig [unsolvedG] of
+         [(s, e, repl)] -> s == 60 && e == 65
+                             && "agda-auto/1" `T.isInfixOf` repl
+                             && "n + 0 ≡ n"  `T.isInfixOf` repl
+         _              -> False)
+  , checkEq "annotationEdits: off ⇒ no edits"   [] (annotationEdits False 5 bigOrig [unsolvedG])
+  , checkEq "annotationEdits: solved ⇒ no edit"  [] (annotationEdits True 5 bigOrig [solvedG])
+  , checkEq "annotationEdits: skipped (no range) ⇒ no edit" [] (annotationEdits True 5 bigOrig [skippedG])
+
+  -- ledgerLines (one JSON object per goal; order-insensitive compare).
+  , checkEq "ledger: a solved goal's line"
+      (object [ "file" .= ("F.agda" :: Text), "goal" .= ("g0" :: Text)
+              , "type" .= ("Nat" :: Text), "status" .= ("solved" :: Text)
+              , "term" .= ("x" :: Text), "via" .= ("lemma:+-comm" :: Text)
+              , "fromHole" .= False ])
+      (head (ledgerLines "F.agda" (oc [solvedG] Nothing)))
+  , checkEq "ledger: a from-hole solve is flagged"
+      (object [ "file" .= ("F.agda" :: Text), "goal" .= ("g0" :: Text)
+              , "type" .= ("Nat" :: Text), "status" .= ("solved" :: Text)
+              , "term" .= ("x" :: Text), "via" .= ("lemma:+-comm" :: Text)
+              , "fromHole" .= True ])
+      (head (ledgerLines "F.agda" (oc [holeSolvedG] Nothing)))
+  , checkEq "ledger: an unsolved goal's line"
+      (object [ "file" .= ("F.agda" :: Text), "goal" .= ("g1" :: Text)
+              , "type" .= ("n + 0 ≡ n" :: Text), "status" .= ("unsolved" :: Text)
+              , "hints" .= (["h1"] :: [Text]), "holeHints" .= ([] :: [Text]) ])
+      (head (ledgerLines "F.agda" (oc [unsolvedG] Nothing)))
+  , checkEq "ledger: one line per goal" 3 (length (ledgerLines "F.agda" (oc [solvedG, unsolvedG, skippedG] Nothing)))
+  ]
+  where
+    oc goals abort = (noGoalsOutcome "F.agda")
+      { aoNoGoals = False, aoGoalCount = length goals, aoGoals = goals, aoAbort = abort }
+    bigOrig = T.replicate 100 "x"
+    gr l c s e = GoalRange (RangePos l c s) (RangePos l c e)
+    sucDef = mkDef "Data.Nat.Properties.+-suc" "Data.Nat.Properties" KFunction Nothing
+    h1Def  = mkDef "M.h1" "M" KFunction Nothing
+    solvedG = GoalReport "g0" "Nat" (Just (gr 9 7 40 45))
+                (GSolved "x" (ViaHint "+-comm")) [] [] [] []
+    holeSolvedG = solvedG { grHoleHints = ["+-comm"] }
+    unsolvedG = GoalReport "g1" "n + 0 ≡ n" (Just (gr 12 5 60 65))
+                  (GUnsolved Nothing) [("h1", h1Def)] [("+-suc", sucDef)] [] []
+    skippedG = GoalReport "g2" "?" Nothing GSkipped [] [] [] []
+    goldenReportJson =
+      "{\"file\":\"F.agda\",\"goals\":3,\"solved\":1,\"unsolved\":1,\"skipped\":1,\
+      \\"wrote\":true,\"aborted\":null,\"diff\":\"DIFF\",\"holes\":[\
+      \{\"id\":\"g0\",\"status\":\"solved\",\"line\":9,\"col\":7,\"term\":\"x\",\"via\":\"lemma:+-comm\"},\
+      \{\"id\":\"g1\",\"status\":\"unsolved\",\"line\":12,\"col\":5,\"hints\":[\"h1\"],\
+      \\"imports\":[\"open import Data.Nat.Properties using (+-suc)\"]},\
+      \{\"id\":\"g2\",\"status\":\"skipped\"}]}"
+
+----------------------------------------------------------------------
+-- AgdaInteract.Annotate: the in-hole marker grammar.
+--
+-- All pure. The live end-to-end (marker loads in agda, second run is a zero
+-- diff) is in test/auto/smoke.sh; these lock the algebra: round-trip,
+-- idempotence, user-content preservation, comment-safety, the ?-rewrite.
+
+annotateTests :: [Check]
+annotateTests =
+  -- Round-trip on normalised annotations (render is lossy — collapses ws +
+  -- truncates — so only normalised values round-trip; that is the contract).
+  [ checkEq "round-trip: full annotation"   (Just a1) (parseMarker (renderMarker a1))
+  , checkEq "round-trip: empty try + import" (Just a2) (parseMarker (renderMarker a2))
+  , check "parseMarker: no marker → Nothing"
+      (parseMarker "just some hole text" == Nothing)
+  , check "parseMarker: finds a marker embedded after user content"
+      (parseMarker (annotateHole "{! myTerm !}" a1) == Just a1)
+
+  -- Idempotence: annotate∘annotate = annotate, for every hole shape.
+  , check "idempotent: bare ?"        (idem "?")
+  , check "idempotent: empty {!!}"    (idem "{!!}")
+  , check "idempotent: spaced {!  !}" (idem "{!   !}")
+  , check "idempotent: {! userExpr !}" (idem "{! foo x !}")
+  , check "idempotent: multi-line hole" (idem "{! foo\n  bar !}")
+  , check "idempotent: a hole already carrying a marker"
+      (idem (annotateHole "{! keep !}" a2))
+
+  -- User content survives annotate → strip verbatim.
+  , checkEq "preserves user content" "myTerm"
+      (stripMarker (holeInnerOf (annotateHole "{! myTerm !}" a1)))
+  , checkEq "strip of a marker-only hole is empty" ""
+      (stripMarker (holeInnerOf (annotateHole "{!!}" a1)))
+
+  -- Comment-safety: nasty goal types cannot unbalance the nesting lexer, and
+  -- cannot close the hole early.
+  , check "sanitize kills an opener"  (not ("{-" `T.isInfixOf` sanitize "a {- b"))
+  , check "sanitize kills a closer"   (not ("-}" `T.isInfixOf` sanitize "a -} b"))
+  , check "sanitize kills a hole-closer" (not ("!}" `T.isInfixOf` sanitize "a !} b"))
+  , check "sanitize output stays balanced on nested tokens"
+      (commentBalanced (sanitize "{- {- -} -}"))
+  , check "rendered marker is comment-balanced (nasty goal)"
+      (commentBalanced (renderMarker nasty))
+  , check "annotated hole is comment-balanced (nasty goal)"
+      (commentBalanced (annotateHole "{! foo !}" nasty))
+  , check "annotated hole has exactly one hole-closer"
+      (T.count "!}" (annotateHole "{! foo !}" nasty) == 1)
+
+  -- ?-rewrite is one-way (documented): ? becomes a braced hole.
+  , check "annotateHole ? yields a braced hole"
+      ("{!" `T.isPrefixOf` annotateHole "?" a2)
+  , check "annotated ? is no longer a bare ?"
+      (annotateHole "?" a2 /= "?")
+
+  -- Truncation: an over-long goal type is cut with an ellipsis.
+  , check "long goal type is truncated with …"
+      ("…" `T.isInfixOf` renderMarker (a1 { annGoalType = T.replicate 300 "x" }))
+
+  -- holeHints extracts candidate names from a hole's text.
+  , checkEq "holeHints: bare identifier"      ["+-comm"] (holeHints "{! +-comm !}")
+  , checkEq "holeHints: several, in order"    ["trans", "foo", "x", "bar"]
+      (holeHints "{! trans (foo x) bar !}")
+  , checkEq "holeHints: qualified → base"     ["lemma"]  (holeHints "{! M.N.lemma !}")
+  , checkEq "holeHints: mixfix operator kept" ["_+_"]    (holeHints "{! _+_ !}")
+  , checkEq "holeHints: dedup"                ["foo"]    (holeHints "{! foo foo !}")
+  , checkEq "holeHints: empty hole"           []         (holeHints "{!!}")
+  , checkEq "holeHints: bare ?"               []         (holeHints "?")
+  , check   "holeHints: drops ? and _"        (holeHints "{! ? _ !}" == [])
+  , checkEq "holeHints: marker-only hole → its try: list"
+      ["+-identityʳ", "+-comm"] (holeHints (annotateHole "{!!}" a1))
+  , checkEq "holeHints: user content FIRST, then marker try:, deduped"
+      ["myLemma", "+-identityʳ", "+-comm"] (holeHints (annotateHole "{! myLemma !}" a1))
+  , check "holeHints: garbage is lenient (no crash)"
+      (holeHints "{! ((( ; , @ !}" `seq` True)
+  ]
+  where
+    a1 = Annotation "n + 0 ≡ n" "plain 5s + 4 hints"
+                    ["+-identityʳ", "+-comm"]
+                    ["open import Data.Nat.Properties using (+-suc)"]
+    a2 = Annotation "Nat" "plain 1s + 0 hints" [] []
+    nasty = Annotation "a {- b -} c {-{- x -}-} !} d" "x" [] []
+    idem h = annotateHole (annotateHole h a1) a1 == annotateHole h a1
+    -- Mirror AgdaInteract.Annotate.holeInner (unexported) for the tests.
+    holeInnerOf raw =
+      let h = T.strip raw
+      in if h == "?" then ""
+         else if "{!" `T.isPrefixOf` h && "!}" `T.isSuffixOf` h
+                then T.strip (T.dropEnd 2 (T.drop 2 h))
+                else h
+
+----------------------------------------------------------------------
+-- Project-mode aggregation + topological file ordering.
+
+aggregateTests :: [Check]
+aggregateTests =
+  [ checkEq "summarize: sums per-file counts + counts files"
+      (Summary 3 10 7 2 3)
+      (summarize [(4, 3, 1, 1), (5, 4, 0, 1), (1, 0, 1, 1)])
+  , checkEq "summarize: empty sweep" (Summary 0 0 0 0 0) (summarize [])
+  , checkEq "worstExit: all success → success" ExitSuccess (worstExit [ExitSuccess, ExitSuccess])
+  , checkEq "worstExit: worst (largest) failure wins"
+      (ExitFailure 2) (worstExit [ExitSuccess, ExitFailure 1, ExitFailure 2, ExitFailure 1])
+  , checkEq "worstExit: empty → success" ExitSuccess (worstExit [])
+  ]
+
+-- | 'moduleDependencyOrder' on controlled synthetic graphs: a chain A→B→C (A
+-- uses B uses C) must order dependencies first (C, B, A); a module cycle P↔Q
+-- must still yield a total, complete order (the DFS breaks the cycle, never
+-- loops or drops a module). Real graphs can have cross-module cycles, so a
+-- "zero back-edges" assertion on the fixture would be wrong — this pins the
+-- ordering contract without that fragility.
+moduleTopoTests :: [Check]
+moduleTopoTests =
+  [ checkEq "moduleDependencyOrder: dependencies first (C, B, A)"
+      ["C", "B", "A"] (moduleDependencyOrder dagIx)
+  , check "moduleDependencyOrder: a module cycle stays total + complete"
+      (Set.fromList (moduleDependencyOrder cycIx) == Set.fromList ["P", "Q"]
+         && length (moduleDependencyOrder cycIx) == 2)
+  ]
+  where
+    dagIx = buildIndex (decodeG dagJson)
+    cycIx = buildIndex (decodeG cycJson)
+    decodeG bs = either (error . ("moduleTopo fixture: " ++)) id (eitherDecode bs)
+    gJson mods defs edges = BLC.pack $ unlines
+      [ "{ \"v\": 2, \"mode\": \"expanded\", \"schemaVersion\": 2"
+      , ", \"modules\": [" ++ intercalate ", " [ "\"" ++ m ++ "\"" | m <- mods ] ++ "]"
+      , ", \"moduleFiles\": {}"
+      , ", \"definitions\": [" ++ intercalate ", "
+          [ "{ \"name\": \"" ++ n ++ "\", \"module\": \"" ++ m ++ "\", \"kind\": \"function\" }"
+          | (n, m) <- defs ] ++ "]"
+      , ", \"definitionEdges\": [" ++ intercalate ", "
+          [ "[\"" ++ s ++ "\", \"" ++ t ++ "\"]" | (s, t) <- edges ] ++ "]"
+      , "}"
+      ]
+    -- A.f uses B.g uses C.h  ⇒  A depends on B depends on C.
+    dagJson = gJson ["A", "B", "C"]
+                    [("A.f", "A"), ("B.g", "B"), ("C.h", "C")]
+                    [("A.f", "B.g"), ("B.g", "C.h")]
+    -- P.x ↔ Q.y (mutually referential across modules).
+    cycJson = gJson ["P", "Q"]
+                    [("P.x", "P"), ("Q.y", "Q")]
+                    [("P.x", "Q.y"), ("Q.y", "P.x")]
+
 -- | The recorded any-hit@6 floor for `baseline` on .agda-explore/deps.json.
 -- Equal to the current value, so any downward move trips the test — raise or
 -- lower it only deliberately, alongside a fixture or ranker change.
@@ -938,6 +1310,18 @@ replayTests ref = do
     (case [s | ReplyGiveAction 0 (GiveStr s) <- batchRs] of
        (s:_) -> s == "trans' eq1 eq2"
        _     -> False) ref
+
+  -- auto-hole-content.jsonl → plain Cmd_autoOne on a hole whose body
+  -- names an in-scope lemma returns NO GiveAction (the goal stays open): Mimer
+  -- does not read hole contents as a hint on this agda, so agda-auto seeds them
+  -- explicitly. A future agda that consumed hole bodies would add a GiveAction
+  -- and fail the first check — the signal to simplify the seeding.
+  holeRs <- parseLines "test/interaction/2.8.0/auto-hole-content.jsonl"
+  check "auto-hole-content.jsonl: hole body is NOT a native Mimer hint (no give)"
+    (null [() | ReplyGiveAction{} <- holeRs]) ref
+  check "auto-hole-content.jsonl: the goal stayed open after the probe"
+    (any ((== "n + 0 ≡ n") . goalType)
+         (concat [gs | ReplyDisplayInfo (AllGoalsWarnings gs _ _) <- holeRs])) ref
 
   -- make-case.jsonl → MakeCase id 0, Function, 2 clauses
   mcRs <- parseLines (fixtureDir ++ "make-case.jsonl")

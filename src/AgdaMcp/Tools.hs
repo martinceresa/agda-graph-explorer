@@ -390,7 +390,7 @@ withFreshIO ss f = do
 -- request as non-stale telemetry. Only when the name resolves, or no
 -- snapshot exists yet, does it fall through to 'withFreshIO'/'ensureFresh'
 -- (so a genuinely-present name still gets the freshness path, and the
--- first-ever query still blocks on the one build as before).
+-- first-ever query still blocks on the one build).
 --
 -- @isError=false@: a not-in-graph result is a normal lookup outcome, like
 -- @locate@'s. The 'notInGraph' text is rendered from the same snapshot the

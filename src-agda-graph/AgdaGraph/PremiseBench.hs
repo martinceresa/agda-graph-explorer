@@ -52,7 +52,7 @@ module AgdaGraph.PremiseBench
   , scoreStrategy
   ) where
 
-import           Control.DeepSeq  ( NFData(..) )
+import           Control.DeepSeq  ( NFData(..), force )
 import           Control.Parallel.Strategies ( parListChunk, rdeepseq, withStrategy )
 import           Data.Maybe       ( isJust )
 import           Data.Set         ( Set )
@@ -69,7 +69,7 @@ import           AgdaGraph.LemmaRank ( RankEnv(..), mkRankEnv, RankOpts(..)
                                      , defaultRankOpts, rankLemmaCandidatesWith
                                      , computeIdf, envVocab )
 import           AgdaGraph.PremiseSelect ( CorpusRow(..), buildCorpus, featuresOf
-                                         , bodyPremises, premiseVotes, blendScores
+                                         , provedRows, premiseVotes, blendScores
                                          , alphaFor )
 
 -- ---------------------------------------------------------------------
@@ -128,18 +128,8 @@ defaultBenchOpts = BenchOpts
 -- signature-carrying real defs — optionally minus constructors / records.
 benchRows :: Index -> BenchOpts -> [BenchRow]
 benchRows ix opts =
-  [ BenchRow
-      { brName     = defName d
-      , brGoal     = sig
-      , brPremises = prems
-      }
-  | i <- [0 .. idxRealCount ix - 1]
-  , let d = defAt ix i
-  , defState d == Defined
-  , Just sig <- [defSig d]
-  , let prems = bodyPremises (boDropCtors opts) ix i
-  , not (Set.null prems)
-  ]
+  [ BenchRow { brName = nm, brGoal = sig, brPremises = prems }
+  | (nm, sig, prems) <- provedRows (boDropCtors opts) ix ]
 
 -- | Human explanation of an empty corpus, for the CLI's clean exit.
 -- Takes the already-computed rows (the caller holds them) rather than
@@ -277,8 +267,12 @@ scoreStrategy opts strat rows =
       n       = length rows
       cutoffs = boCutoffs opts
       zeros   = map (const 0) cutoffs
-      !sumRecall = foldl' (zipWith (+)) zeros (map rsRecall scores)
-      !sumAnyHit = foldl' (zipWith (+)) zeros
+      -- 'force' the (small, one-per-cutoff) accumulator each step: 'foldl''
+      -- only forces the list spine to WHNF, leaving per-column @(+)@ thunk
+      -- chains of depth #rows otherwise.
+      addCols acc xs = force (zipWith (+) acc xs)
+      !sumRecall = foldl' addCols zeros (map rsRecall scores)
+      !sumAnyHit = foldl' addCols zeros
                      (map (map (\b -> if b then 1 else 0) . rsAnyHit) scores)
       !sumRR     = foldl' (+) 0 (map rsRR scores)
       !sumCand   = foldl' (+) 0 (map (fromIntegral . rsCand) scores) :: Double

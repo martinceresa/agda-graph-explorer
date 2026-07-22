@@ -1331,8 +1331,7 @@ goalHintCands ld n goal ctxTypes =
 -- @α = 0.9@ (knn-dominant, lexical fallback for zero-vote goals).
 premiseBlend :: Loaded -> PS.Corpus -> Text -> [Definition] -> [Definition]
 premiseBlend ld corpus goal lexTop =
-  sortBy (comparing (\d -> (Down (M.findWithDefault 0 (defName d) blended), defName d)))
-         cands
+  sortOn (\d -> (Down (M.findWithDefault 0 (defName d) blended), defName d)) cands
   where
     fgoal   = PS.featuresOf (PS.cVocab corpus) goal
     votes   = PS.premiseVotes premiseKnnK corpus (const True) fgoal

@@ -128,6 +128,62 @@ executable agda-explore
                        AgdaInteract.Literate
                        AgdaInteract.Edit
                        AgdaInteract.Batch
+                       AgdaInteract.AutoReport
+                       AgdaInteract.Annotate
+                       AgdaInteract.Tools
+                       AgdaRepair.Diagnostic
+                       AgdaRepair.Strategy
+                       AgdaRepair.Edit
+  autogen-modules:     Paths_agda_graph_explorer
+  build-depends:       base >= 4.10 && < 4.23,
+                       agda-graph,
+                       aeson >= 2.0 && < 3,
+                       bytestring,
+                       containers,
+                       deepseq,
+                       directory,
+                       filepath,
+                       fsnotify >= 0.4 && < 0.5,
+                       network >= 3.1 && < 3.3,
+                       process >= 1.6 && < 2,
+                       stm >= 2.5 && < 2.6,
+                       template-haskell,
+                       text,
+                       time,
+                       vector,
+                       yaml >= 0.11 && < 0.12
+  default-language:    Haskell2010
+
+-- Batch hole-filler: a terminal front-end over agda-explore's Mimer +
+-- graph-hint ladder. Links no Agda; drives a live `agda --interaction-json`
+-- session (the interaction bridge, invoked transport-free). Reuses the
+-- daemon's module graph verbatim — the ladder must not diverge from the MCP
+-- surface — so it clones agda-explore's dependency + module set.
+executable agda-auto
+  ghc-options:         -O2 -threaded -rtsopts "-with-rtsopts=-N" -Wall
+  hs-source-dirs:      src
+  main-is:             MainAuto.hs
+  other-modules:       Paths_agda_graph_explorer
+                       BuildInfo
+                       BuildInfoTH
+                       AgdaAuto.CLI
+                       AgdaAuto.Config
+                       AgdaAuto.Report
+                       AgdaAuto.Run
+                       AgdaMcp.Config
+                       AgdaMcp.State
+                       AgdaMcp.Query
+                       AgdaMcp.ToolDef
+                       AgdaMcp.Inspect
+                       AgdaInteract.Session
+                       AgdaInteract.Registry
+                       AgdaInteract.GoalId
+                       AgdaInteract.Guard
+                       AgdaInteract.Literate
+                       AgdaInteract.Edit
+                       AgdaInteract.Batch
+                       AgdaInteract.AutoReport
+                       AgdaInteract.Annotate
                        AgdaInteract.Tools
                        AgdaRepair.Diagnostic
                        AgdaRepair.Strategy
@@ -167,6 +223,11 @@ test-suite interaction-spec
                        AgdaInteract.Session
                        AgdaInteract.Edit
                        AgdaInteract.Batch
+                       AgdaInteract.AutoReport
+                       AgdaInteract.Annotate
+                       AgdaAuto.CLI
+                       AgdaAuto.Config
+                       AgdaAuto.Report
                        AgdaRepair.Diagnostic
                        AgdaRepair.Edit
                        AgdaRepair.Strategy
@@ -182,7 +243,8 @@ test-suite interaction-spec
                        parallel,
                        process,
                        text,
-                       time
+                       time,
+                       yaml >= 0.11 && < 0.12
   default-language:    Haskell2010
 
 executable agda-optimization

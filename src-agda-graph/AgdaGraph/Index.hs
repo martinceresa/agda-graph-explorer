@@ -30,6 +30,7 @@ module AgdaGraph.Index
   , ancestors
   , closureFrom
   , unsafeDeps
+  , moduleDependencyOrder
 
     -- * Node-key names
   , stripLineTag
@@ -335,6 +336,37 @@ unsafeDeps :: Index -> Int -> [Int]
 unsafeDeps ix i =
   filter (not . null . defUnsafe . defAt ix)
          (IS.toAscList (descendants ix (IS.singleton i)))
+
+-- | Modules in dependency-first order: a module used by another (its
+-- definitions are edge targets from the other's) comes before that other —
+-- i.e. imports precede importers. Every module that owns a definition appears
+-- exactly once. Deterministic: a DFS post-order with lexicographic tie-breaking
+-- (dependencies visited in ascending name order). Cross-module def edges induce
+-- the module dependency; self-edges are ignored. A module cycle (which Agda
+-- forbids at the module level, but a stray mutual def edge could suggest) is
+-- broken by the visited set — the order stays total, just arbitrary within the
+-- cycle. Consumed by @agda-auto@ project mode to fill imported modules first.
+moduleDependencyOrder :: Index -> [Text]
+moduleDependencyOrder Index{..} =
+  reverse (snd (foldl (flip dfs) (Set.empty, []) allMods))
+  where
+    modOf i = defModule (idxDefs V.! i)
+    allMods = Set.toAscList (Set.fromList (map modOf [0 .. V.length idxDefs - 1]))
+    -- module → ascending-sorted list of modules it depends on (uses).
+    depMap :: M.Map Text [Text]
+    depMap = M.map Set.toAscList $
+      IM.foldrWithKey
+        (\src tgts acc ->
+           let sm  = modOf src
+               tms = Set.fromList [ modOf t | t <- IS.toList tgts, modOf t /= sm ]
+           in M.insertWith Set.union sm tms acc)
+        M.empty idxForward
+    dfs m (vis, out)
+      | m `Set.member` vis = (vis, out)
+      | otherwise =
+          let (vis', out') =
+                foldl (flip dfs) (Set.insert m vis, out) (M.findWithDefault [] m depMap)
+          in (vis', m : out')
 
 -- | Shared closure walker over adjacency @adj@ (iterative DFS, each node
 -- visited at most once). @includeSeeds@ keeps the seeds in the result (a

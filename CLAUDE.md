@@ -10,7 +10,7 @@ produced by [`agda-deps`](https://github.com/input-output-hk/agda-dependencies)
 tool reads `agda-deps`' v2 `graph.json` (expanded form). That is the entire
 contract between the repos — see [The wire contract](#the-wire-contract).
 
-One shared library and four executables:
+One shared library and five executables:
 
 - **`agda-graph`** (library) — typed view of the expanded `graph.json` + an
   in-memory `Index`; the shared substrate for the JSON-consuming executables.
@@ -62,10 +62,12 @@ One shared library and four executables:
   zero-axiom contract. Beyond hole-filling it authors files (`check`,
   `give_file`, `new_module`, `construct`, `lemmas`). A *second, independent*
   subprocess model beside the graph daemon — interaction tools reflect live
-  on-disk state and bypass `ensureFresh` (except `lemmas` and `new_module`
-  import resolution, which read the graph index). A live `check` also probes
-  remaining goals with Mimer (`auto-hints`, on by default) and reports found
-  terms inline. Under
+  on-disk state and bypass `ensureFresh` (except `lemmas`, `new_module`
+  import resolution, and the check-time auto-hints ranking, which read the
+  graph index). A live `check` also probes remaining goals with Mimer
+  (`auto-hints`, on by default), seeded with the top `--auto-hints-lemmas N`
+  in-scope graph hints (Phase 4; `N=0` ⇒ plain Mimer), and reports found terms
+  inline — naming the lemma when a hint closed a goal. Under
   `--inspect`/`--inspect-port N` it also serves an opt-in localhost web
   inspector (`AgdaMcp.Inspect`): a live activity feed + editing view over
   HTTP+SSE, off by default, localhost-only, never touching the JSON-RPC
@@ -75,6 +77,21 @@ One shared library and four executables:
   `GET /repair?file=…`, diff-only) so the plugin's PostToolUse hook can run the
   warm check and suggest a repair from outside the MCP transport. Needs `agda`
   on `$PATH` (or `--agda-bin`).
+- **`agda-auto`** — *batch hole-filler* (CLI, no daemon): fills every open hole
+  in a file — or a whole project — via `agda-explore`'s Mimer + graph-hint
+  ladder (`AgdaInteract.Tools.autoAllCore`, the split-out core of the `auto_all`
+  path, invoked transport-free), printing a unified diff or applying it
+  (`--write`) under the same zero-axiom contract. Unsolved holes get a
+  strippable, idempotent marker (`AgdaInteract.Annotate`;
+  `{! … {- agda-auto/1 … -} !}`) recording the goal type + in-scope lemmas to
+  try (with import lines for out-of-scope ones); a later run reads those hints
+  back (`holeHints`) and re-seeds them. A directory / >1 file is project mode:
+  swept serially in module-dependency order
+  (`AgdaGraph.Index.moduleDependencyOrder` — imports first, because a module
+  with open holes can't be imported, so a dependency must be filled + written
+  before its dependents load). `--repair` runs the graph `repair` tool on a
+  load failure first; `--fixpoint` re-sweeps until stable; `--ledger` logs one
+  JSON line per goal. Needs `agda` on `$PATH` (or `--agda-bin`); links no Agda.
 
 A Claude Code plugin under `plugin/` bundles the `agda-explore` server with a
 skill, two Agda agents, and two hooks (PostToolUse: validate Agda text edits
@@ -88,6 +105,7 @@ cabal build
 cabal run agda-optimization -- motif test/deps.json
 cabal run agda-unused -- --json=test/deps.json --json-out .
 cabal run agda-explore -- --version
+cabal run agda-auto -- --help        # needs `agda` on $PATH to fill holes
 ```
 
 This repo links **no Agda** — `cabal.project` has no
@@ -187,6 +205,9 @@ src/
                                 wall-clock budget reaper (withReaper).
     Condense.hs                 shared SCC condensation.
     UnionFind.hs                shared path-light union-find.
+    Cluster.hs                  shared graph-clustering primitives (BFS subtree
+                                walks, seeded union-find, avg-similarity score)
+                                for fingerprint + echo.
 
   MainGoals.hs                  agda-goals entry point.
   AgdaGoals/
@@ -249,8 +270,31 @@ src/
                                 shutdown). Serves the plugin's PostToolUse
                                 hook.
 
+  MainAuto.hs                   agda-auto entry point: argv → AgdaAuto.CLI →
+                                AgdaAuto.Run (merge defaults < .agda-auto.yml <
+                                CLI, the standard per-exe config pattern).
+  AgdaAuto/
+    CLI.hs                      PURE AutoOpts + argv parser + usage (State-free,
+                                so the offline suite pins the flag table).
+    Config.hs                   YAML loader for .agda-auto.yml (5th per-exe
+                                Config module; AGDA_AUTO_CONFIG).
+    Run.hs                      per-file / project orchestration: builds a
+                                batch-shaped PRELOADED ServerState, calls
+                                AgdaInteract.Tools.autoAllCore, applies via
+                                applyOrDiff, emits the report + exit code.
+                                Project mode (dir / >1 file): expandInputs (dir
+                                walk) + orderFiles (topo via
+                                moduleDependencyOrder). --repair pre-pass (runs
+                                the graph `repair` tool on a load failure, then
+                                re-probes), --fixpoint loop, --ledger append.
+    Report.hs                   PURE per-hole human table + outcomeJson (public
+                                JSON contract, golden-pinned) + outcomeExit
+                                (0 none-open / 1 remain / 2 error) + project-mode
+                                Summary/summarize/worstExit + ledgerLines. In the
+                                offline suite.
+
   AgdaInteract/                 Write-side interaction bridge (agda-explore
-                                only; the long-lived agda session model).
+                                + agda-auto; the long-lived agda session model).
     Session.hs                  long-lived `agda --interaction-json`
                                 subprocess: prompt-delimited reply bursts,
                                 timeout→poison, reader/stderr threads.
@@ -272,6 +316,23 @@ src/
                                 + wildcard/all-give discriminators + the
                                 inspect/scratch op enums + validators. Extracted
                                 so the offline suite tests routing agda-free.
+    Annotate.hs                 PURE in-hole marker grammar (agda-auto Phase C):
+                                renderMarker/parseMarker/stripMarker/annotateHole
+                                + holeHints (the read side — hole text → hint
+                                names) + sanitize/commentBalanced. The marker is
+                                a block comment carried INSIDE the hole
+                                ({! user {- agda-auto/1 … -} !}), idempotent and
+                                strippable. Verified to load in Agda 2.8.
+    AutoReport.hs               PURE auto_all data + rendering, split out of
+                                Tools so it is State-free (the Batch pattern):
+                                HintProv, GoalOutcome/GoalReport, AutoAllOutcome,
+                                renderAutoAll (byte-identical to the old inline
+                                renderer — pinned), oosNote, annotationEdits
+                                (shared by agda-auto + the MCP annotate:true
+                                path). Aggregates (aoSolved/aoUnsolved/aoAllCands)
+                                are stored, not re-derived from aoGoals (the
+                                ladder emits solved ids pass1++pass2, not input
+                                order).
     Tools.hs                    interaction tool runners + session registry +
                                 interactTools list (11 tools). `construct` is
                                 the hole-driving batcher: a step batch
@@ -299,9 +360,16 @@ src/
                                 tiers (3a): plain → a small in-scope hint batch in
                                 one call (combines lemmas; autoBatchMax) → per-hint
                                 fallback; tryPlain=False skips the plain tier.
-                                runAutoAll is a 3b two-pass ladder: cheap plain 1s
-                                over all goals, then hinted full-budget over the
-                                survivors (hints fetched lazily there).
+                                autoAllCore (exported) is the structured core of
+                                the auto_all path — a 3b two-pass ladder: cheap
+                                plain 1s over all goals, then hinted full-budget
+                                over the survivors (hints fetched lazily); it
+                                bakes annotationEdits into aoNew when the
+                                `annotate` arg is set (default off ⇒ MCP
+                                unchanged) and reads holeHints per goal (Phase D).
+                                runAutoAll = renderAutoAll ∘ autoAllCore +
+                                applyOrDiff (both exported, so agda-auto reuses
+                                them transport-free).
                                 Also hosts the `repair` loop driver (runRepair /
                                 repairLoop / firstWorking / accepts) so it can
                                 reuse loadRenamedTemp/applyOrDiff/interpretCheck
@@ -335,6 +403,9 @@ src-agda-graph/AgdaGraph/       Shared library.
                                 fwd/rev IntMap IntSet, closureFrom (backs
                                 descendants/ancestors + Similarity's
                                 subtreeUnder), idxEdgeProvenance.
+                                moduleDependencyOrder = dependency-first
+                                (imports-first) module order, cycle-tolerant
+                                (agda-auto project-mode sweep order).
   GoalCanon.hs                  goal-type canonicaliser + vendored-Murmur64
                                 hashString + find_lemma retrieval tokens
                                 (matchTokens qualifier-strip/vocab-keep,
@@ -392,6 +463,9 @@ scripts/
   build-stdlib-graph.sh         build a reusable overlay graph (e.g. agda-stdlib)
                                 for agda-explore --overlay-graph.
                                 Needs `pip install scipy numpy`.
+  run_all_opts.sh               build an expanded JSON (subterm hashes) for an
+                                entry module, then run every agda-optimization
+                                subcommand into an out-dir (one .txt + .json each).
 
 plugin/                         Claude Code plugin: agda-explore MCP server +
                                 skill + two Agda agents.
@@ -561,6 +635,28 @@ plugin/                         Claude Code plugin: agda-explore MCP server +
   `agda-deps` (reads files only). A no-op outside live + auto-rebuild +
   incremental + multi-entry. Don't move it before `startWatcher` (the
   incremental path gates on `isWatching`).
+
+- **A module with open holes cannot be imported** (`agda` raises
+  `[SolvedButOpenHoles]`). So `agda-auto` project mode is not just tidier in
+  dependency order — it is *required*: a dependency must be filled + written
+  (`--write`) before its dependents can load. `orderFiles` (via
+  `moduleDependencyOrder`) puts imports first; graph-less it falls back to
+  lexicographic (which can be wrong — hence `--fixpoint`).
+
+- **Mimer does not read a hole's CONTENTS as a hint** (Agda 2.8): a plain
+  `Cmd_autoOne` on `{! bar !}` behaves exactly like `{!!}`. So `agda-auto`
+  seeds hole hints explicitly (`AgdaInteract.Annotate.holeHints`, probed before
+  graph hints). Pinned by `test/interaction/2.8.0/auto-hole-content.jsonl` — a
+  future `agda` that starts consuming hole bodies makes that transcript carry a
+  `GiveAction` and fails the replay (the signal to simplify the seeding).
+
+- **The annotation marker lives INSIDE the hole** as a block comment
+  (`{! user {- agda-auto/1 … -} !}`), which Agda loads as an ordinary
+  interaction hole (verified 2.8). `AgdaInteract.Annotate.sanitize` must
+  neutralize `{-`/`-}` (→ U+2010) AND the hole delimiters `{!`/`!}` — a stray
+  `!}` in a field value would close the hole early. Re-annotating strips the
+  prior marker first and the marker carries no timestamp, so a second run is a
+  zero diff (idempotence is an acceptance test).
 
 ## v2 graph.json schema (consumer view)
 

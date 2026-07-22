@@ -31,17 +31,20 @@ cabal run agda-unused -- \
   --json=out/deps.json --rel-to=src/ src/
 ```
 
-Reports unused imports / defs / opens as `file:line: name -- kind` rows;
-exit-code always 0 (a hint, not a build gate).
+Reports unused imports / defs / opens as `file:line: name -- kind` rows. A
+successful run exits 0 regardless of finding count (a hint, not a build gate);
+it exits nonzero only on an operational error (bad config, unreadable graph, or
+a run matching no scanned files).
 
 Default `--kinds=using,duplicate` — the lowest-noise combination. The other
-kinds (`blanket`, `defined`, `public`) need more triage; enable with
-`--kinds=all`. `--json-out` emits a JSON array (one object per finding);
+kinds (`blanket`, `defined`, `dead`, `public`) need more triage; enable all
+with `--kinds=all`. `--json-out` emits a JSON array (one object per finding);
+`--group-by=dir|file|kind` and `--count-only` aggregate the findings;
 positional `ROOTS…` accept multiple directories.
 
 ---
 
-## `agda-optimization` — 18 graph-level analyses
+## `agda-optimization` — 19 subcommands (18 graph analyses + `hint-bench`)
 
 All subcommands take the same expanded JSON. Every one accepts `--json`
 (JSON report), `--out FILE` (default stdout), and `--config=PATH`.
@@ -287,10 +290,11 @@ cabal run agda-optimization -- term-cluster /tmp/p3/deps.json \
 Buckets subterm occurrences by canonical-form hash; ranks by `size ×
 meanDepth × (1 + diversity)`.
 
-Default `--min-diversity=0.7` — the single most discriminating knob (cuts
-~84% of surviving clusters without losing cross-cutting candidates).
-**Needs producer `--with-term-hashes`**; `--min-term-depth=3` cuts hash
-volume ~3×. `--span-modules=3` requires ≥3 distinct declared modules.
+`--min-diversity` (default `0.0`) is the single most discriminating knob —
+`0.7` is the recommended cross-cutting filter. **Needs producer
+`--with-term-hashes`** (the producer's `--min-term-depth=N` trims hash volume).
+`--span-modules=N` (default `1`) requires a cluster's defs to span ≥N distinct
+declared modules.
 
 ### `concept-bundle` — signature-vocabulary itemsets
 
@@ -306,6 +310,24 @@ edges — vocabulary recurring across module-spanning type signatures (the
 Default `--min-span=3` — the cross-module gate (an itemset must span ≥3
 modules). The forced-by-elaborator suppressor (same machinery as `basket`,
 default on) drops family-polluted itemsets; `--no-forced-suppress` disables.
+
+### `hint-bench` — offline lemma-ranker eval (leave-one-out)
+
+```bash
+cabal run agda-optimization -- hint-bench /tmp/opt/deps.json \
+  --strategy=all --k=3,6,10
+```
+
+Not a graph analysis — a leave-one-out eval harness for the shared lemma
+ranker. Each proved theorem is a query: its signature is the goal, its
+body-provenance edges are the ground-truth premises, so a ranking change is
+scored (recall@k / any-hit@k / MRR) with no live `agda` run.
+
+Default `--strategy=baseline` (`all` scores every registered strategy);
+`--k=3,6,10` sets the cutoffs, `--min-sim=0.4` the ranker floor,
+`--knn-k=32` / `--knn-alpha=0.5` tune the k-NN strategies, `--keep-ctors`
+keeps constructor premises (dropped by default). A graph without edge
+provenance or signatures yields an empty corpus and exits clean.
 
 ---
 

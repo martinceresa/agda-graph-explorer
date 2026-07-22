@@ -24,7 +24,7 @@ import           Control.Exception  (SomeException, finally, try)
 import           Control.Monad      (forM, void, when)
 import           Data.Aeson         (Value (..), object, toJSON, (.=))
 import qualified Data.Aeson.Key     as Key
-import           Data.List          (intercalate, isPrefixOf, isSuffixOf,
+import           Data.List          (intercalate, isPrefixOf,
                                      partition, sortOn)
 import           Data.Maybe         (fromMaybe)
 import qualified Data.Text          as T
@@ -38,7 +38,7 @@ import           System.FilePath    (isAbsolute, splitSearchPath, takeDirectory,
                                      takeFileName, (</>))
 import           System.IO          (hPutStrLn, stderr)
 
-import           AgdaGraph.ConfigCore (firstExisting)
+import           AgdaGraph.ConfigCore (firstExisting, isAgdaSourceFile, splitEqFlags)
 import           AgdaMcp.Config     (Opts (..), applyConfig,
                                      discoverConfigPath, extractConfigArg,
                                      loadConfig, orderNub)
@@ -71,23 +71,12 @@ defOpts = Opts
   , oEnableInteract = False, oAgdaBin = Nothing, oInteractArgs = []
   , oInteractHeapMb = 0, oMaxSessions = 2, oSessionIdleSecs = 0
   , oInspect = False, oInspectPort = 7000
-  , oAutoHints = True, oAutoHintsLimit = 3, oAutoHintsSecs = 1
+  , oAutoHints = True, oAutoHintsLimit = 3, oAutoHintsSecs = 1, oAutoHintsLemmas = 2
   , oControlPort = 0
   , oCoverageIgnore = []
   , oOverlayGraphs = []
   , oHelp = False, oVer = False
   }
-
--- | Split @--key=value@ into two tokens so the parser only deals with the
--- space-separated form.
-preprocess :: [String] -> [String]
-preprocess = concatMap split
-  where
-    split a
-      | "--" `isPrefixOf'` a
-      , (k, '=' : v) <- break (== '=') a = [k, v]
-      | otherwise = [a]
-    isPrefixOf' p s = take (length p) s == p
 
 parseOpts :: [String] -> Opts -> Either String Opts
 parseOpts [] o = Right o
@@ -134,21 +123,17 @@ parseOpts (x : xs) o = case x of
   "--no-auto-hints"      -> parseOpts xs o { oAutoHints = False }
   "--auto-hints-limit"   -> need $ \v -> o { oAutoHintsLimit = readInt v (oAutoHintsLimit o) }
   "--auto-hints-timeout" -> need $ \v -> o { oAutoHintsSecs = readInt v (oAutoHintsSecs o) }
+  "--auto-hints-lemmas"  -> need $ \v -> o { oAutoHintsLemmas = readInt v (oAutoHintsLemmas o) }
   "--control-port"       -> need $ \v -> o { oControlPort = readInt v (oControlPort o) }
   "--coverage-ignore"    -> need $ \v -> o { oCoverageIgnore = oCoverageIgnore o ++ [v] }
   "--overlay-graph"      -> need $ \v -> o { oOverlayGraphs = oOverlayGraphs o ++ [v] }
-  _ | isAgdaFile x    -> parseOpts xs o { oEntries = oEntries o ++ [x] }
+  _ | isAgdaSourceFile x -> parseOpts xs o { oEntries = oEntries o ++ [x] }
     | otherwise       -> Left ("unknown argument: " ++ x)
   where
     need f = case xs of
       (v : rest) -> parseOpts rest (f v)
       []         -> Left (x ++ " requires a value")
     readInt s d = case reads s of [(n, "")] -> n; _ -> d
-
-isAgdaFile :: FilePath -> Bool
-isAgdaFile f = any (`isSuffixOf` f)
-  [ ".agda", ".lagda", ".lagda.md", ".lagda.rst", ".lagda.tex", ".lagda.org"
-  , ".lagda.tree", ".lagda.typ" ]
 
 orElse :: Maybe a -> Maybe a -> Maybe a
 orElse (Just x) _ = Just x
@@ -174,7 +159,7 @@ collectAgda depth root
   | otherwise = do
       isDir <- doesDirectoryExist root
       if not isDir
-        then do isF <- doesFileExist root; pure [root | isF && isAgdaFile root]
+        then do isF <- doesFileExist root; pure [root | isF && isAgdaSourceFile root]
         else do
           es <- safeList root
           fmap concat $ forM es $ \e ->
@@ -253,6 +238,7 @@ buildConfig o = do
         , cfgAutoHints    = oAutoHints o
         , cfgAutoHintsLimit = oAutoHintsLimit o
         , cfgAutoHintsSecs = oAutoHintsSecs o
+        , cfgAutoHintsLemmas = oAutoHintsLemmas o
         , cfgControlPort  = oControlPort o
         , cfgCoverageIgnore = oCoverageIgnore o
         , cfgOverlays     = overlays
@@ -384,6 +370,9 @@ usage = unlines
   , "                        reported inline)."
   , "  --auto-hints-limit N  Max goals the check-time Mimer probe tries (default 3)."
   , "  --auto-hints-timeout N  Mimer budget per probed goal, seconds (default 1)."
+  , "  --auto-hints-lemmas N  Seed the check-time probe with the top N in-scope graph"
+  , "                        hints (default 2; 0 = plain Mimer). A hint that closes a"
+  , "                        goal is named inline, teaching the agent the lemma exists."
   , "  --control-port N      Serve a localhost control endpoint (GET /check?file=…)"
   , "                        for PostToolUse hooks; probes upward from N, writes the"
   , "                        bound port to <out-dir>/control-port. Needs"
@@ -394,6 +383,8 @@ usage = unlines
   , "                        graph) into every snapshot so search/type_of/find_lemma see its"
   , "                        definitions ([external: …]-tagged). Project defs win. Repeatable."
   , "  --config FILE         Load this .agda-explore.yml (else discovered; see below)."
+  , "  --show-defaults       Print a starter .agda-explore.yml (all defaults) to stdout"
+  , "                        and exit (redirect it: --show-defaults > .agda-explore.yml)."
   , "  -h, --help            This help."
   , "  -V, --version         Version."
   , ""
@@ -407,6 +398,113 @@ usage = unlines
   , "AGDA_EXPLORE_GRAPH, AGDA_EXPLORE_PROJECT, AGDA_EXPLORE_CONFIG, AGDA_DEPS_BIN,"
   , "AGDA_UNUSED_BIN."
   ]
+
+-- | The @--show-defaults@ payload: a documented @.agda-explore.yml@ with every
+-- knob at its built-in default. Values are read from 'defOpts' so they can't
+-- drift; the @no-*@ keys are emitted inverted (their YAML default reproduces
+-- the on-by-default behaviour). Scalars are active (so saving the file verbatim
+-- is a no-op overlay); entry/path/list keys are commented examples. Keys match
+-- exactly what "AgdaMcp.Config"'s 'FileConfig' decodes.
+defaultsYaml :: String
+defaultsYaml = unlines
+  [ "# .agda-explore.yml — configuration for agda-explore (defaults shown)."
+  , "# Generated by `agda-explore --show-defaults`. Keys are kebab-case mirrors of"
+  , "# the CLI flags; merge order is defaults < config < CLI. `no-*` keys mirror the"
+  , "# negative flags (false = the on-by-default behaviour). Uncomment/edit to override."
+  , ""
+  , "# --- Graph source (commented; pick entries OR a prebuilt graph) ---"
+  , "# Entry module(s) to build the graph from; several union their closures."
+  , "# entry: src/Main.agda"
+  , "# entries: [src/Main.agda]"
+  , "# Agda include directories."
+  , "# include: [src]"
+  , "# Serve a fixed prebuilt graph.json instead of building (disables rebuilds)."
+  , "# graph: deps.json"
+  , "# Project root / subprocess cwd (default: cwd)."
+  , "# project: ."
+  , "# Where the generated graph.json lives (default: <project>/.agda-explore)."
+  , "# out-dir: .agda-explore"
+  , "# Federate prebuilt overlay graphs (e.g. agda-stdlib) into every snapshot."
+  , "# overlay-graphs: [stdlib.json]"
+  , "# Source files intentionally outside every entry's closure (coverage globs)."
+  , "# coverage-ignore: ['**/Scratch.agda']"
+  , ""
+  , "# --- Graph build options ---"
+  , "# Build without AST term hashes (disables similar_bodies)."
+  , "no-term-hashes: " ++ yn (not (oHashes defOpts))
+  , "# Build without rendered type signatures (type_of falls back to a scrape)."
+  , "no-signatures: " ++ yn (not (oSigs defOpts))
+  , "# Normalise type signatures (semantic form) for type_of."
+  , "normalise-signatures: " ++ yn (oNormSigs defOpts)
+  , "# Render type signatures with implicit arguments shown."
+  , "show-implicit: " ++ yn (oShowImpl defOpts)
+  , "# Term-hash depth filter."
+  , "min-term-depth: " ++ show (oMinDepth defOpts)
+  , ""
+  , "# --- Rebuild / watch behaviour ---"
+  , "# Do not regenerate the graph when sources change."
+  , "no-auto-rebuild: " ++ yn (not (oAuto defOpts))
+  , "# Disable the fsnotify watcher; poll on each query instead."
+  , "no-watch: " ++ yn (not (oWatch defOpts))
+  , "# Disable incremental rebuilds."
+  , "no-incremental: " ++ yn (not (oIncremental defOpts))
+  , "# Only promote a rebuild that fully type-checks (else keep the last good graph)."
+  , "require-well-typed: " ++ yn (oRequireWellTyped defOpts)
+  , "# Run agda-deps strictly: drop --keep-going for its --incremental cache."
+  , "strict-producer: " ++ yn (oStrictProducer defOpts)
+  , "# Disable per-query telemetry (query-log.jsonl)."
+  , "no-query-log: " ++ yn (not (oQueryLog defOpts))
+  , "# Do not auto-resolve a name to its sole near-match candidate."
+  , "no-auto-resolve: " ++ yn (not (oAutoResolve defOpts))
+  , ""
+  , "# --- Lemma ranking ---"
+  , "# IDF-weight the lemma ranker (find_lemma / auto hints)."
+  , "rank-idf: " ++ yn (oRankIdf defOpts)
+  , "# Blend k-NN premise selection into find_lemma / auto ranking."
+  , "premise-select: " ++ yn (oPremiseSelect defOpts)
+  , "# Disable the auto hint-batch tier (Phase-3a A/B toggle)."
+  , "no-hint-batch: " ++ yn (oNoHintBatch defOpts)
+  , "# Disable the auto_all budget ladder (Phase-3b A/B toggle)."
+  , "no-auto-ladder: " ++ yn (oNoAutoLadder defOpts)
+  , ""
+  , "# --- Write-side interaction bridge (needs `agda` on $PATH) ---"
+  , "# Expose the write-side interaction-bridge tools (load/inspect/construct/…)."
+  , "enable-interact: " ++ yn (oEnableInteract defOpts)
+  , "# Path to agda for interaction sessions (else $AGDA_BIN, $PATH)."
+  , "# agda-bin: agda"
+  , "# Extra flags for `agda --interaction-json` (list; e.g. [--safe])."
+  , "# agda-arg: [--safe]"
+  , "# Per-session agda RTS heap cap in MB (0 = none)."
+  , "interaction-heap-mb: " ++ show (oInteractHeapMb defOpts)
+  , "# Cap on live interaction sessions."
+  , "max-interaction-sessions: " ++ show (oMaxSessions defOpts)
+  , "# Close interaction sessions idle this many seconds (0 = never)."
+  , "interaction-idle-timeout: " ++ show (oSessionIdleSecs defOpts)
+  , ""
+  , "# --- check-time auto-hints (speculative Mimer probe) ---"
+  , "# Disable the speculative Mimer probe `check` runs over remaining goals."
+  , "no-auto-hints: " ++ yn (not (oAutoHints defOpts))
+  , "# Max goals the check-time Mimer probe tries."
+  , "auto-hints-limit: " ++ show (oAutoHintsLimit defOpts)
+  , "# Mimer budget per probed goal, seconds."
+  , "auto-hints-timeout: " ++ show (oAutoHintsSecs defOpts)
+  , "# Seed the check-time probe with the top N in-scope graph hints (0 = plain Mimer)."
+  , "auto-hints-lemmas: " ++ show (oAutoHintsLemmas defOpts)
+  , ""
+  , "# --- Side channels ---"
+  , "# Localhost web inspector (activity feed + editing view)."
+  , "inspect: " ++ yn (oInspect defOpts)
+  , "# Inspector start port (probes upward if busy)."
+  , "inspect-port: " ++ show (oInspectPort defOpts)
+  , "# Localhost control endpoint start port (0 = off; needs enable-interact)."
+  , "control-port: " ++ show (oControlPort defOpts)
+  , ""
+  , "# --- External binaries (commented; else resolved via flags/env/$PATH) ---"
+  , "# agda-deps-bin: agda-deps"
+  , "# agda-unused-bin: agda-unused"
+  ]
+  where
+    yn b = if b then "true" else "false"
 
 -- | One-shot read query: @agda-explore query \<tool\> [key=value ...] [--json]
 -- [server flags]@. Loads the graph once (no daemon) and dispatches through the
@@ -424,7 +522,7 @@ runQuery (tool : rest) = do
       (kvs, flags0)  = partition isKv rest
       wantJson       = "--json" `elem` flags0
       flags          = filter (/= "--json") flags0
-      (mCfgArg, fl') = extractConfigArg (preprocess flags)
+      (mCfgArg, fl') = extractConfigArg (splitEqFlags flags)
   (seed, _) <- loadSeed mCfgArg
   finalOpts <- case parseOpts fl' seed of
     Left e  -> hPutStrLn stderr ("agda-explore: " ++ e) >> exitFailure
@@ -463,6 +561,9 @@ coerceVal s
 main :: IO ()
 main = do
   argv <- getArgs
+  -- `--show-defaults` prints a starter config and exits before any project
+  -- discovery / graph build, so it works from anywhere.
+  when ("--show-defaults" `elem` argv) (putStr defaultsYaml >> exitSuccess)
   case argv of
     ("query" : rest) -> runQuery rest
     _                -> mainServer argv
@@ -472,7 +573,7 @@ mainServer :: [String] -> IO ()
 mainServer argv = do
   -- Lift --config out before the hand-rolled parser sees it (after the
   -- --key=value splitter, so only the space-separated form reaches here).
-  let (mCfgArg, argv') = extractConfigArg (preprocess argv)
+  let (mCfgArg, argv') = extractConfigArg (splitEqFlags argv)
   case parseOpts argv' defOpts of
     Left err -> hPutStrLn stderr ("agda-explore: " ++ err) >> exitFailure
     Right o

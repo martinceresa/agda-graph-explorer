@@ -90,7 +90,7 @@ import           System.Process       (CreateProcess (..), proc,
 
 import           AgdaGraph.GoalCanon   (hashString, word64Hex16)
 import           AgdaGraph.Glob       (globMatch)
-import           AgdaGraph.LemmaRank  (computeIdf, envVocab, mkRankEnv)
+import           AgdaGraph.LemmaRank  (computeIdf, vocabOf)
 import qualified AgdaGraph.PremiseSelect as PS
 import           AgdaGraph.Index      (Index, buildIndexLean, idxDefs, idxRealCount
                                       , baseNameKey, isLocalName)
@@ -147,6 +147,7 @@ data Config = Config
   , cfgAutoHints    :: !Bool             -- ^ speculative Mimer hints on @check@: probe remaining goals and report found terms inline.
   , cfgAutoHintsLimit :: !Int            -- ^ max goals Mimer probes per @check@.
   , cfgAutoHintsSecs :: !Int             -- ^ Mimer per-goal budget in seconds (its @-t@ option).
+  , cfgAutoHintsLemmas :: !Int           -- ^ graph-ranked lemma hints seeded into the check-time probe (Phase 4); @0@ = plain Mimer.
   , cfgControlPort  :: !Int              -- ^ localhost control endpoint start port (hooks call @/check@); @<= 0@ = off.
   , cfgCoverageIgnore :: ![String]       -- ^ globs for source files intentionally outside every entry's closure; suppressed from the coverage warning.
   , cfgOverlays     :: ![ExpandedGraph]  -- ^ static overlay graphs (e.g. a prebuilt agda-stdlib graph), decoded once at startup and unioned into every snapshot so queries see external defs. Project defs win collisions.
@@ -190,6 +191,7 @@ defaultConfig = Config
   , cfgAutoHints    = True
   , cfgAutoHintsLimit = 3
   , cfgAutoHintsSecs = 1
+  , cfgAutoHintsLemmas = 2         -- seed the check probe with the top ~2 in-scope graph hints
   , cfgControlPort  = 0            -- control endpoint off unless configured
   , cfgCoverageIgnore = []
   , cfgOverlays     = []
@@ -719,7 +721,7 @@ loadedFromGraph cfg mGraphFile egProject = do
       -- signatures), else Nothing (pure-lexical ranking, the default). The
       -- vocab is cached on the corpus so per-query goal features reuse it.
       !corpus   = if cfgPremiseSelect cfg
-                    then let vocab = envVocab (mkRankEnv rds M.empty)
+                    then let vocab = vocabOf rds
                          in Just (PS.buildCorpus vocab tokenIdf
                                     (PS.corpusRowsFromIndex True vocab ix))
                     else Nothing

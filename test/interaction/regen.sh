@@ -11,6 +11,7 @@ mkdir -p "$OUT"
 F="$PWD/src/Holes.agda"
 L="$PWD/src/Lit.lagda.md"
 C="$PWD/src/Combine.agda"
+HH="$PWD/src/HoleHint.agda"
 clean() { grep -vE 'ClearRunningInfo|ClearHighlighting|RunningInfo|"kind":"Status"' | sed 's/^JSON> //' | grep '^{'; }
 load() { printf 'IOTCM "%s" None Direct (Cmd_load "%s" [])\n' "$1" "$1"; }
 
@@ -30,4 +31,10 @@ load "$L" | agda --interaction-json 2>/dev/null | clean > "$OUT/load-literate.js
 # change in a future agda. (Single quote kept out of printf via a sed swap.)
 { load "$C"; printf 'IOTCM "%s" None Direct (Cmd_autoOne AsIs 0 noRange "-t 5 transQ eq1 eq2")\n' "$C"; } \
   | sed "s/transQ/trans'/" | agda --interaction-json 2>/dev/null | clean | grep GiveAction > "$OUT/auto-batch.jsonl"
+# Phase-D: plain Cmd_autoOne on a hole whose body names an in-scope lemma
+# (`{! bar !}`). Mimer does NOT read hole contents as a hint on this agda, so
+# the stream carries NO GiveAction and the goal stays open — the tripwire for a
+# future agda that starts consuming hole bodies (which would add a GiveAction).
+{ load "$HH"; printf 'IOTCM "%s" None Direct (Cmd_autoOne AsIs 0 noRange "-t 5")\n' "$HH"; } \
+  | agda --interaction-json 2>/dev/null | clean > "$OUT/auto-hole-content.jsonl"
 echo "regenerated fixtures under $OUT/"

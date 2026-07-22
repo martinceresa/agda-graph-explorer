@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### `--show-defaults`: emit a starter config for every binary (2026-07-22)
+
+- All five executables gain `--show-defaults`: print a documented `.agda-<tool>.yml` populated with the current defaults to stdout, then exit (before any config discovery / graph build, so it works from anywhere). Redirect it to bootstrap a config — `agda-unused --show-defaults > .agda-unused.yml`.
+- The four single-command tools bind every emitted value to their defaults record (no drift); scalar keys are active and optional path/list keys are commented examples, so the dump is a no-op overlay saved verbatim. `agda-optimization` emits a `global:` + per-subcommand skeleton whose keys come from each subcommand's `flagSpecs` (defaults noted in each key's description). Offline suite pins the `agda-auto` dump: it parses and round-trips to `defaultOpts`.
+
+### `agda-auto`: batch hole-filling CLI (2026-07-22)
+
+- New fifth executable `agda-auto`: runs `agda-explore`'s Mimer + graph-hint ladder (`AgdaInteract.Tools.autoAllCore`, split out of the `auto_all` path — the MCP rendering stays byte-identical) over every open hole in a file, from the terminal. Diff by default; `--write` applies (Agda-validated, zero-axiom). Needs `agda` on `$PATH`.
+- Unsolved holes get a strippable, idempotent in-hole marker (`AgdaInteract.Annotate`, a block comment inside the hole) recording the goal type + in-scope lemmas to try (with import lines for out-of-scope ones); a later run reads those hints back and re-seeds them. `--no-annotate` disables.
+- Project mode (directory / >1 file): serial sweep in module-dependency order (`AgdaGraph.Index.moduleDependencyOrder` — a module with open holes can't be imported, so a dependency is filled + written before its dependents load), aggregate footer, `--json` `{files, summary}` envelope, `--wall-budget N`. Exit `0`/`1`/`2` = none-open / holes-remain / error.
+- Flags `--repair` (run the graph `repair` tool on a load failure, then re-probe), `--fixpoint` (with `--write`, re-sweep until a pass fills nothing new), `--ledger FILE` (one JSON line per goal). Config `.agda-auto.yml` / `$AGDA_AUTO_CONFIG`.
+- MCP: `construct {op:auto, goal:"*", annotate:true}` now leaves the same markers (default off, so the write-tool surface is otherwise unchanged); found that Mimer does not read hole contents as a hint on Agda 2.8 (pinned by `test/interaction/2.8.0/auto-hole-content.jsonl`).
+
 ### Behavior-preserving simplification pass (2026-07-12)
 
 - Repo-wide cleanup: dead code removed, duplication consolidated into shared homes.

@@ -101,6 +101,9 @@ data Opts = Opts
     -- ^ max goals Mimer probes per @check@ (@--auto-hints-limit@).
   , oAutoHintsSecs :: Int
     -- ^ Mimer per-goal budget in seconds (@--auto-hints-timeout@).
+  , oAutoHintsLemmas :: Int
+    -- ^ graph-ranked lemma hints seeded into the check-time probe
+    -- (@--auto-hints-lemmas@; @0@ = plain Mimer).
   , oControlPort :: Int
     -- ^ localhost control endpoint start port (@--control-port@); @0@ = off.
   , oCoverageIgnore :: [String]
@@ -160,6 +163,7 @@ data FileConfig = FileConfig
   , fcNoAutoHints    :: Maybe Bool
   , fcAutoHintsLimit :: Maybe Int
   , fcAutoHintsSecs  :: Maybe Int
+  , fcAutoHintsLemmas :: Maybe Int
   , fcControlPort    :: Maybe Int
   , fcCoverageIgnore :: Maybe [String]
   , fcOverlayGraphs  :: Maybe [FilePath]
@@ -202,6 +206,7 @@ instance FromJSON FileConfig where
     fcNoAutoHints    <- o .:? "no-auto-hints"
     fcAutoHintsLimit <- o .:? "auto-hints-limit"
     fcAutoHintsSecs  <- o .:? "auto-hints-timeout"
+    fcAutoHintsLemmas <- o .:? "auto-hints-lemmas"
     fcControlPort    <- o .:? "control-port"
     fcCoverageIgnore <- o .:? "coverage-ignore"
     fcOverlayGraphs  <- o .:? "overlay-graphs"
@@ -261,6 +266,7 @@ applyConfig FileConfig{..} o = o
   , oAutoHints      = maybe (oAutoHints o) not fcNoAutoHints
   , oAutoHintsLimit = fromMaybe (oAutoHintsLimit o) fcAutoHintsLimit
   , oAutoHintsSecs  = fromMaybe (oAutoHintsSecs o) fcAutoHintsSecs
+  , oAutoHintsLemmas = fromMaybe (oAutoHintsLemmas o) fcAutoHintsLemmas
   , oControlPort    = fromMaybe (oControlPort o) fcControlPort
   , oCoverageIgnore = fromMaybe (oCoverageIgnore o) fcCoverageIgnore
     -- Config sets the base overlay list; a CLI --overlay-graph then appends

@@ -32,6 +32,9 @@ module AgdaInteract.Tools
   ( interactTools
   , closeAllSessions
   , reapIdleSessions
+  , autoAllCore
+  , applyOrDiff
+  , runRepair
   ) where
 
 import           Control.Concurrent      (threadDelay)
@@ -63,6 +66,8 @@ import           Text.Read               (readMaybe)
 import           AgdaGraph.Interaction.Iotcm
 import           AgdaGraph.Interaction.Protocol
 import           AgdaGraph.Schema        (Definition, defModule)
+import           AgdaInteract.Annotate   (holeHints)
+import           AgdaInteract.AutoReport
 import           AgdaInteract.Batch
 import           AgdaInteract.Edit
 import           AgdaInteract.GoalId
@@ -152,6 +157,7 @@ interactTools =
       (objSchema [ ("steps", stepsSchema)
                  , fileProp
                  , ("write", writeArg)
+                 , ("annotate", annotateArg)
                  ] ["steps"])
       runConstruct
 
@@ -246,6 +252,16 @@ writeArg :: Value
 writeArg = bp "Apply the edit to the file and reload, returning the refreshed \
               \goals — instead of only returning a diff for you to apply \
               \(default false; the bridge does not write unless asked)."
+
+-- | The @annotate@ flag (only meaningful for a @{op:auto, goal:\"*\"}@ step):
+-- leave a strippable, idempotent @{- agda-auto/1 … -}@ marker inside each hole
+-- Mimer could not close, recording the goal type + the ranked lemmas to reach
+-- for (with import lines for out-of-scope ones). Default off.
+annotateArg :: Value
+annotateArg = bp "With a `{op:auto, goal:\"*\"}` step: annotate every hole Mimer \
+                 \could not close with a marker comment recording the goal type \
+                 \and the lemmas to try (default false; re-running replaces the \
+                 \marker rather than stacking it)."
 
 -- | The @goal@ and @file@ properties shared by (almost) every interaction
 -- tool — defined once; the goal-id lifecycle lives in the skill.
@@ -461,17 +477,14 @@ runAuto :: ToolRunner
 runAuto ss a = withGoal ss a $ \sess file e iid -> do
   let secs = max 1 (argInt a "timeout" 5)
       k    = max 0 (argInt a "hints" 6)
-  -- One graph snapshot for hint ranking. Feed the goal's live context binder
-  -- types (1d) and the file's import scope (1c): fetch 2k candidates, probe
-  -- the first k in-scope, report the out-of-scope remainder with import lines.
-  mLd      <- either (const Nothing) (Just . fst) <$> ensureFresh ss
-  ctxTypes <- ctxTypesOf sess file iid
-  msrc     <- either (const Nothing) Just <$> readSourceStamped ss file
-  let inScope                = hintInScope mLd file <$> msrc
-      (probeCands, oosCands) = prepGoalHints mLd inScope k ctxTypes (geType e)
-      hints                  = map fst probeCands
-      batchOK                = not (cfgNoHintBatch (ssConfig ss))
-  res <- autoSolve True batchOK sess file iid secs hints
+  -- One graph snapshot + import scope (1c) for hint ranking, then the goal's
+  -- live context types (1d): fetch 2k candidates, probe the first k in-scope,
+  -- report the out-of-scope remainder with import lines.
+  (mLd, inScope)         <- hintScopeFor ss file
+  (probeCands, oosCands) <- goalProbeHints mLd inScope k sess file e
+  let hints   = map fst probeCands
+      batchOK = not (cfgNoHintBatch (ssConfig ss))
+  res <- autoSolve (allTiers batchOK) sess file iid secs hints
   case res of
     AutoGive mh s -> fmap (headline mh <>) <$> applyHoleEdit ss (writeFlag a) file e s
     -- No solution: surface Agda's error if the plain probe sent one, else
@@ -487,32 +500,13 @@ runAuto ss a = withGoal ss a $ \sess file e iid -> do
     headline Plain         = "Mimer filled the goal:\n\n"
     headline (ViaHint h)   = "Mimer filled the goal via lemma `" <> h <> "`:\n\n"
     headline (ViaBatch hs) = "Mimer filled the goal via graph hints ("
-                               <> T.intercalate ", " [ "`" <> h <> "`" | h <- hs ]
-                               <> "):\n\n"
+                               <> codeList hs <> "):\n\n"
     noSolution hs =
       "auto/Mimer found no solution for this goal"
         <> (if null hs then ""
-            else " (tried lemma hints: "
-                   <> T.intercalate ", " [ "`" <> h <> "`" | h <- hs ] <> ")")
+            else " (tried lemma hints: " <> codeList hs <> ")")
         <> " — guide it with a `construct` case_split/refine step, `lemmas goal=…`, \
            \or `construct` an explicit give."
-
--- | Footer flagging graph-ranked hints Mimer could not try because they are
--- out of the file's import scope. Names the defining module's
--- ready-to-paste import line (from the def the hint was ranked off, so it is
--- exact — no re-resolution). Blank when nothing was out of scope. Honest
--- phrasing: these are untried candidates, not verified closers.
-oosNote :: Text -> [(Text, Definition)] -> [Text] -> Text
-oosNote _    _     []  = ""
-oosNote tool cands oos =
-  "\nNote — " <> showT (length oos) <> " graph-ranked hint(s) are \
-  \not in the file's import scope, so Mimer could not try them:\n"
-    <> T.unlines [ "  - `" <> h <> "`" <> importHint h | h <- oos ]
-    <> "Add the import(s) and re-run `" <> tool <> "`, or run `repair file=…` to add them for you."
-  where
-    importHint h = case lookup h cands of
-      Just d  -> " — add `" <> RS.importLineFor d <> "`"
-      Nothing -> ""
 
 -- | The "hint is in the file's import scope" predicate (Phase-1c), built ONCE
 -- from the file's source text and module map — both loop-invariant across a
@@ -553,11 +547,35 @@ prepGoalHints mLd mInScope k ctxTypes goalTy
            Just inScope -> let (inS, oos) = partition inScope cands in (take k inS, oos)
            Nothing      -> (take k cands, [])
 
--- | Which probe closed the goal, for the headline.
-data HintProv
-  = Plain            -- ^ the unhinted probe.
-  | ViaHint !Text    -- ^ a single lemma hint (the per-hint fallback).
-  | ViaBatch ![Text] -- ^ the in-scope hint batch in one call (may combine ≥2 lemmas).
+-- | The loop-invariant hint machinery for a file: the current snapshot's index
+-- (for ranking) and the file's import-scope predicate (1c). Read once per
+-- @auto@ / check call, then reused across the file's goals via 'goalProbeHints'.
+-- No snapshot ⇒ 'Nothing' (⇒ plain probe); no source text ⇒ no scope predicate.
+hintScopeFor :: ServerState -> FilePath
+             -> IO (Maybe Loaded, Maybe ((Text, Definition) -> Bool))
+hintScopeFor ss file = do
+  mLd  <- either (const Nothing) (Just . fst) <$> ensureFresh ss
+  msrc <- either (const Nothing) Just <$> readSourceStamped ss file
+  pure (mLd, hintInScope mLd file <$> msrc)
+
+-- | Rank + scope-partition one goal's Mimer hint candidates in a live session:
+-- fetch the goal's live context types (1d) and hand them to 'prepGoalHints'
+-- (rank 1a\/1b + scope-partition 1c). The single seam @runAuto@\/@runAutoAll@\/
+-- the check probe share, so their hint seeding stays in lockstep. Skips the
+-- 'ctxTypesOf' session round-trip when there is nothing to rank against
+-- (@k <= 0@ or no snapshot) — 'prepGoalHints' would discard @ctxTypes@ there.
+goalProbeHints :: Maybe Loaded -> Maybe ((Text, Definition) -> Bool) -> Int
+               -> Session -> FilePath -> GoalEntry
+               -> IO ([(Text, Definition)], [(Text, Definition)])
+goalProbeHints mLd mInScope k sess file e
+  | k <= 0 || isNothing mLd = pure ([], [])
+  | otherwise = do
+      ctxTypes <- maybe (pure []) (ctxTypesOf sess file) (geIid e)
+      pure (prepGoalHints mLd mInScope k ctxTypes (geType e))
+
+-- 'HintProv' (Plain / ViaHint / ViaBatch — which probe closed the goal, for
+-- the headline) now lives in "AgdaInteract.AutoReport" (State-free, so the
+-- offline suite can pin the rendering).
 
 -- | Outcome of a (possibly hint-guided) Mimer search at one goal.
 data AutoResult
@@ -575,6 +593,21 @@ data ProbeResult
   | PNone  !(Maybe Text)    -- ^ no term; optional Agda error
   | PAbort !Text            -- ^ wall-budget expiry / session death
 
+-- | Which probe tiers 'autoSolve' runs. @auto@ / @auto_all@ run all three
+-- ('allTiers'); the check-time probe (Phase 4, 'autoHints') drops the per-hint
+-- tier to bound routine-check latency — the batch already tries the same
+-- lemmas, and more powerfully (it can combine them).
+data AutoTiers = AutoTiers
+  { atPlain   :: !Bool  -- ^ tier 1: the unhinted probe (off in the ladder's hinted pass, Phase 3b).
+  , atBatch   :: !Bool  -- ^ tier 2: the in-scope hint batch in one call (@--no-hint-batch@ clears it).
+  , atPerHint :: !Bool  -- ^ tier 3: the per-hint fallback.
+  }
+
+-- | The @auto@ / @auto_all@ tier set: plain + per-hint always, batch unless the
+-- @--no-hint-batch@ A/B toggle cleared it.
+allTiers :: Bool -> AutoTiers
+allTiers batchOK = AutoTiers { atPlain = True, atBatch = batchOK, atPerHint = True }
+
 -- | Max hints in the Phase-3a batch call. Small on purpose (see 'autoSolve'):
 -- big batches abort on a single mis-scoped hint; 2–4 combine reliably.
 autoBatchMax :: Int
@@ -583,10 +616,10 @@ autoBatchMax = 4
 -- | Mimer at one goal, in three probe tiers (Phase-3a):
 --
 --   1. __plain__, full budget — closes trivial holes fast. Skipped when
---      @tryPlain@ is 'False' (the 'runAutoAll' hinted pass, where a cheap plain
+--      @'atPlain'@ is 'False' (the 'runAutoAll' hinted pass, where a cheap plain
 --      pass already failed — Phase 3b, so plain is not re-run).
 --   2. __batch__: the top @'autoBatchMax'@ @hints@ in ONE call, full budget
---      (skipped when @batchOK@ is 'False' — the @--no-hint-batch@ A/B toggle).
+--      (skipped when @'atBatch'@ is 'False' — the @--no-hint-batch@ A/B toggle).
 --      The @hints@ are pre-validated in-scope short names (Phase-1c
 --      'prepGoalHints'), so the call does not abort, and this is the only tier
 --      that lets Mimer /combine/ two lemmas — sequential probes structurally
@@ -595,27 +628,32 @@ autoBatchMax = 4
 --      hence tier 3).
 --   3. __per-hint fallback__: each hint alone, smaller budget — catches a batch
 --      abort from a hint the scope parser wrongly validated, and pins the OOS
---      hints for reporting.
+--      hints for reporting. Skipped when @'atPerHint'@ is 'False' (the check
+--      probe, which trades this salvage tier for bounded latency).
 --
 -- Stops at the first 'GiveAction'. Every probe is wall-clock-bounded
 -- ('probeBudgetMicros'), so a diverging normalization resets the session
 -- instead of wedging it.
-autoSolve :: Bool -> Bool -> Session -> FilePath -> Int -> Int -> [Text] -> IO AutoResult
-autoSolve tryPlain batchOK sess file iid secs hints = do
-    r0 <- if tryPlain then probe secs ("-t " ++ show secs) else pure (PNone Nothing)
+autoSolve :: AutoTiers -> Session -> FilePath -> Int -> Int -> [Text] -> IO AutoResult
+autoSolve tiers sess file iid secs hints = do
+    r0 <- if atPlain tiers then probe secs ("-t " ++ show secs) else pure (PNone Nothing)
     case r0 of
       PGive t    -> pure (AutoGive Plain t)
       PAbort m   -> pure (AutoAbort m)
       PNone mErr
-        | null hints   -> pure (AutoNone mErr [])
-        | not batchOK  -> tryHints hints [] mErr   -- --no-hint-batch: skip tier 2
+        | null hints        -> pure (AutoNone mErr [])
+        | not (atBatch tiers) -> perHint mErr      -- --no-hint-batch: skip tier 2
         | otherwise    -> do
             rB <- probe secs ("-t " ++ show secs ++ " " ++ unwords (map T.unpack batch))
             case rB of
               PGive t  -> pure (AutoGive (ViaBatch batch) t)
               PAbort m -> pure (AutoAbort m)
-              PNone _  -> tryHints hints [] mErr
+              PNone _  -> perHint mErr
   where
+    -- Tier 3, or a clean "no solution" when the check probe disabled it.
+    perHint mErr
+      | atPerHint tiers = tryHints hints [] mErr
+      | otherwise       = pure (AutoNone mErr [])
     -- Batch only the top few hints, not all k: the scope parser (Phase 1c) is
     -- approximate, and ONE false-in-scope name aborts the whole batch call
     -- (verified: an out-of-scope hint errors [NotInScope] before search). A
@@ -658,8 +696,30 @@ autoDiedMsg err =
 -- combined diff for the solved goals (or apply + reload with @write:true@),
 -- the survivors listed. The one-shot shape for "just close what's easy";
 -- the per-goal @auto@ remains for targeted work.
+--
+-- Thin over 'autoAllCore': render the structured 'AutoAllOutcome'
+-- ('renderAutoAll') and, for a run that produced edits, append @applyOrDiff@'s
+-- diff / apply-and-reload report. @agda-auto@ calls 'autoAllCore' directly for
+-- its own report + exit code.
 runAutoAll :: ToolRunner
 runAutoAll ss a = do
+  eo <- autoAllCore ss a
+  case eo of
+    Left err -> pure (Left err)
+    Right o  -> case aoNew o of
+      Nothing  -> pure (Right (renderAutoAll o))
+      Just new -> fmap (renderAutoAll o <>) <$> applyOrDiff ss (writeFlag a) (aoFile o) (aoOrig o) new
+
+-- | The @auto_all@ ladder as a structured result: resolve + load the file,
+-- probe every open goal (Phase-3b two-pass ladder unless @--no-auto-ladder@),
+-- splice the solved gives against the ORIGINAL text, and package everything
+-- 'renderAutoAll' / the @agda-auto@ report need into an 'AutoAllOutcome'. Marks
+-- the session dirty (the in-session gives diverge from unchanged disk). Does
+-- NOT write or diff — the caller does, keyed on 'aoNew' ('Nothing' ⇒ nothing
+-- to apply). Splitting the rendering off is what makes the pure prose
+-- pin-testable and gives @agda-auto@ per-goal data.
+autoAllCore :: ServerState -> Value -> IO (Either Text AutoAllOutcome)
+autoAllCore ss a = do
   r0 <- case argText a "file" of
     Just f  -> pure (Right (absFile ss f))
     Nothing -> do
@@ -676,8 +736,7 @@ runAutoAll ss a = do
       case r of
         Left err -> pure (Left err)
         Right (sess, _, es, _)
-          | null es   -> pure (Right ("Loaded " <> T.pack file
-                                        <> " — no open goals; nothing for Mimer to try."))
+          | null es   -> pure (Right (noGoalsOutcome file))
           | otherwise -> do
               ef <- readSourceStamped ss file
               case ef of
@@ -685,6 +744,10 @@ runAutoAll ss a = do
                 Right orig -> do
                   let secs = max 1 (argInt a "timeout" 5)
                       k    = max 0 (argInt a "hints" 6)
+                      -- Annotate unsolved holes with a marker (opt-in; default
+                      -- off, so the MCP surface is unchanged unless
+                      -- `annotate:true` is passed — agda-auto passes it).
+                      annotate = argBool a "annotate" False
                       cb   = codeBlocksFor file orig
                       cfg  = ssConfig ss
                       batchOK = not (cfgNoHintBatch cfg)
@@ -692,92 +755,195 @@ runAutoAll ss a = do
                   let inScope = Just (hintInScope mLd file orig)
                       -- Per goal: live context types (1d) + rank (1a/1b) +
                       -- scope-partition (1c) into in-scope probe hints + the OOS
-                      -- remainder. The one expensive-per-goal step.
+                      -- remainder, PLUS the hole's own hints (probed first).
+                      -- The one expensive-per-goal step.
                       fetchHints e = do
-                        ctxTypes <- maybe (pure []) (ctxTypesOf sess file) (geIid e)
-                        let (probe, oos) = prepGoalHints mLd inScope k ctxTypes (geType e)
-                        pure (e, probe, oos)
-                      splitPer per = ( [ (e, probe)      | (e, probe, _)   <- per ]
-                                     , concat [ oos          | (_, _, oos)    <- per ]
-                                     , concat [ probe ++ oos | (_, probe, oos) <- per ] )
-                  (edits, solved, unsolved, preOos, oosBounced, allCands, mAbort) <-
+                        (probe, oos) <- goalProbeHints mLd inScope k sess file e
+                        pure (GoalHints e (holeHints (holeTextOf orig e)) probe oos)
+                  -- Probe. 'recs1' is the first (or only) pass over all goals;
+                  -- 'recs2' the ladder's hinted pass over the survivors (empty
+                  -- in the no-ladder path — its single pass IS the hinted one).
+                  (recs1, recs2, mAbort) <-
                     if cfgNoAutoLadder cfg
                       then do
                         -- Phase-3b OFF: one full-budget pass (fetch every goal's
                         -- hints, then plain+batch+per-hint at the full budget).
-                        per <- forM es fetchHints
-                        let (esH, preO, cands) = splitPer per
-                        (eds, ok, bad, ob, ab) <- autoAllLoop True batchOK sess file cb secs esH
-                        pure (eds, ok, bad, preO, ob, cands, ab)
+                        per        <- forM es fetchHints
+                        (recs, ab) <- probeGoals (allTiers batchOK) sess file cb secs per
+                        pure (recs, [], ab)
                       else do
                         -- Phase-3b ladder. PASS 1: plain only, cheap 1 s over ALL
                         -- goals, NO hints — closes trivial holes without the
                         -- per-goal context round-trip + ranking, fails the rest
                         -- fast so the full budget hits only the residue.
-                        (eds1, ok1, surv1, _, ab1) <-
-                          autoAllLoop True batchOK sess file cb 1 [ (e, []) | e <- es ]
+                        (r1, ab1) <-
+                          probeGoals (allTiers batchOK) sess file cb 1 (map noHints es)
+                        let surv1 = [ grcEntry g | g <- r1, isNothing (grcEdit g) ]
                         -- PASS 2: hinted (skip plain — pass 1 ran it), full
-                        -- budget, over the SURVIVORS only; fetch hints lazily.
-                        per <- if isJust ab1 then pure [] else forM surv1 fetchHints
-                        let (esH, preO, cands) = splitPer per
-                        (eds2, ok2, bad2, ob2, ab2) <-
-                          if isJust ab1 then pure ([], [], surv1, [], ab1)
-                          else autoAllLoop False batchOK sess file cb secs esH
-                        pure ( eds1 ++ eds2, ok1 ++ ok2, bad2, preO, ob2, cands
-                             , case ab1 of Just _ -> ab1; Nothing -> ab2 )
+                        -- budget, over the SURVIVORS only; fetch hints lazily. A
+                        -- pass-1 abort skips pass 2 and leaves the survivors
+                        -- unsolved (synthesised, no hints) so the aggregates
+                        -- match the no-ladder path's.
+                        (r2, ab2) <-
+                          if isJust ab1
+                            then pure ([ unsolvedRec e | e <- surv1 ], Nothing)
+                            else do
+                              per <- forM surv1 fetchHints
+                              probeGoals ((allTiers batchOK) { atPlain = False }) sess file cb secs per
+                        pure (r1, r2, maybe ab2 Just ab1)
                   -- The in-session gives diverge from disk (which stays
                   -- untouched unless write:true) — reload on next use.
                   markSessionDirty ss file
-                  let hintMap = M.toList (M.fromListWith (\_ old -> old) allCands)
-                      oosBlock  = oosNote "auto_all" hintMap
-                                          (nub (map fst preOos ++ oosBounced))
-                      abortBlock = maybe "" ("\n" <>) mAbort   -- a wedge reset the session
-                      survivors
-                        | null unsolved = oosBlock <> abortBlock
-                        | otherwise =
-                            "\nMimer found nothing for: "
-                              <> T.intercalate ", " (map (renderStableId . geStable) unsolved)
-                              <> " — try a `construct` refine step, `lemmas goal=…`, or `construct` an explicit give."
-                              <> oosBlock <> abortBlock
-                  if null edits
-                    then pure (Right ("Mimer solved none of the " <> showT (length es)
-                                        <> " open goal(s) in " <> T.pack file
-                                        <> " (per-goal budget " <> showT secs <> "s)."
-                                        <> survivors))
-                    else case spliceRanges orig edits of
-                      Left ov   -> pure (Left ov)
-                      Right new -> do
-                        let headline =
-                              "Mimer solved " <> showT (length edits) <> " of "
-                                <> showT (length es) <> " open goal(s): "
-                                <> T.intercalate ", " solved <> "." <> survivors <> "\n\n"
-                        fmap (headline <>) <$> applyOrDiff ss (writeFlag a) file orig new
+                  -- Solves come from BOTH passes (pass1 ++ pass2 order — not
+                  -- input order, hence 'renderAutoAll' reads these aggregates,
+                  -- not 'aoGoals'). The OOS / survivors reporting comes from the
+                  -- HINTED pass (recs2 with the ladder, recs1 without).
+                  let hintedRecs = if cfgNoAutoLadder cfg then recs1 else recs2
+                      edits      = recEdits recs1 ++ recEdits recs2
+                      solved     = solvedIds recs1 ++ solvedIds recs2
+                      -- In the no-ladder path recs2 is empty, and
+                      -- @mergeGoalRecs recs1 [] == map grcReport recs1@, so the
+                      -- merge covers both paths.
+                      goals      = mergeGoalRecs recs1 recs2
+                      -- Solved gives + (opt-in) annotation markers on the
+                      -- unsolved holes are edits on DISJOINT ranges — one splice
+                      -- keeps them from shifting each other.
+                      allEdits = edits ++ annotationEdits annotate secs orig goals
+                      mkOutcome mNew = AutoAllOutcome
+                        { aoFile      = file
+                        , aoOrig      = orig
+                        , aoNew       = mNew
+                        , aoNoGoals   = False
+                        , aoGoalCount = length es
+                        , aoSecs      = secs
+                        , aoSolved    = solved
+                        , aoUnsolved  = unsolvedIds hintedRecs
+                        , aoAbort     = mAbort
+                        , aoAllCands  = recAllCands hintedRecs
+                        , aoOosNames  = nub (recPreOosNames hintedRecs ++ recBounced hintedRecs)
+                        , aoGoals     = goals
+                        }
+                  case if null allEdits then Right Nothing else Just <$> spliceRanges orig allEdits of
+                    Left ov    -> pure (Left ov)
+                    Right mNew -> pure (Right (mkOutcome mNew))
 
--- | Probe each goal with Mimer against the one live load, accumulating
--- hole-range edits in ORIGINAL-text offsets (the in-session gives never
--- move the on-disk text). Continue-on-failure — unlike @construct@, an
--- unsolved goal is a /result/ here, not an abort.
-autoAllLoop :: Bool -> Bool -> Session -> FilePath -> CodeBlocks -> Int
-            -> [(GoalEntry, [(Text, Definition)])]
-            -> IO ([(Int, Int, Text)], [Text], [GoalEntry], [Text], Maybe Text)
-autoAllLoop tryPlain batchOK sess file cb secs = go [] [] [] []
+-- | Internal per-goal probing record: the original entry, its structured
+-- 'GoalReport', and (when solved inside a code block) the ORIGINAL-offset
+-- give edit @(start, end, term)@.
+data GoalRec = GoalRec
+  { grcEntry  :: !GoalEntry
+  , grcReport :: !GoalReport
+  , grcEdit   :: !(Maybe (Int, Int, Text))
+  }
+
+-- | One goal's fetched hints: names read from the hole itself (probed first —
+-- user intent outranks the ranker), the graph-ranked in-scope
+-- candidates, and the out-of-scope remainder (reported with import lines).
+data GoalHints = GoalHints
+  { ghGoal  :: !GoalEntry
+  , ghHole  :: ![Text]               -- ^ hole-derived hint names.
+  , ghGraph :: ![(Text, Definition)] -- ^ graph-ranked in-scope candidates.
+  , ghOos   :: ![(Text, Definition)] -- ^ out-of-scope candidates.
+  }
+
+-- | An empty hint set for a goal (the ladder's plain pass 1 / abort survivors).
+noHints :: GoalEntry -> GoalHints
+noHints e = GoalHints e [] [] []
+
+-- | The hole's full source text (@{! … !}@ / @?@) sliced from @orig@ at the
+-- goal's 1-based half-open range; @""@ when the goal has no range.
+holeTextOf :: Text -> GoalEntry -> Text
+holeTextOf orig e = case geRange e of
+  Just (GoalRange s en) -> let a = rpPos s; b = rpPos en
+                           in T.take (b - a) (T.drop (a - 1) orig)
+  Nothing               -> ""
+
+-- | Build a 'GoalReport' for one goal.
+mkGoalReport :: GoalEntry -> GoalOutcome
+             -> [(Text, Definition)] -> [(Text, Definition)] -> [Text] -> [Text] -> GoalReport
+mkGoalReport e outc probe oos bounced hole = GoalReport
+  { grId         = renderStableId (geStable e)
+  , grType       = geType e
+  , grRange      = geRange e
+  , grOutcome    = outc
+  , grProbeHints = probe
+  , grOosHints   = oos
+  , grBounced    = bounced
+  , grHoleHints  = hole
+  }
+
+-- | An unprobed goal recorded unsolved (no hints) — used for the ladder's
+-- pass-1-abort survivors, which pass 2 never reaches.
+unsolvedRec :: GoalEntry -> GoalRec
+unsolvedRec e = GoalRec e (mkGoalReport e (GUnsolved Nothing) [] [] [] []) Nothing
+
+-- | The probe hint-name list: hole hints first (user intent), then the
+-- graph-ranked in-scope names, deduped (first occurrence wins).
+probeNames :: GoalHints -> [Text]
+probeNames gh = nub (ghHole gh ++ map fst (ghGraph gh))
+
+-- | Probe each goal with Mimer against the one live load, in input order,
+-- building a 'GoalRec' per goal. The in-session gives never move the on-disk
+-- text, so edits accumulate in ORIGINAL offsets and merge with 'spliceRanges'.
+-- Continue-on-failure — an unsolved goal is a /result/, not an abort — except
+-- a session death ('AutoAbort'), which stops the run: the current goal and the
+-- rest are recorded unsolved (carrying their fetched hints, so the OOS
+-- aggregate is unchanged) and the message returned.
+probeGoals :: AutoTiers -> Session -> FilePath -> CodeBlocks -> Int
+           -> [GoalHints]
+           -> IO ([GoalRec], Maybe Text)
+probeGoals tiers sess file cb secs = go []
   where
-    go eds ok bad oos []               = pure (reverse eds, reverse ok, reverse bad, reverse oos, Nothing)
-    go eds ok bad oos ((e, hintCands) : rest) = case (geIid e, geRange e) of
+    report e outc gh bounced =
+      mkGoalReport e outc (ghGraph gh) (ghOos gh) bounced (ghHole gh)
+    go acc [] = pure (reverse acc, Nothing)
+    go acc (gh : rest) = let e = ghGoal gh in case (geIid e, geRange e) of
       (Just iid, Just (GoalRange s en))
         | isInsideCode cb (rpPos s) -> do
-            res <- autoSolve tryPlain batchOK sess file iid secs (map fst hintCands)
+            res <- autoSolve tiers sess file iid secs (probeNames gh)
             case res of
-              AutoGive _ t ->
-                go ((rpPos s, rpPos en, t) : eds)
-                   (renderStableId (geStable e) : ok) bad oos rest
-              AutoNone _ hoos -> go eds ok (e : bad) (reverse hoos ++ oos) rest
-              -- the session is dead — stop; this goal and the rest are
-              -- unsolved. Edits collected so far are valid ORIGINAL-offset
-              -- gives and still merge/apply.
+              AutoGive prov t ->
+                go (GoalRec e (report e (GSolved t prov) gh [])
+                              (Just (rpPos s, rpPos en, t)) : acc) rest
+              AutoNone mErr hoos ->
+                go (GoalRec e (report e (GUnsolved mErr) gh hoos) Nothing : acc) rest
+              -- Session dead: stop. Current + rest recorded unsolved; the rest
+              -- keep their fetched hints so 'recAllCands' matches a full run.
               AutoAbort m ->
-                pure (reverse eds, reverse ok, reverse bad ++ (e : map fst rest), reverse oos, Just m)
-      _ -> go eds ok (e : bad) oos rest
+                let here     = GoalRec e (report e (GUnsolved Nothing) gh []) Nothing
+                    restRecs = [ GoalRec (ghGoal g) (report (ghGoal g) (GUnsolved Nothing) g []) Nothing
+                               | g <- rest ]
+                in pure (reverse (here : acc) ++ restRecs, Just m)
+      _ -> go (GoalRec e (report e GSkipped gh []) Nothing : acc) rest
+
+-- | Merge the ladder's two passes into the final per-goal reports, in input
+-- order: a goal solved in pass 1 keeps its pass-1 report; a survivor takes its
+-- pass-2 report (recs2 has exactly one entry per survivor, in order). The
+-- fall-through keeps the pass-1 report if recs2 is unexpectedly short (never
+-- happens — recs2 covers every survivor).
+mergeGoalRecs :: [GoalRec] -> [GoalRec] -> [GoalReport]
+mergeGoalRecs []            _   = []
+mergeGoalRecs (r1 : rest1) rs2
+  | isJust (grcEdit r1)      = grcReport r1 : mergeGoalRecs rest1 rs2
+  | (r2 : rest2) <- rs2      = grcReport r2 : mergeGoalRecs rest1 rest2
+  | otherwise                = grcReport r1 : mergeGoalRecs rest1 []
+
+-- Aggregate views over a pass's 'GoalRec's (see 'autoAllCore').
+recEdits :: [GoalRec] -> [(Int, Int, Text)]
+recEdits recs = [ ed | GoalRec _ _ (Just ed) <- recs ]
+
+solvedIds, unsolvedIds :: [GoalRec] -> [Text]
+solvedIds   recs = [ grId (grcReport g) | g <- recs, isJust    (grcEdit g) ]
+unsolvedIds recs = [ grId (grcReport g) | g <- recs, isNothing (grcEdit g) ]
+
+recAllCands :: [GoalRec] -> [(Text, Definition)]
+recAllCands recs = concat [ grProbeHints r ++ grOosHints r | g <- recs, let r = grcReport g ]
+
+recPreOosNames :: [GoalRec] -> [Text]
+recPreOosNames recs = [ n | g <- recs, (n, _) <- grOosHints (grcReport g) ]
+
+recBounced :: [GoalRec] -> [Text]
+recBounced recs = concat [ grBounced (grcReport g) | g <- recs ]
 
 -- ---------------------------------------------------------------------
 -- Scratch / staging buffer (op = open / promote / discard)
@@ -1522,33 +1688,52 @@ runCheck ss a = case argText a "file" of
 
 -- | Speculative Mimer probe over the first few open goals after a live
 -- @check@: report ready-made solutions inline so the agent sees the payoff
--- of proof search without having to remember @auto@ exists. Each probe is
--- bounded as wall-clock ('probeBudgetMicros' over 'cfgAutoHintsSecs'), so a
--- pathological goal can't wedge a routine @check@ — on budget expiry
+-- of proof search without having to remember @auto@ exists — the check path is
+-- the surface agents actually use, so this is where the ranker's hints are
+-- delivered (Phase 4). Each goal is probed via 'autoSolve': plain, then the top
+-- @'cfgAutoHintsLemmas'@ in-scope graph hints as one batch (the same seeding
+-- 'runAuto' does — snapshot rank 1a\/1b, live context 1d, scope partition 1c),
+-- and the per-hint fallback tier is dropped so a routine @check@ stays bounded.
+-- @cfgAutoHintsLemmas = 0@ ⇒ plain Mimer; no snapshot ⇒ plain too.
+-- The 'HintProv' rides back so a hint that closed a goal is named to the agent.
+--
+-- Each probe is wall-clock-bounded ('probeBudgetMicros' over 'cfgAutoHintsSecs'),
+-- so a pathological goal can't wedge a routine @check@ — on budget expiry
 -- (or session death) probing stops and a note is returned; capped at
 -- 'cfgAutoHintsLimit' goals; @--no-auto-hints@ disables. A successful probe
 -- solves the meta in Agda's /session/ state (the file is untouched), so any
 -- success marks the session dirty — the next interaction reloads from
 -- unchanged disk.
-autoHints :: ServerState -> Session -> FilePath -> [GoalEntry] -> IO ([(GoalEntry, Text)], Maybe Text)
+autoHints :: ServerState -> Session -> FilePath -> [GoalEntry]
+          -> IO ([(GoalEntry, Text, HintProv)], Maybe Text)
 autoHints ss sess file es
   | not (cfgAutoHints c) || null cands = pure ([], Nothing)
   | otherwise = do
+      -- Loop-invariant hint machinery, built once and only when seeding hints
+      -- (@nHints = 0@ ⇒ no snapshot ⇒ 'goalProbeHints' yields no hints ⇒ plain).
+      (mLd, mInScope) <- if nHints <= 0 then pure (Nothing, Nothing)
+                                        else hintScopeFor ss file
+      let probeAll [] acc = pure (reverse acc, Nothing)
+          probeAll ((e, iid) : rest) acc = do
+            (probeCands, _) <- goalProbeHints mLd mInScope nHints sess file e
+            res <- autoSolve tiers sess file iid secs (map fst probeCands)
+            case res of
+              AutoGive prov t -> probeAll rest ((e, t, prov) : acc)
+              AutoNone _ _    -> probeAll rest acc
+              AutoAbort _     -> pure (reverse acc, Just (abortNote (renderStableId (geStable e))))
       (hints, mNote) <- probeAll cands []
       when (not (null hints)) (markSessionDirty ss file)
       pure (hints, mNote)
   where
-    c     = ssConfig ss
-    secs  = max 1 (cfgAutoHintsSecs c)
+    c       = ssConfig ss
+    secs    = max 1 (cfgAutoHintsSecs c)
+    nHints  = max 0 (cfgAutoHintsLemmas c)
+    -- Plain + batch, no per-hint fallback: the batch already tries these lemmas
+    -- (more powerfully), so the third tier is pure latency on a routine check.
+    tiers   = AutoTiers { atPlain = True
+                        , atBatch = not (cfgNoHintBatch c)
+                        , atPerHint = False }
     cands = take (max 0 (cfgAutoHintsLimit c)) [ (e, iid) | e <- es, Just iid <- [geIid e] ]
-    probeAll [] acc = pure (reverse acc, Nothing)
-    probeAll ((e, iid) : rest) acc = do
-      out <- sendIotcmBudget (probeBudgetMicros secs) sess (iotcmAutoOne file AsIs iid ("-t " ++ show secs))
-      case out of
-        SendOk rs
-          | (GiveStr t : _) <- [gr | ReplyGiveAction _ gr <- rs] -> probeAll rest ((e, t) : acc)
-          | otherwise                                            -> probeAll rest acc
-        _ -> pure (reverse acc, Just (abortNote (renderStableId (geStable e))))
     abortNote gid =
       "(auto-hints probe exceeded its " <> showT secs <> "s+" <> showT probeGraceSecs
         <> "s budget on " <> gid <> "; remaining goals were not probed — the Agda \
@@ -1574,8 +1759,11 @@ renderDiagnostics co = errBlock <> warnBlock
 -- | @check@ of the on-disk file: goals carry stable ids (from the live
 -- session's reconciled map) and source positions. @hints@ are the
 -- speculative Mimer solutions from 'autoHints' — surfaced inline so the
--- agent sees the payoff of proof search without having had to ask for it.
-renderCheckLive :: FilePath -> CheckOutcome -> [GoalEntry] -> [(GoalEntry, Text)] -> Maybe Text -> Text
+-- agent sees the payoff of proof search without having had to ask for it. Each
+-- carries a 'HintProv': when a graph-ranked lemma closed the goal it is named
+-- ("via lemma …"), which teaches the agent the lemma exists (value beyond the
+-- filled hole).
+renderCheckLive :: FilePath -> CheckOutcome -> [GoalEntry] -> [(GoalEntry, Text, HintProv)] -> Maybe Text -> Text
 renderCheckLive file co es hints mNote =
   checkVerdict file co <> renderDiagnostics co
     <> (if null es then ""
@@ -1586,15 +1774,20 @@ renderCheckLive file co es hints mNote =
     <> maybe "" ("\n" <>) mNote            -- auto-hints budget/reset note
   where
     mimerBlock = case hints of
-      []       -> ""
-      [(e, t)] ->
+      []          -> ""
+      [(e, t, p)] ->
         "Mimer already finds a term for " <> renderStableId (geStable e)
-          <> ": `" <> t <> "` — accept with `auto goal="
+          <> provNote p <> ": `" <> t <> "` — accept with `auto goal="
           <> renderStableId (geStable e) <> " write:true`.\n"
-      _        ->
+      _           ->
         "Mimer already finds terms for " <> showT (length hints) <> " of these:\n"
-          <> T.unlines [ "  " <> renderStableId (geStable e) <> " ← " <> t | (e, t) <- hints ]
+          <> T.unlines [ "  " <> renderStableId (geStable e) <> " ← " <> t <> provNote p
+                       | (e, t, p) <- hints ]
           <> "Accept them in one call with `construct steps=[{op:auto,goal:\"*\"}] write:true`.\n"
+    -- Name the lemma(s) a hint tier used; blank for a plain (unhinted) solve.
+    provNote Plain         = ""
+    provNote (ViaHint h)   = " (via lemma `" <> h <> "`)"
+    provNote (ViaBatch hs) = " (via " <> codeList hs <> ")"
 
 -- | @check content=…@: a dry-run has no stable-goal map (the text isn't
 -- loaded as the real module), so goals are shown by raw index + position

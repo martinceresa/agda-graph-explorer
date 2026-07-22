@@ -21,11 +21,13 @@ module AgdaGraph.ConfigCore
   , firstExisting
   , loadYamlConfig
   , extractConfigFlag
+  , isAgdaSourceFile
+  , splitEqFlags
   ) where
 
 import           Control.Exception  ( IOException, catch )
 import           Data.Aeson         ( FromJSON )
-import           Data.List          ( stripPrefix )
+import           Data.List          ( isPrefixOf, isSuffixOf, stripPrefix )
 import qualified Data.Yaml          as Y
 
 import           System.Directory   ( doesDirectoryExist, doesFileExist
@@ -109,6 +111,26 @@ dirHasAgdaLib d = do
     then pure False
     else (any ((== ".agda-lib") . takeExtension) <$> listDirectory d)
            `catch` \(_ :: IOException) -> pure False
+
+-- | 'True' iff the path names an Agda source file (plain or any of the
+-- literate flavours). The single shared extension set for the Agda-source
+-- directory walkers ("MainMcp", "MainUnused", "AgdaAuto.Run", …), so a new
+-- literate flavour is added once here rather than drifting per tool.
+isAgdaSourceFile :: FilePath -> Bool
+isAgdaSourceFile f = any (`isSuffixOf` f)
+  [ ".agda", ".lagda", ".lagda.md", ".lagda.rst", ".lagda.tex", ".lagda.org"
+  , ".lagda.tree", ".lagda.typ" ]
+
+-- | Split any @--key=value@ argv token into @[--key, value]@ (leaving other
+-- tokens untouched), so a downstream flag parser only sees the separated form.
+-- Shared by the hand-rolled executable CLIs (@agda-explore@ / @agda-auto@).
+splitEqFlags :: [String] -> [String]
+splitEqFlags = concatMap split
+  where
+    split a
+      | "--" `isPrefixOf` a
+      , (k, '=' : v) <- break (== '=') a = [k, v]
+      | otherwise = [a]
 
 -- | Read and parse a YAML config file. On a parse failure returns
 -- @Left@ with the library's clean, pretty-printed message; on success

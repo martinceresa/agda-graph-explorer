@@ -2,7 +2,7 @@
 
 Consumers of the dependency graph emitted by
 [`agda-deps`](https://github.com/input-output-hk/agda-dependencies) — a
-shared library plus four executables that read `agda-deps`' v2
+shared library plus five executables that read `agda-deps`' v2
 `graph.json` and answer questions over it.
 
 **Nothing here links Agda**, so the whole repo builds from Hackage in minutes.
@@ -11,9 +11,10 @@ shared library plus four executables that read `agda-deps`' v2
 |----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------|
 | **`agda-graph`** (library) | Typed view of the expanded `graph.json` + an in-memory `Index`. The substrate the executables share.                                      |
 | **`agda-unused`**          | Flags unused imports / definitions / blanket opens / public re-exports.                                                                   |
-| **`agda-optimization`**    | 18 subcommand-driven graph-level analyses (centrality, clustering, motif mining, axiom footprint, …).                                     |
+| **`agda-optimization`**    | 19 subcommands: 18 graph-level analyses (centrality, clustering, motif mining, axiom footprint, …) + `hint-bench`, an offline lemma-ranker eval.        |
 | **`agda-goals`**           | Drives `agda --interaction-json` over a pool of persistent processes and buckets goal states by canonical hash. Needs `agda` on `$PATH`. |
 | **`agda-explore`**         | Interactive MCP server: a daemon that answers point queries over the graph for coding agents, regenerating it on the fly via `agda-deps`. |
+| **`agda-auto`**            | Batch hole-filler: runs `agda-explore`'s Mimer + graph-hint ladder over every open hole in a file (or a project), prints a diff or applies it, and annotates holes it can't close. Needs `agda` on `$PATH`. |
 
 The single coupling to `agda-deps` is the **v2 `graph.json` wire
 schema** — `agda-deps` produces it, this repo consumes it. See
@@ -28,8 +29,9 @@ Forward-looking work: [TODO.md](TODO.md); deferred / refused ideas:
 
 - GHC 9.14.x + cabal 3.16 (older GHC ≥ 9.6 should work; CI pins 9.14.1).
 - `agda-optimization`'s `fiedler` subcommand only: `pip install scipy numpy`.
-- `agda-goals` and `agda-explore`'s live regeneration: `agda` and
-  `agda-deps` on `$PATH` (see [Cross-repo runtime link](#cross-repo-runtime-link)).
+- `agda-goals`, `agda-auto`, and `agda-explore --enable-interact`: `agda` on
+  `$PATH`. `agda-explore`'s live regeneration also needs `agda-deps` on `$PATH`
+  (see [Cross-repo runtime link](#cross-repo-runtime-link)).
 
 ## Build
 
@@ -56,8 +58,8 @@ agda-unused --json=out/deps.json ROOT…          # human-readable
 agda-unused --json=out/deps.json --json-out .    # JSON array
 ```
 
-Honours `--kinds`, `--rel-to`, `--exclude`. Config:
-[`.agda-unused.yml`](#agda-unusedyml).
+Honours `--kinds`, `--rel-to`, `--exclude`, `--group-by`, `--count-only`.
+Config: [`.agda-unused.yml`](#agda-unusedyml).
 
 ## `agda-optimization` — graph-level refactor candidates
 
@@ -67,12 +69,14 @@ agda-optimization --help                 # list subcommands
 agda-optimization <subcommand> --help    # subcommand flags
 ```
 
-18 subcommands: `motif`, `load-bearing`, `polyglot`, `fingerprint`,
+19 subcommands: `motif`, `load-bearing`, `polyglot`, `fingerprint`,
 `debt`, `basket`, `ledger`, `echo`, `gravity`, `pyre`, `chokepoint`,
 `silhouette`, `entwine`, `fiedler`, `horizon`, `strata`,
-`term-cluster`, `concept-bundle`. `--json` emits machine-readable
-output. Config: [`.agda-optimization.yml`](#agda-optimizationyml)
-(`global:` + one kebab-case section per subcommand).
+`term-cluster`, `concept-bundle` (18 graph analyses) plus `hint-bench`
+(an offline leave-one-out eval of the lemma ranker; not a graph analysis).
+`--json` emits machine-readable output. Config:
+[`.agda-optimization.yml`](#agda-optimizationyml) (`global:` + one
+kebab-case section per subcommand).
 
 `fiedler` is the only subcommand that shells out — to
 `scripts/fiedler_helper.py` (needs SciPy). Helper path:
@@ -132,13 +136,15 @@ Three are batchers:
 `inspect` reads an open goal (`op` = type / context / infer / normalize),
 `construct` drives holes with a sequence of `{op, goal, …}` steps
 (`give` / `refine` / `case_split` / `auto`; a lone `{op:auto, goal:"*"}`
-runs Mimer over every open goal), and `scratch` (`op` = open / promote /
+runs Mimer over every open goal, with an optional `annotate:true` to leave a
+marker in each hole it can't close), and `scratch` (`op` = open / promote /
 discard) manages an isolated scratch module.
 
-Every mutator (`construct` / `auto` / `scratch` / `give_file` / `repair`) is
-Agda-validated and by default returns a unified diff **without writing**;
-pass `write:true` to apply, reload, and return the diff plus refreshed
-goals in one round-trip. A hard zero-axiom contract refuses any
+Every mutator (`construct` / `auto` / `scratch` / `give_file` / `new_module`
+/ `repair`) is Agda-validated and by default returns a unified diff (or, for
+the whole-file authors, the proposed content) **without writing**; pass
+`write:true` to apply, reload, and return the refreshed goals in one
+round-trip. A hard zero-axiom contract refuses any
 `postulate`, termination/coverage/unsafe-`OPTIONS` pragma, or escape
 hatch up front. `.lagda.md` literate sources are handled. `auto` (and
 `construct`'s `auto` steps) run Mimer, seeded with the top `find_lemma`
@@ -175,6 +181,34 @@ warm `check` from outside the MCP transport, start the daemon with
 tool-usage histogram, so which tools agents actually reach for is visible
 without parsing transcripts. Full detail: [`plugin/`](plugin/README.md).
 
+## `agda-auto` — batch hole-filling
+
+Fills every open hole in a file — or a whole project — from the terminal,
+running the same Mimer + graph-hint ladder `agda-explore`'s `auto` uses. Prints
+a unified diff by default; `--write` applies it (Agda-validated, under the
+zero-axiom contract). Holes it can't close get a strippable, idempotent marker
+comment recording the goal type and the lemmas to try. Needs `agda` on `$PATH`
+(or `--agda-bin`); a graph (`--graph`, else a discovered `./deps.json` /
+`./.agda-explore/deps.json`) supplies lemma hints — without one it runs plain
+Mimer.
+
+```sh
+agda-auto File.agda                      # diff + per-hole report
+agda-auto --write File.agda              # apply solutions, annotate the rest
+agda-auto --graph out/deps.json src/     # sweep a project (dependency order)
+agda-auto --json File.agda | jq          # structured report
+```
+
+Exit codes: `0` = no hole left open, `1` = holes remain, `2` = operational
+error. A directory (or more than one file) is **project mode** — swept serially
+in dependency order (imports first, so a filled import is visible to its
+dependents under `--write`; a holey module can't be imported until it is
+filled) with an aggregate footer. Other flags: `--timeout N` / `--hints K`
+(per-goal Mimer budget / graph-hint count), `--no-annotate`, `--repair` (add
+missing imports before probing), `--fixpoint` (with `--write`, re-sweep until a
+pass fills nothing new), `--ledger FILE` (one JSON line per goal), `--wall-budget N`.
+Config: [`.agda-auto.yml`](#agda-autoyml).
+
 ## Configuration (YAML)
 
 Each tool reads an optional YAML config. **Every key is a kebab-case
@@ -186,16 +220,31 @@ exit 1. A stderr breadcrumb (`<binary>: applied config from …`) fires
 when a config applies, suppressed by `--quiet`, `agda-unused`'s
 `--json-out`, and `agda-optimization`'s `--json`.
 
-Discovery is identical for all four binaries — first match wins:
+Discovery is identical for all five binaries — first match wins:
 
 1. `--config=PATH`
 2. `$AGDA_<TOOL>_CONFIG` — `AGDA_UNUSED_CONFIG`,
-   `AGDA_OPTIMIZATION_CONFIG`, `AGDA_GOALS_CONFIG`, `AGDA_EXPLORE_CONFIG`
+   `AGDA_OPTIMIZATION_CONFIG`, `AGDA_GOALS_CONFIG`, `AGDA_EXPLORE_CONFIG`,
+   `AGDA_AUTO_CONFIG`
 3. `./.agda-<tool>.yml` (or `.yaml`) in the current directory
 4. walking up to the first ancestor containing a `*.agda-lib`, and the
    dotfile there
 
 An empty file (`{}`) is valid; every key is optional.
+
+Every binary can print a documented, ready-to-edit config populated with
+its current defaults via `--show-defaults`; redirect it to bootstrap a
+file:
+
+```
+agda-unused --show-defaults > .agda-unused.yml
+```
+
+The four single-command tools emit every key at its default (scalars
+active, optional path/list keys as commented examples); `agda-optimization`
+emits a skeleton with a `global:` section plus one section per subcommand,
+each key documented with its default. Saved verbatim the dump is a no-op
+overlay, so you only edit what you want to change.
 
 ### `.agda-unused.yml`
 
@@ -207,6 +256,8 @@ An empty file (`{}`) is valid; every key is optional.
 | `kinds`    | `--kinds`          | Which finding kinds to report (YAML list or comma-string). |
 | `roots`    | positional `ROOTS` | Source roots to scan (YAML list).                          |
 | `exclude`  | `--exclude`        | Globs whose matching findings are dropped.                 |
+| `group-by`   | `--group-by`     | Group findings by `dir` / `file` / `kind`.                 |
+| `count-only` | `--count-only`   | Report per-group counts only, not each finding (bool).     |
 
 `json:` + `roots:` supply the required CLI inputs, so `agda-unused` can
 run with no arguments.
@@ -273,17 +324,29 @@ Mirrors the daemon's CLI flags.
   `agda-unused-bin`, `agda-bin` (else `$AGDA_BIN` / `$PATH`).
 - **Toggles (bool):** `no-term-hashes`, `no-signatures`,
   `normalise-signatures`, `show-implicit`, `no-auto-rebuild`, `no-watch`,
+  `no-incremental` (drop `agda-deps`' `--incremental` cache),
   `require-well-typed` (only promote a fully type-checking rebuild; holes
   still refresh), `strict-producer` (drop `--keep-going` for `agda-deps`'
-  `--incremental` cache; needs Agda ≥ 2.9), `enable-interact` (write-side
-  bridge), `no-auto-hints` (disable the Mimer probe `check` runs over
-  remaining goals), `inspect` (web inspector).
+  `--incremental` cache; needs Agda ≥ 2.9), `no-query-log` (disable the
+  per-`tools/call` telemetry appended to `<out-dir>/query-log.jsonl`),
+  `no-auto-resolve` (don't resolve a name to its sole near-match candidate),
+  `rank-idf` (IDF-weight the lemma ranker; off by default),
+  `premise-select` (blend k-NN premise selection into `find_lemma` / `auto`
+  ranking; off by default; needs edge provenance + signatures),
+  `enable-interact` (write-side bridge), `no-auto-hints` (disable the Mimer
+  probe `check` runs over remaining goals), `no-hint-batch` / `no-auto-ladder`
+  (auto-search A/B tuning toggles), `inspect` (web inspector).
 - **Values:** `min-term-depth` (int); `auto-hints-limit` (goals the
   check-time Mimer probe tries, default 3); `auto-hints-timeout` (Mimer
-  budget per goal, seconds, default 1); `control-port` (localhost `/check`
-  endpoint for the edit hook; needs `enable-interact`; `0` = off);
-  `inspect-port` (start port, default 7000; implies `inspect`); `agda-arg`
-  (extra flags for `agda --interaction-json`, e.g. `--safe`).
+  budget per goal, seconds, default 1); `auto-hints-lemmas` (top in-scope
+  graph hints seeded into that probe, default 2; `0` = plain Mimer);
+  `control-port` (localhost `/check` endpoint for the edit hook; needs
+  `enable-interact`; `0` = off); `inspect-port` (start port, default 7000;
+  implies `inspect`); `agda-arg` (extra flags for `agda --interaction-json`,
+  e.g. `--safe`); `interaction-heap-mb` (per-session `agda` heap cap in MB;
+  `0` = unset); `max-interaction-sessions` (interaction session-pool cap,
+  default 2); `interaction-idle-timeout` (seconds before an idle session is
+  reaped; `0` = never).
 
 **Multiple entry modules.** `--entry` is repeatable on the CLI and the
 config accepts an `entries:` list alongside the back-compat scalar
@@ -344,13 +407,29 @@ agda-explore query brief name=Consensus.roundLeader --graph out/deps.json
 agda-explore query search query=toWitness --graph out/deps.json --json | jq '.items[].name'
 ```
 
+### `.agda-auto.yml`
+
+Mirrors the CLI flags (kebab-case): `write`, `annotate`, `timeout`, `hints`,
+`graph`, `overlay-graphs` (list), `json`, `include-paths` (list), `agda-bin`,
+`agda-args` (list), `premise-select`, `rank-idf`, `no-hint-batch`,
+`no-auto-ladder`, `project`, `wall-budget`, `repair`, `fixpoint`, `ledger`.
+
+```yaml
+timeout: 5
+hints: 6
+graph: out/deps.json
+annotate: true
+```
+
 ## Cross-repo runtime link
 
 - **`agda-explore` → `agda-deps`.** Resolution precedence:
   `--agda-deps-bin` > `$AGDA_DEPS_BIN` > `$PATH`. Put `agda-deps` on
   `$PATH` (or pin it). Preloaded mode (an existing `graph.json`) needs no
   `agda-deps`.
-- **`agda-goals` → `agda`.** Needs `agda` on `$PATH`.
+- **`agda-goals` / `agda-auto` → `agda`.** Need `agda` on `$PATH` (or, for
+  `agda-auto`, `--agda-bin`); neither runs `agda-deps` (they read a graph, if
+  any, that already exists).
 
 ## The wire contract
 
@@ -369,6 +448,11 @@ agda-explore query search query=toWitness --graph out/deps.json --json | jq '.it
   `where` before `nodeKeyVersion` 3, still decoded for old caches) and,
   under the producer's `--with-signatures`, an optional per-definition
   `"type"`.
+- Optional `moduleOptionEscapes` (`{ module → [flag] }`) carries the
+  file-level `{-# OPTIONS #-}` soundness escapes (`--type-in-type`,
+  `--no-positivity-check`, `--rewriting`, …); the consumer folds each into
+  its enclosed defs' unsafe taint, feeding the `search` / `roots` `unsafe=`
+  audit.
 
 A machine-readable JSON Schema (draft 2020-12) for the expanded form
 lives in the producer repo at `schema/graph-v2-expanded.schema.json`;
