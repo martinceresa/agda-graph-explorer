@@ -1,8 +1,9 @@
 # Examples
 
-Runnable recipes for the consumer binaries (`agda-unused`,
-`agda-optimization`). Full flag reference: [README.md](README.md). Design
-rationale and default-value evidence: [Changelog.md](Changelog.md).
+Runnable recipes for all five binaries (`agda-unused`, `agda-optimization`,
+`agda-goals`, `agda-explore`, `agda-auto`). Full flag reference:
+[README.md](README.md). YAML config: [Configuration.md](Configuration.md).
+Design rationale and default-value evidence: [Changelog.md](Changelog.md).
 
 Every tool consumes the **expanded** v2 `graph.json` from `agda-deps` (a
 separate repo). Put `agda-deps` on your `$PATH` and produce the graph first.
@@ -376,5 +377,89 @@ agda-optimization debt          /tmp/opt/deps.json
 agda-optimization ledger        /tmp/opt/deps.json
 ```
 
-For YAML configuration, see
-[README.md § Configuration (YAML)](README.md#configuration-yaml).
+---
+
+## `agda-goals` — bucket open goal states
+
+Needs `agda` on `$PATH`. Drives `agda --interaction-json` over the roots via a
+pool of persistent processes, canonicalises each open goal type, and buckets by
+hash to surface recurring missing lemmas.
+
+```bash
+cabal run agda-goals -- -i src/ src/                       # human report
+cabal run agda-goals -- -i src/ --format=json --top-n=20 src/ | jq
+```
+
+One process per RTS capability; cap the pool with `+RTS -NK -RTS`. Output is
+reassembled in input order, so it is byte-identical between `-N1` and `-NK`.
+Config: [`.agda-goals.yml`](Configuration.md#agda-goalsyml).
+
+---
+
+## `agda-explore` — interactive graph server for agents
+
+Needs `agda-deps` on `$PATH` for live regeneration (preloaded mode does not).
+Three ways to run it:
+
+```bash
+# 1. Daemon (stdio MCP server) — regenerates the graph on the fly via agda-deps:
+cabal run agda-explore -- --project . --entry src/Everything.agda -i src/
+
+# 1b. Preloaded from an existing graph (no agda-deps needed):
+cabal run agda-explore -- --graph out/deps.json
+
+# 2. One-shot read query (no daemon) — for scripting / CI:
+cabal run agda-explore -- query brief  name=Data.Nat._+_ --graph out/deps.json
+cabal run agda-explore -- query search query=toWitness   --graph out/deps.json --json \
+  | jq '.items[].name'
+
+# 3. Web inspector (opt-in localhost page over SSE):
+cabal run agda-explore -- --project . --inspect            # → http://127.0.0.1:7000
+```
+
+Read-side tools: `brief`, `locate`, `callers`, `callees`, `impact`, `path`,
+`roots`, `type_of`, `similar_types`, `similar_bodies`, `find_lemma`, `search`,
+`unused`, `rebuild`, `status`. `brief name=X` is a one-call orientation bundle
+(location + type + callers/callees + body-twins); `search` / `callers` /
+`callees` accept `format:json`.
+
+Add `--enable-interact` (needs `agda` on `$PATH`) for the Agda-validated
+write-side bridge — every mutator returns a unified diff and only writes under
+`write:true`, under a hard zero-axiom contract:
+
+```bash
+cabal run agda-explore -- --project . --enable-interact
+```
+
+Write-side tools: `load`, `goal_brief`, `inspect`, `auto`, `construct`,
+`scratch`, `check`, `give_file`, `new_module`, `lemmas`, `repair`. Full detail
+(and the Claude Code plugin bundling this server): [`plugin/`](plugin/README.md).
+Config: [`.agda-explore.yml`](Configuration.md#agda-exploreyml).
+
+---
+
+## `agda-auto` — batch hole-filling
+
+Needs `agda` on `$PATH` (or `--agda-bin`). Runs the same Mimer + graph-hint
+ladder as `agda-explore`'s `auto` over every open hole. A graph (`--graph`, else
+a discovered `./deps.json` / `./.agda-explore/deps.json`) supplies lemma hints;
+without one it runs plain Mimer.
+
+```bash
+cabal run agda-auto -- File.agda                       # diff + per-hole report
+cabal run agda-auto -- --write File.agda               # apply, annotate the rest
+cabal run agda-auto -- --graph out/deps.json src/      # project sweep (dep order)
+cabal run agda-auto -- --json File.agda | jq           # structured report
+```
+
+Exit codes: `0` = no hole left open, `1` = holes remain, `2` = operational
+error. A directory (or more than one file) is **project mode** — swept serially
+in dependency order (imports first). Useful flags: `--timeout N` / `--hints K`
+(per-goal Mimer budget / graph-hint count), `--no-annotate`, `--repair` (add
+missing imports before probing), `--fixpoint` (with `--write`, re-sweep until a
+pass fills nothing new), `--ledger FILE`. Config:
+[`.agda-auto.yml`](Configuration.md#agda-autoyml).
+
+---
+
+For YAML configuration of every tool, see [Configuration.md](Configuration.md).
