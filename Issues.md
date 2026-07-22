@@ -9,35 +9,6 @@ for deferred/refused ideas see [Backlog.md](Backlog.md) and
 
 ## Open
 
-### I7 — `agda-optimization` parallel subcommands crash under `-N` on large graphs
-
-The `parListChunk rdeepseq` reductions in the analyses corrupt the heap when run
-multicore on a stdlib-scale graph. Not Phase-1-specific: reproduced on both the
-existing `polyglot` and the new `hint-bench` subcommand.
-
-Repro (GHC 9.12.4, `agda-optimization` built `-threaded -with-rtsopts=-N`, on a
-~5–7k-def expanded sig graph such as MCPBenchArena's `live-sig.json` /
-`midproj-sig.json`):
-
-```
-agda-optimization polyglot   <large-sig>.json          # SIGSEGV (exit 139)
-agda-optimization hint-bench <large-sig>.json --strategy all   # RTS abort:
-    internal error: ARR_WORDS object (0x…) entered!  (SIGABRT, exit 134)
-```
-
-Both faults are the same class (heap object entered as a closure). `+RTS -N1`
-runs clean and deterministic on the identical input, so it is a
-parallel-runtime interaction, not a decode or logic error (a schema mismatch
-would be a clean decode failure). The small committed fixtures (`test/deps.json`,
-`.agda-explore/deps.json`) do not trigger it — it is scale-gated.
-
-Scope: `agda-optimization` only (the `agda-explore` daemon and the offline test
-suite are single-threaded here and unaffected). Workaround: run the affected
-subcommands with `+RTS -N1`. Root cause unconfirmed — either a GHC 9.12 `-N`
-bug on this heap shape or an unsafe sharing pattern in the shared reduction
-helpers; needs bisection (try a narrower `-N2`, a newer GHC, and `-fno-omit-yields`)
-before deciding between an upstream GHC report and a code fix.
-
 ### I3 — where grep+agda beat the MCP (the "anti-benchmark")
 
 Not a single defect — a documented trade-off of a snapshot graph index. An

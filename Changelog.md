@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### I7 resolved — `agda-optimization` `-N` crash root-caused to a GHC 9.12.x runtime bug (2026-07-22)
+
+- The multicore `agda-optimization` SIGSEGV / `ARR_WORDS`/`TSO object entered!` faults (I7) are a **GHC 9.12.x parallel-runtime heap-corruption bug**, not an application defect: no unsafe code on the parallel paths, the fault needs ≥2 capabilities, is scale-gated (large live heap), and its rate is proportional to GC frequency. Bisection on the 278 MB Jolteon-FastBFT union graph (GHC 9.12.4): default `-N` `polyglot --json` ≈13%, `motif`/`load-bearing`/`gravity` ≈100%, `-N1` clean, `-qg` (serial GC) 100%, `-c` (compacting) 87%. **GHC 9.14.1 — the toolchain CI and the README already pin — is clean (0/N across every crasher), so building on the supported 9.14.x resolves it; no code change.**
+- `-A64m` (large nursery) was rejected as the fix: it cuts GC count enough to mask the low-allocation subcommands (`polyglot`) but `motif`/`load-bearing`/`gravity` still crash ≈90% under it. The only clean workaround for anyone stuck on GHC 9.12.x is `+RTS -N1` (single-capability, deterministic, byte-identical output).
+
 ### `--show-defaults`: emit a starter config for every binary (2026-07-22)
 
 - All five executables gain `--show-defaults`: print a documented `.agda-<tool>.yml` populated with the current defaults to stdout, then exit (before any config discovery / graph build, so it works from anywhere). Redirect it to bootstrap a config — `agda-unused --show-defaults > .agda-unused.yml`.
