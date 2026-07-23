@@ -1,0 +1,109 @@
+# Live canary for agda-graph-explorer — the ONLY workflow that installs `agda`.
+#
+# The offline ci.yml never runs Agda (every tool is a pure consumer). This
+# workflow exercises the agda-dependent paths that ci.yml intentionally skips:
+# the agda-auto hole-filling smoke, the agda-goals -N1/-NK determinism, the
+# --interaction-json protocol-drift check (regen the golden transcripts and
+# fail if they changed), and the plugin edit-hook Phase-2 (a real warm check
+# over the control endpoint).
+#
+# It is a CANARY, not a PR gate: manual (workflow_dispatch) + a weekly cron.
+# A failure notifies but does not block merges. Installing Agda from Hackage is
+# slow on a cold cache; the cabal-store cache makes weekly runs minutes.
+name: CI (live, agda)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1'   # Mondays 06:00 UTC
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check out the repository
+      uses: actions/checkout@v4
+
+    - name: Set up Haskell (GHC 9.14.1 + cabal 3.16)
+      uses: haskell-actions/setup@v2
+      with:
+        ghc-version: '9.14.1'
+        cabal-version: '3.16'
+
+    - name: Cache cabal store (incl. the built Agda)
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cabal/store
+          ~/.cabal/packages
+          ~/.local/bin
+          dist-newstyle
+        key: ${{ runner.os }}-live-ghc9.14.1-${{ hashFiles('cabal.project', 'agda-graph-explorer.cabal') }}
+        restore-keys: |
+          ${{ runner.os }}-live-ghc9.14.1-
+
+    - name: Update Hackage index
+      run: cabal update
+
+    - name: Install Agda (pinned)
+      # A slow first run; cached across weekly runs. Pin a version whose
+      # --interaction-json wire shape our golden transcripts were regenerated
+      # against (test/interaction/<version>/).
+      run: |
+        cabal install Agda-2.8.0 --installdir="$HOME/.local/bin" --overwrite-policy=always || \
+          cabal install Agda      --installdir="$HOME/.local/bin" --overwrite-policy=always
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+    - name: Build all targets
+      run: cabal build
+
+    - name: agda present
+      run: agda --version
+
+    - name: agda-explore doctor (live — agda + agda resolution)
+      run: cabal run -v0 agda-explore -- doctor --graph test/deps.json --enable-interact
+
+    - name: agda-auto — hole-filling smoke
+      run: bash test/auto/smoke.sh
+
+    - name: agda-goals — determinism (-N1 == -N4)
+      # Byte-identical goal buckets across pool sizes is the driver's acceptance
+      # invariant; ci.yml can't run it (needs agda).
+      run: |
+        cabal run -v0 agda-goals -- -i test/interaction/src test/interaction/src +RTS -N1 -RTS > /tmp/goals.n1 2>/dev/null || true
+        cabal run -v0 agda-goals -- -i test/interaction/src test/interaction/src +RTS -N4 -RTS > /tmp/goals.n4 2>/dev/null || true
+        diff /tmp/goals.n1 /tmp/goals.n4 && echo "agda-goals deterministic" \
+          || { echo "agda-goals NON-DETERMINISTIC across -N1/-N4"; exit 1; }
+
+    - name: --interaction-json protocol drift (regen golden transcripts)
+      # Regenerate the committed transcripts against the installed agda; any
+      # diff means the wire shape changed (an Agda bump) — the early warning
+      # that today only surfaces when a human notices.
+      run: |
+        if [ -f test/interaction/regen.sh ]; then
+          bash test/interaction/regen.sh || { echo "regen failed"; exit 1; }
+          git diff --exit-code test/interaction/ \
+            || { echo "PROTOCOL DRIFT: golden transcripts changed — review + commit the regen."; exit 1; }
+        fi
+
+    - name: Edit hook Phase-2 (control endpoint warm check)
+      # Start the daemon with a control port, curl /check over a fixture source,
+      # and assert a verdict — the same path the plugin PostToolUse hook uses.
+      run: |
+        set -e
+        out=test/interaction/proj
+        cabal run -v0 agda-explore -- --project "$out" --enable-interact --control-port 7180 \
+          > /tmp/daemon.log 2>&1 &
+        daemon=$!
+        trap 'kill $daemon 2>/dev/null || true' EXIT
+        # Wait for the control-port file to appear (bounded).
+        pf="$out/.agda-explore/control-port"
+        for _ in $(seq 1 60); do [ -r "$pf" ] && break; sleep 1; done
+        [ -r "$pf" ] || { echo "control-port file never appeared"; cat /tmp/daemon.log; exit 1; }
+        port="$(cat "$pf")"
+        resp="$(curl -sf --max-time 90 --get "http://127.0.0.1:$port/check" \
+                  --data-urlencode "file=$out/Nat.agda" || true)"
+        echo "$resp"
+        printf '%s' "$resp" | grep -qE '✓|✗' \
+          || { echo "control /check returned no verdict"; cat /tmp/daemon.log; exit 1; }
+        echo "edit-hook Phase-2 OK"
