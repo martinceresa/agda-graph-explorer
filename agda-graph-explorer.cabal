@@ -32,8 +32,12 @@ library agda-graph
                     AgdaGraph.PremiseBench
                     AgdaGraph.PremiseSelect
                     AgdaGraph.ConfigCore
+                    AgdaGraph.Version
+                    AgdaGraph.Completion
                     AgdaGraph.Interaction.Protocol
                     AgdaGraph.Interaction.Iotcm
+  other-modules:    Paths_agda_graph_explorer
+  autogen-modules:  Paths_agda_graph_explorer
   build-depends:    base >= 4.10 && < 4.23,
                     aeson >= 2.0 && < 3,
                     bytestring,
@@ -119,6 +123,7 @@ executable agda-explore
                        AgdaMcp.Query
                        AgdaMcp.Tools
                        AgdaMcp.ToolDef
+                       AgdaMcp.Doctor
                        AgdaMcp.Inspect
                        AgdaMcp.Control
                        AgdaInteract.Session

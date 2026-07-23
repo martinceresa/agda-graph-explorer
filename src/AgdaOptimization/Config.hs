@@ -182,9 +182,10 @@ lookupKeyTextList section obj key =
 -- | Apply the @global:@ section over a seed 'GlobalOpts'. Recognised
 -- keys:
 --
---   * @json: true|false@ — sets 'gOutFormat'. (When @false@, falls back
---     to 'OutHuman'; preserves what the seed already had if absent.)
---   * @out: PATH@        — sets 'gOutPath'.
+--   * @format: human|json@ — sets 'gOutFormat' (canonical).
+--   * @json: true|false@   — alias of @format@ (kept for compatibility).
+--     Canonical @format@ wins when both are present.
+--   * @out: PATH@          — sets 'gOutPath'.
 --
 -- Unknown keys are silently ignored (forward-compatible).
 applyGlobal :: Maybe A.Object -> GlobalOpts -> Either String GlobalOpts
@@ -192,15 +193,22 @@ applyGlobal Nothing    g = Right g
 applyGlobal (Just obj) g0 = do
   let section = "global"
   g1 <- do
-    mJson <- lookupKey section obj "json" :: Either String (Maybe Bool)
-    pure $ case mJson of
-      Just True  -> g0 { gOutFormat = OutJson }
-      Just False -> g0 { gOutFormat = OutHuman }
-      Nothing    -> g0
+    mJson   <- lookupKey section obj "json" :: Either String (Maybe Bool)
+    mFormat <- lookupKeyEnum section obj "format" parseFormat
+    pure $ case (mFormat, mJson) of
+      (Just f,  _)         -> g0 { gOutFormat = f }
+      (Nothing, Just True)  -> g0 { gOutFormat = OutJson }
+      (Nothing, Just False) -> g0 { gOutFormat = OutHuman }
+      (Nothing, Nothing)    -> g0
   g2 <- do
     mOut <- lookupKey section obj "out" :: Either String (Maybe FilePath)
     pure $ case mOut of
       Just p  -> g1 { gOutPath = Just p }
       Nothing -> g1
   pure g2
+  where
+    parseFormat :: String -> Either String OutFormat
+    parseFormat "json"  = Right OutJson
+    parseFormat "human" = Right OutHuman
+    parseFormat other   = Left ("unknown format: " ++ other ++ " (want human|json)")
 

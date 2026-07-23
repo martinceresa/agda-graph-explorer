@@ -30,6 +30,7 @@ import           System.Exit          ( exitFailure, exitSuccess, exitWith
 import           System.IO            ( hPutStrLn, stderr )
 
 import           AgdaGraph.ConfigCore ( extractConfigFlag )
+import           AgdaGraph.Version    ( numericVersion, versionLine )
 import           AgdaGoals.Bucket     ( Bucket(..), GoalOccurrence(..)
                                       , bucketGoals, rankBuckets )
 import           AgdaGoals.Canon      ( CanonicalGoal(..) )
@@ -93,6 +94,8 @@ usage = unlines
   , "      --quiet          suppress the 'applied config' stderr breadcrumb."
   , "      --verbose        echo the IOTCM command and agda's raw output to stderr."
   , "  -h, --help           print this help and exit."
+  , "  -V, --version        print the agda-goals version and exit."
+  , "      --numeric-version  print just the version number and exit."
   , ""
   , "ENVIRONMENT:"
   , "  AGDA_GOALS_AGDA_BIN  fallback for --agda-bin when neither flag nor config set it."
@@ -191,8 +194,10 @@ configTarget = ConfigTarget
 main :: IO ()
 main = do
   rawArgv <- getArgs
-  -- `--show-defaults` prints a starter config and exits before any config
-  -- discovery/load, so it works with no project / a broken config present.
+  -- `--version` / `--numeric-version` / `--show-defaults` short-circuit before
+  -- any config discovery/load, so they work with no project / a broken config.
+  when ("--numeric-version" `elem` rawArgv) (putStrLn numericVersion >> exitSuccess)
+  when (any (`elem` rawArgv) ["--version", "-V"]) (putStrLn (versionLine "agda-goals") >> exitSuccess)
   when ("--show-defaults" `elem` rawArgv) (putStr defaultsYaml >> exitSuccess)
   let (explicitCfg, argv) = extractConfigFlag rawArgv
 
@@ -212,8 +217,7 @@ main = do
     Left ""  -> putStrLn usage >> exitSuccess
     Left err -> do
       hPutStrLn stderr ("agda-goals: " ++ err)
-      hPutStrLn stderr ""
-      hPutStrLn stderr usage
+      hPutStrLn stderr "Try 'agda-goals --help'."
       exitFailure
     Right o  -> pure o
 

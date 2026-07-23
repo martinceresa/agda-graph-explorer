@@ -41,6 +41,7 @@ module AgdaInteract.Session
   , closeSession
   , burstReplies
   , clampRemainingMicros
+  , agdaMissingHint
   ) where
 
 import           Control.Concurrent       (ThreadId, forkIO, killThread)
@@ -146,6 +147,14 @@ promptBS = BSC.pack "JSON> "
 -- | Spawn Agda and wait out its startup readiness prompt. Returns a
 -- session ready to receive commands, or a diagnostic if Agda could not be
 -- started / never reached a prompt.
+-- | The one-line hint appended when Agda can't be spawned, shared by every
+-- consumer (agda-goals, agda-auto, the bridge) so the guidance is uniform and
+-- pinnable. Deliberately env-var-agnostic (the per-tool flag/env names differ).
+agdaMissingHint :: Text
+agdaMissingHint =
+  "hint: install Agda (https://agda.readthedocs.io/en/latest/getting-started/installation.html), \
+  \put it on $PATH, or pass --agda-bin."
+
 startSession :: SessionConfig -> FilePath -> IO (Either Text Session)
 startSession cfg file = do
   let args = scRtsArgs cfg ++ ("--interaction-json" : scExtraArgs cfg)
@@ -155,7 +164,7 @@ startSession cfg file = do
          :: IO (Either SomeException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
   case r of
     Left e -> pure (Left ("could not start agda (" <> T.pack (scAgdaBin cfg)
-                            <> "): " <> T.pack (show e)))
+                            <> "): " <> T.pack (show e) <> "\n  " <> agdaMissingHint))
     Right (Just hin, Just hout, Just herr, ph) -> do
       hSetBuffering hin LineBuffering
       hSetEncoding  hin utf8

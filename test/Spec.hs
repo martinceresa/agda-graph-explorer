@@ -19,7 +19,7 @@ import qualified Data.ByteString.Lazy.Char8 as BLC
 import qualified Data.Text.Encoding  as TE
 import qualified Data.Yaml            as Y
 import           Data.IORef
-import           Data.List            ( elemIndex, intercalate )
+import           Data.List            ( elemIndex, intercalate, isInfixOf )
 import           Data.Maybe           ( listToMaybe, mapMaybe )
 import           Data.Text            ( Text )
 import qualified Data.Text            as T
@@ -45,7 +45,7 @@ import           AgdaInteract.Guard
 import           AgdaInteract.Literate
 import           AgdaInteract.GoalId
 import           AgdaInteract.Registry ( contentStamp, shouldKeepGoalIds )
-import           AgdaInteract.Session  ( clampRemainingMicros )
+import           AgdaInteract.Session  ( clampRemainingMicros, agdaMissingHint )
 import           AgdaInteract.Edit
 import           AgdaInteract.Batch    ( Step(..), wildcardCheck, allGiveSteps
                                        , checkInspectArgs, checkScratchOp
@@ -68,7 +68,7 @@ import           Data.Aeson            ( Value, eitherDecode, encode, object, (.
 import qualified Data.Map.Strict       as Map
 import           AgdaGraph.Schema      ( ExpandedGraph(..), Definition(..), ReExport(..)
                                        , State(..), Kind(..), Access(..)
-                                       , loadExpandedGraph )
+                                       , loadExpandedGraph, explainDecodeError )
 import           AgdaGraph.Index       ( buildIndex, lookupId, unsafeDeps, defAt
                                        , idxRealCount, moduleDependencyOrder )
 import           AgdaUnused.Analysis   ( Finding(..), FindingKind(..), analyse )
@@ -124,10 +124,46 @@ main = do
   sequence_ (map ($ fails) moduleTopoTests)
   premiseBenchTests fails
   replayTests fails
+  schemaErrorTests fails
   n <- readIORef fails
   if n == 0
     then putStrLn "all interaction-bridge tests passed" >> exitSuccess
     else hPutStrLn stderr (show n ++ " test(s) failed") >> exitFailure
+
+----------------------------------------------------------------------
+-- Graph-load / decode error messages (§2.1). Pins the actionable
+-- diagnostics byte-for-byte so future wording changes are deliberate.
+
+schemaErrorTests :: IORef Int -> IO ()
+schemaErrorTests ref = do
+  -- IO: a missing file yields the "generate one" guidance, not a raw
+  -- IOException show.
+  eMissing <- loadExpandedGraph "test/__definitely_absent__.json"
+  check "load error: missing file is actionable"
+    (isLeftWith "file does not exist. Generate one with `agda-deps" eMissing) ref
+  -- IO: a non-JSON payload (an .agda source) is sniffed before aeson.
+  eNotJson <- loadExpandedGraph "test/interaction/proj/Nat.agda"
+  check "load error: non-JSON payload is sniffed"
+    (isLeftWith "not JSON (starts with '-')" eNotJson) ref
+  -- pure: a generic aeson error is wrapped with the producer pointer.
+  checkEq "decode error: generic aeson error is wrapped"
+    "not an expanded v2 graph.json (unexpected token). Expected the output of `agda-deps --format=json --json-mode=expanded`."
+    (explainDecodeError "unexpected token") ref
+  -- pure: our own diagnostics pass through verbatim (never double-framed).
+  check "decode error: own schema-v diagnostic passes through"
+    (let m = "Error in $: expected schema v: 2, got: 1"
+     in explainDecodeError m == m) ref
+  check "decode error: own packed-mode diagnostic passes through"
+    (let m = "Error in $: this graph is --json-mode=packed (…)"
+     in explainDecodeError m == m) ref
+  -- §2.4: the shared missing-agda hint names the installer + the escape hatch.
+  check "missing-agda hint names the installer + --agda-bin"
+    (T.isInfixOf "agda.readthedocs.io" agdaMissingHint
+       && T.isInfixOf "--agda-bin" agdaMissingHint) ref
+  where
+    isLeftWith :: String -> Either String a -> Bool
+    isLeftWith needle (Left m)  = needle `isInfixOf` m
+    isLeftWith _      (Right _) = False
 
 ----------------------------------------------------------------------
 -- Guard.
@@ -899,6 +935,21 @@ autoCliTests =
       (AA.aoFiles <$> AA.parseArgs ["A.agda", "--write", "B.agda"] AA.defaultOpts)
   , check "--graph sets the path"
       (rOr False ((== Just "d.json") . AA.aoGraph) (AA.parseArgs ["--graph", "d.json"] AA.defaultOpts))
+  -- §1.1: --format is the canonical output flag; --json is its alias.
+  , check "--format json sets aoJson"
+      (rOr False AA.aoJson (AA.parseArgs ["--format", "json"] AA.defaultOpts))
+  , check "--format human clears aoJson"
+      (rOr True (not . AA.aoJson) (AA.parseArgs ["--format", "human"] AA.defaultOpts))
+  , check "--format=json via preprocess"
+      (rOr False AA.aoJson (AA.parseArgs (AA.preprocess ["--format=json"]) AA.defaultOpts))
+  , check "--json alias still sets aoJson"
+      (rOr False AA.aoJson (AA.parseArgs ["--json"] AA.defaultOpts))
+  , check "--format bogus is an error"
+      (isLeft (AA.parseArgs ["--format", "bogus"] AA.defaultOpts))
+  , check "config format: json decodes to aoJson"
+      (case Y.decodeEither' (TE.encodeUtf8 (T.pack "format: json\n")) of
+         Left _   -> False
+         Right fc -> AA.aoJson (AC.applyConfig fc AA.defaultOpts))
   , check "unknown flag is an error"
       (isLeft (AA.parseArgs ["--nope"] AA.defaultOpts))
   , check "a short unknown flag is an error"

@@ -35,6 +35,16 @@ on disk — reconnect (`/mcp`) to pick it up.
 If a query reports "no entry configured", set `AGDA_EXPLORE_ENTRY` (entry
 module) and `AGDA_EXPLORE_INCLUDE` (include dir), or pass `--graph`.
 
+**Tool tiers.** The plugin advertises the **core** tool set by default: the
+read tools plus the validate/diagnose loop (`load`, `goal_brief`, `inspect`,
+`check`, `repair`, `lemmas`). The extra structural reads (`path`, `roots`,
+`similar_types`, `similar_bodies`) and the **authoring** tools (`auto`,
+`construct`, `scratch`, `give_file`, `new_module`) are documented below but
+appear in `tools/list` only under `--tool-tier full` (set it in the server's
+`.mcp.json` args). If a tool below isn't listed, you're on `core` — the core
+loop (query → edit → `check` → `repair`) covers most work; switch to full when
+you specifically want hole-driving or file authoring.
+
 ## Which tool for which question
 
 | You want to know…                                   | Use            |

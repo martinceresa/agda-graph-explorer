@@ -23,15 +23,21 @@ module AgdaGraph.Schema
   , Provenance(..)
   , ExpandedGraph(..)
   , loadExpandedGraph
+  , explainDecodeError
   ) where
 
 import           Control.DeepSeq      ( NFData(..) )
 import           Control.Monad        ( when )
 import           Control.Exception    ( IOException, try )
+import           Data.Char            ( isSpace )
+import           Data.List            ( isInfixOf )
+import           System.IO.Error      ( isDoesNotExistError, isPermissionError
+                                      , ioeGetErrorString )
 import qualified Data.Aeson           as A
 import           Data.Aeson           ( FromJSON(..), withObject, withText
                                       , (.:), (.:?), (.!=) )
 import qualified Data.ByteString      as BS
+import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Map.Strict      as M
 import           Data.Text            ( Text )
 import qualified Data.Text            as T
@@ -507,12 +513,58 @@ lengthMismatch xs ys =
     || or (zipWith (\a b -> length a /= length b) xs ys)
 
 -- | Read an expanded-mode @graph.json@ from disk. The error case carries
--- a human-readable message (no Haskell exception trace) for BOTH a
--- failed read (missing / unreadable file) and a failed decode, so every
--- consumer gets a clean diagnostic instead of an uncaught 'IOException'.
+-- a human-readable, ACTIONABLE message (no Haskell exception trace) for a
+-- failed read (missing / unreadable file), a non-JSON payload, and a
+-- failed decode, so every consumer gets a clean diagnostic instead of an
+-- uncaught 'IOException' or a bare aeson token error. The message never
+-- includes the path — callers prefix @"<tool>: failed to read <path>: "@.
+--
+-- The parser's own actionable diagnostics (wrong schema @v@, packed mode,
+-- a parallel-array length mismatch) are recognised and passed through
+-- verbatim rather than re-wrapped, so a good message is never double-framed.
 loadExpandedGraph :: FilePath -> IO (Either String ExpandedGraph)
 loadExpandedGraph p = do
   r <- try (BS.readFile p) :: IO (Either IOException BS.ByteString)
   pure $ case r of
-    Left e   -> Left ("cannot read graph file: " ++ show e)
-    Right bs -> A.eitherDecodeStrict' bs
+    Left e   -> Left (readErr e)
+    Right bs
+      -- Sniff the first non-whitespace byte: anything but '{' isn't the
+      -- JSON object we expect (catches "--graph pointed at an .agda file").
+      | Just c <- firstNonWs bs, c /= '{' ->
+          Left ("not JSON (starts with " ++ show c ++ "). Expected the expanded \
+                \v2 graph.json from `agda-deps --format=json --json-mode=expanded`.")
+      | otherwise -> case A.eitherDecodeStrict' bs of
+          Right g   -> Right g
+          Left err  -> Left (explainDecodeError err)
+  where
+    readErr :: IOException -> String
+    readErr e
+      | isDoesNotExistError e =
+          "file does not exist. Generate one with `agda-deps --format=json \
+          \--json-mode=expanded -i <src> -o <out> <Entry.agda>` (see README \
+          \'Producing the input graph'), or point --graph at an existing \
+          \expanded deps.json."
+      | isPermissionError e = "permission denied (" ++ ioeGetErrorString e ++ ")."
+      | otherwise           = "cannot read graph file (" ++ ioeGetErrorString e ++ ")."
+
+    firstNonWs :: BS.ByteString -> Maybe Char
+    firstNonWs = fmap fst . BSC.uncons . BSC.dropWhile isSpace
+
+-- | Turn a raw aeson decode error into the user-facing message. The
+-- parser's own @fail@ diagnostics (wrong schema @v@, packed mode, a
+-- parallel-array length mismatch) are already actionable, so they pass
+-- through verbatim; anything else is wrapped with a pointer to the
+-- producer command so a bare token error can't strand a new user.
+-- Pure + exported so the offline suite can pin both branches byte-for-byte.
+explainDecodeError :: String -> String
+explainDecodeError err
+  | isOwnDiagnostic err = err
+  | otherwise =
+      "not an expanded v2 graph.json (" ++ err ++ "). Expected the output of \
+      \`agda-deps --format=json --json-mode=expanded`."
+  where
+    -- Stable substrings of our own @fail@ messages (aeson prefixes them
+    -- with "Error in $: ").
+    isOwnDiagnostic :: String -> Bool
+    isOwnDiagnostic s = any (`isInfixOf` s)
+      [ "expected schema v:", "--json-mode=", "length (", "inner-array lengths" ]

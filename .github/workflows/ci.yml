@@ -50,7 +50,7 @@ jobs:
     - name: Dependency drift check
       run: cabal build --dry-run
 
-    - name: Build all targets (library + 4 executables)
+    - name: Build all targets (library + 5 executables)
       run: cabal build
 
     - name: agda-optimization — smoke over the fixture
@@ -73,21 +73,88 @@ jobs:
         done
         echo "determinism OK"
 
-    - name: agda-unused — smoke over the fixture
-      # test/deps.json is a producer-side fixture whose moduleFiles are
-      # absolute paths into the agda-deps repo, so source-scanning this
-      # consumer repo can never match them — and agda-unused now hard-errors
-      # on such a mis-scoped run (scanned files, none matched the graph)
-      # rather than printing a deceptive `# total: 0`. Scan an isolated dir
-      # with no .agda sources: this exercises load + parse + emit (exit 0)
-      # without tripping the guard, and stays green regardless of any
-      # incidental .agda fixtures elsewhere in the tree (e.g. test/interaction).
+    - name: agda-unused — finding smoke (path-rebased fixture)
+      # test/unused/ ships toy sources + deps.json.in with a @ROOT@ placeholder;
+      # rebasing it to the checkout path yields a graph whose moduleFiles match
+      # the sources, so agda-unused reports its known duplicate-using finding.
+      # Deterministic, no agda needed (agda-unused is a pure JSON consumer), and
+      # exercises the canonical --graph flag.
       run: |
-        tmp="$(mktemp -d)"
-        cabal run -v0 agda-unused -- --json=test/deps.json --json-out "$tmp"
+        root="$(pwd)/test/unused"
+        sed "s|@ROOT@|$root|g" test/unused/deps.json.in > /tmp/unused-deps.json
+        out="$(cabal run -v0 agda-unused -- --graph=/tmp/unused-deps.json --count-only "$root")"
+        echo "$out"
+        echo "$out" | grep -q "# total: 1 finding" \
+          || { echo "expected exactly 1 finding from the fixture"; exit 1; }
+        echo "agda-unused finding smoke OK"
 
     - name: agda-explore — binary smoke
       run: cabal run -v0 agda-explore -- --version
+
+    - name: Version sync (cabal == plugin.json == every --numeric-version)
+      # One version source (AgdaGraph.Version off Paths): all five binaries and
+      # the plugin manifest must report the same version as the .cabal field.
+      run: |
+        cabal_v=$(grep -E '^version:' agda-graph-explorer.cabal | awk '{print $2}')
+        plugin_v=$(jq -r .version plugin/.claude-plugin/plugin.json)
+        echo "cabal=$cabal_v plugin=$plugin_v"
+        [ "$cabal_v" = "$plugin_v" ] \
+          || { echo "plugin.json version ($plugin_v) != cabal ($cabal_v)"; exit 1; }
+        for e in agda-unused agda-goals agda-optimization agda-explore agda-auto; do
+          v=$(cabal run -v0 "$e" -- --numeric-version)
+          [ "$v" = "$cabal_v" ] \
+            || { echo "$e --numeric-version ($v) != cabal ($cabal_v)"; exit 1; }
+        done
+        echo "version sync OK"
+
+    - name: agda-auto / agda-goals — offline CLI smoke
+      # These two need `agda` to do real work (skipped in CI), but their pure
+      # CLI paths (help / version / show-defaults) must stay green.
+      run: |
+        for f in --help --version --numeric-version --show-defaults; do
+          cabal run -v0 agda-auto  -- "$f" >/dev/null
+          cabal run -v0 agda-goals -- "$f" >/dev/null
+        done
+        echo "auto/goals CLI smoke OK"
+
+    - name: README quickstart runs (doc-rot guard)
+      # The exact "Try it in 30 seconds" block from README.md, over the fixture.
+      run: |
+        cabal run -v0 agda-optimization -- load-bearing test/deps.json >/dev/null
+        cabal run -v0 agda-explore -- query search query=eval --graph test/deps.json >/dev/null
+        cabal run -v0 agda-explore -- query brief name=Test.eval --graph test/deps.json >/dev/null
+        echo "quickstart OK"
+
+    - name: CLI help goldens (flag-surface drift guard)
+      # Diffs each binary's --help against test/help/*.txt (version + build
+      # fingerprint normalized). Any flag change must be accompanied by a
+      # golden update (just help-goldens) — the safety net for CLI refactors.
+      run: bash scripts/help-golden.sh check
+
+    - name: agda-explore doctor (environment preflight)
+      # Preloaded-fixture preflight passes (exit 0); a missing graph fails
+      # (exit 1) with the actionable hint. The live checks (agda-deps / agda)
+      # run in the optional ci-live workflow.
+      run: |
+        cabal run -v0 agda-explore -- doctor --graph test/deps.json >/dev/null
+        echo "doctor (fixture) exit 0 OK"
+        if cabal run -v0 agda-explore -- doctor --graph /nonexistent.json >/tmp/doctor.out 2>&1; then
+          echo "doctor should have failed on a missing graph"; cat /tmp/doctor.out; exit 1
+        fi
+        grep -q "pass --graph FILE" /tmp/doctor.out \
+          || { echo "doctor missing-graph hint absent"; cat /tmp/doctor.out; exit 1; }
+        echo "doctor (missing graph) exit 1 + hint OK"
+
+    - name: Shell completion script (agda-optimization)
+      # Generated from the FlagSpec table: must be syntactically valid bash and
+      # mention every subcommand (so completion can't drift from the parser).
+      run: |
+        cabal run -v0 agda-optimization -- --completion-script=bash > /tmp/comp.bash
+        bash -n /tmp/comp.bash
+        for s in motif load-bearing concept-bundle hint-bench; do
+          grep -q "$s)" /tmp/comp.bash || { echo "completion missing subcommand: $s"; exit 1; }
+        done
+        echo "completion script OK"
 
     - name: interaction bridge — offline test-suite (protocol fixtures + pure logic)
       # Replays the committed golden --interaction-json transcripts under

@@ -39,6 +39,8 @@ Or add it to a marketplace and `claude plugin install agda-explore@<marketplace>
 
 Run `/mcp` inside Claude Code — `agda-explore` should show as connected with its tools. If it failed, check the server's stderr for the binary-not-found message and set `AGDA_EXPLORE_BIN`.
 
+For a full environment preflight (is `agda-deps` / `agda` resolvable? is the graph valid?), run `agda-explore doctor` (add `--enable-interact` to also check `agda`, `--json` for a machine-readable envelope). It prints one ✓/✗ line per check with a fix hint on each failure.
+
 ### Without the plugin (MCP server only)
 
 For just the tools (no skill/agents), register the server directly:
@@ -59,6 +61,13 @@ or check a project-scoped `.mcp.json` into the Agda repo:
   }
 }
 ```
+
+## What the launcher passes
+
+The launcher starts the server with a few opinionated defaults (all overridable):
+
+- **`--tool-tier core`** — advertises the measured-used tool subset (read tools + the `load`/`goal_brief`/`inspect`/`check`/`repair`/`lemmas` validate loop), cutting the agent's per-choice decision-load. The authoring/advanced tools (`auto`, `construct`, `scratch`, `give_file`, `new_module`, and `path`/`roots`/`similar_*`) stay reachable — add `--tool-tier full` to `.mcp.json`'s `args` to advertise them.
+- **`--enable-interact --control-port 7100`** — turns on the write bridge and a localhost control endpoint (port probed upward on clash) so the edit hook runs a *real* warm `check` after every Agda edit, not just a nudge. Set **`AGDA_EXPLORE_NO_INTERACT=1`** to opt out (e.g. no `agda` on the machine).
 
 ## Usage
 
@@ -123,12 +132,31 @@ By default each mutator **returns a diff and does not write** — apply it yours
 
 ## Hooks
 
+**Requirements:** both hooks need **`jq`** on `PATH` to parse their input, and
+the edit hook's real-check path additionally needs **`curl`** to reach the
+control endpoint. Without them the hooks degrade silently (the launcher prints
+a one-line notice at startup so you know why). Install both to enable the full
+loop.
+
 The plugin ships two hooks (`hooks/hooks.json`; they need `jq` on `PATH` and are active only while the plugin is enabled):
 
 - **`post-agda-edit`** (PostToolUse on `Edit`/`Write`): after any text edit to an `.agda` / `.lagda*` file, close the edit→check loop. If the daemon serves its control endpoint (below), the hook runs a REAL warm `check` and injects the verdict + diagnostics + goals as context; otherwise it injects a one-line nudge to call the bridge's `check` (rate-limited per session+file, so refactors aren't spammed). It never blocks the edit.
 - **`pre-grep-route`** (PreToolUse on `Grep`): the FIRST structural grep over Agda sources in a session is denied with the grep→graph tool mapping (`locate` / `search` / `callers` / `callees` / `type_of` / `find_lemma`); every later grep sails through — text searches over prose and comments are legitimate.
 
 **Kill switch:** disable the plugin, or delete/blank `hooks/hooks.json`.
+
+### Measuring tool usage
+
+In live mode the server appends one JSON line per `tools/call` to
+`<out-dir>/query-log.jsonl`. Turn any deployment's log into a per-tool table
+(call count, error %, stale %, dur_ms p50/p95) with:
+
+```bash
+scripts/tool-usage-report.sh <project>/.agda-explore/query-log.jsonl
+```
+
+That table is the evidence for tuning `--tool-tier` (which tools are actually
+used, and how reliably). Needs `jq`.
 
 ### Control endpoint (Phase 2 of the edit hook)
 

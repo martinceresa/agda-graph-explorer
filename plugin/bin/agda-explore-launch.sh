@@ -80,4 +80,27 @@ EOF
   exit 127
 fi
 
-exec "$BIN" --project "${CLAUDE_PROJECT_DIR:-$PWD}" "$@"
+# Hook preflight: the two hooks parse their JSON input with `jq`, and the edit
+# hook's real-check path reaches the control endpoint with `curl`. Without them
+# the hooks degrade silently — so say why, once, on stderr (never fatal).
+command -v jq >/dev/null 2>&1 || \
+  echo "agda-explore: NOTE: 'jq' not found — the edit-validation and grep-routing hooks will be inactive. Install jq to enable them." >&2
+command -v curl >/dev/null 2>&1 || \
+  echo "agda-explore: NOTE: 'curl' not found — the edit hook's warm-check path is unavailable (it falls back to a text nudge). Install curl to enable it." >&2
+
+# Plugin defaults (the launcher's opinion; still overridable):
+#   --tool-tier core     — advertise only the measured-used tool subset, cutting
+#                          the agent's per-choice decision-load.
+#   --enable-interact
+#   --control-port 7100  — the write bridge + a localhost control endpoint (port
+#                          probed upward on clash) so the PostToolUse edit hook
+#                          runs a REAL warm `check` instead of just a nudge.
+# Opt out of the bridge (e.g. no `agda`, or a constrained machine) with
+# AGDA_EXPLORE_NO_INTERACT=1. Anything in .mcp.json `args` ("$@") comes after
+# these and wins (flags are last-wins), so a project can restore --tool-tier full.
+plugin_args=(--tool-tier core)
+if [ -z "${AGDA_EXPLORE_NO_INTERACT:-}" ]; then
+  plugin_args+=(--enable-interact --control-port 7100)
+fi
+
+exec "$BIN" --project "${CLAUDE_PROJECT_DIR:-$PWD}" "${plugin_args[@]}" "$@"

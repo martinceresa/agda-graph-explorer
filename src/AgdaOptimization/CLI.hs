@@ -29,15 +29,15 @@ module AgdaOptimization.CLI
 import           Control.Applicative     ( (<|>) )
 import           Control.Monad           ( when )
 import qualified Data.Aeson              as A
-import           Data.List               ( find )
+import           Data.List               ( find, stripPrefix )
 import           Data.Maybe              ( fromMaybe )
-import           Data.Version            ( showVersion )
 import           System.Environment      ( getArgs )
 import           System.Exit             ( exitFailure, exitSuccess )
 import           System.IO               ( hPutStrLn, stderr )
 
-import qualified Paths_agda_graph_explorer as Paths
-
+import           AgdaGraph.Version       ( numericVersion, versionLine )
+import           AgdaGraph.ConfigCore    ( extractValueFlag )
+import           AgdaGraph.Completion    ( CompletionSpec(..), renderCompletion )
 import           AgdaGraph.Schema        ( loadExpandedGraph )
 import           AgdaGraph.Index         ( Index, buildIndex, idxSyntheticCount
                                          , idxNodeCount, idxRealCount )
@@ -109,7 +109,10 @@ usage = unlines $
   ++
   [ ""
   , "GLOBAL OPTIONS:"
-  , "  --json              emit a JSON report instead of human-readable text."
+  , "  --graph FILE        input graph (alias of the positional <graph.json>;"
+  , "                      usable in any position, and wins over a positional)."
+  , "  --format human|json output format (default: human)."
+  , "  --json              alias of --format=json."
   , "  --out FILE          write the report to FILE (default: stdout)."
   , "  --config FILE       load defaults from a YAML config file."
   , "  -h, --help          print this help and exit."
@@ -127,6 +130,12 @@ usage = unlines $
   , "  flag names without the '--' prefix."
   , ""
   , "Run 'agda-optimization <subcommand> --help' for subcommand-specific options."
+  , ""
+  , "EXIT CODES:"
+  , "  0  success."
+  , "  1  error: bad flags/subcommand, unreadable or mismatched graph, config failure."
+  , "  2  fiedler: helper script (scripts/fiedler_helper.py) not found."
+  , "  3  fiedler: SciPy/NumPy not importable in the helper's Python."
   ]
   where
     pad n s = s ++ replicate (max 0 (n - length s)) ' '
@@ -229,8 +238,9 @@ defaultsYaml = unlines $
   , "# to override; the section headers below stay harmless no-ops until you do."
   , ""
   , "global:"
-  , "  # emit a JSON report instead of human-readable text (default: false)"
-  , "  # json: true"
+  , "  # output format: human | json (default: human). `json: true` is a"
+  , "  # legacy alias still accepted."
+  , "  # format: json"
   , "  # write the report to FILE (default: stdout)"
   , "  # out: report.txt"
   ]
@@ -285,16 +295,53 @@ subFlagPairs sub = case sub of
 --      @agda-optimization --version@ doesn't error as "unknown
 --      subcommand: --version".
 --   3. Subcommand dispatch.
+-- | Completion data for @agda-optimization@, derived from the subcommand list
+-- and each subcommand's 'flagSpecs' (via 'subFlagPairs'), so the completion
+-- script can't drift from the parser. Global flags are the ones 'scanGlobals'
+-- / the pre-pass recognise, plus the meta flags.
+completionSpec :: CompletionSpec
+completionSpec = CompletionSpec
+  { csProg    = "agda-optimization"
+  , csGlobals =
+      [ "--graph", "--format", "--json", "--out", "--config"
+      , "--help", "--version", "--numeric-version", "--show-defaults" ]
+  , csSubcommands =
+      [ (name, map (("--" ++) . fst) (subFlagPairs name)) | (name, _) <- subcommands ]
+  }
+
 run :: IO ()
 run = do
-  argv <- getArgs
+  argv0 <- getArgs
   -- `--show-defaults` prints a config skeleton and exits before subcommand /
   -- graph handling, so it works from anywhere (no graph.json needed).
-  when ("--show-defaults" `elem` argv) (putStr defaultsYaml >> exitSuccess)
+  when ("--show-defaults" `elem` argv0) (putStr defaultsYaml >> exitSuccess)
+  -- `--completion-script[=bash|zsh]` (hidden): print a shell completion script
+  -- generated from the flag table, then exit. Bare form defaults to bash.
+  case [ s | a <- argv0, Just s <- [stripPrefix "--completion-script" a]
+           , s == "" || take 1 s == "=" ] of
+    (s:_) -> do
+      let shell = case s of ('=':sh) -> sh; _ -> "bash"
+      putStr (renderCompletion shell completionSpec)
+      exitSuccess
+    [] -> pure ()
+  -- Lift the position-independent globals `--graph` (input, an alias of the
+  -- positional graph path) and `--format` (output, an alias of `--json`) out
+  -- of argv before the intricate positional scanner runs — the same pattern
+  -- `--config` uses. `--graph` then works in any position; `--format` too.
+  let (mGraph,  argv1) = extractValueFlag "--graph" argv0
+      (mFmtRaw, argv)  = extractValueFlag "--format" argv1
+  fmtOverride <- case mFmtRaw of
+    Nothing      -> pure Nothing
+    Just "json"  -> pure (Just OutJson)
+    Just "human" -> pure (Just OutHuman)
+    Just other   -> do
+      hPutStrLn stderr ("agda-optimization: unknown --format value: " ++ other
+                          ++ " (want human|json)")
+      exitFailure
   case argv of
     []                          -> do
       hPutStrLn stderr "agda-optimization: missing subcommand."
-      hPutStrLn stderr usage
+      hPutStrLn stderr "Try 'agda-optimization --help' for the list of subcommands."
       exitFailure
     ("-h":_)                    -> putStrLn usage >> exitSuccess
     ("--help":_)                -> putStrLn usage >> exitSuccess
@@ -310,9 +357,13 @@ run = do
         exitFailure
       Right Scan{ scanSub = Nothing } -> do
         hPutStrLn stderr "agda-optimization: missing subcommand."
-        hPutStrLn stderr usage
+        hPutStrLn stderr "Try 'agda-optimization --help' for the list of subcommands."
         exitFailure
-      Right s@Scan{ scanSub = Just sub } -> dispatch sub s
+      Right s0@Scan{ scanSub = Just sub } ->
+        -- Fold in the lifted-out globals: `--graph` sets 'scanGraph' (wins
+        -- over any positional in 'dispatch'); `--format` overrides `--json`.
+        dispatch sub s0 { scanGraph     = mGraph
+                        , scanOutFormat = fmtOverride <|> scanOutFormat s0 }
 
 -- | A malformed-global error from the scanner. 'seScope' is the
 -- subcommand to mention in the message — @Nothing@ before the
@@ -353,6 +404,9 @@ data Scan = Scan
   { scanOutFormat :: !(Maybe OutFormat) -- ^ @Just OutJson@ once @--json@ seen.
   , scanOutPath   :: !(Maybe FilePath)  -- ^ last @--out@ / @--out=@ value.
   , scanConfig    :: !(Maybe FilePath)  -- ^ last @--config@ / @--config=@ value.
+  , scanGraph     :: !(Maybe FilePath)  -- ^ @--graph@ / @--graph=@ value (lifted
+                                        --   out of argv before the scanner runs;
+                                        --   wins over any positional graph path).
   , scanSub       :: !(Maybe String)    -- ^ the subcommand token, once found.
   , scanRawTail   :: ![String]          -- ^ raw args after the subcommand, un-peeled.
   , scanResidual  :: ![String]          -- ^ args for the subcommand parser (head = path).
@@ -385,6 +439,7 @@ scanGlobals = goLead Scan
   { scanOutFormat = Nothing
   , scanOutPath   = Nothing
   , scanConfig    = Nothing
+  , scanGraph     = Nothing
   , scanSub       = Nothing
   , scanRawTail   = []
   , scanResidual  = []
@@ -436,10 +491,8 @@ scanGlobals = goLead Scan
 -- agree on a release.
 printVersion :: Bool -> IO ()
 printVersion numericOnly
-  | numericOnly = putStrLn ver
-  | otherwise   = putStrLn $ "agda-optimization " ++ ver
-  where
-    ver = showVersion Paths.version
+  | numericOnly = putStrLn numericVersion
+  | otherwise   = putStrLn (versionLine "agda-optimization")
 
 -- | Dispatch a resolved 'Scan' to the chosen subcommand. The guards
 -- below decide unknown-subcommand / @--help@ / missing-path against the
@@ -452,13 +505,14 @@ dispatch sub s
   | sub `elem` ["-h", "--help"] = putStrLn usage >> exitSuccess
   | not (sub `elem` map fst subcommands) = do
       hPutStrLn stderr ("agda-optimization: unknown subcommand: " ++ sub)
-      hPutStrLn stderr usage
+      hPutStrLn stderr "Try 'agda-optimization --help' for the list of subcommands."
       exitFailure
   | "--help" `elem` rawTail || "-h" `elem` rawTail = do
       putStrLn (subUsage sub)
       exitSuccess
-  | null rawTail = do
-      hPutStrLn stderr ("agda-optimization " ++ sub ++ ": missing <graph.json>.")
+  | null rawTail && scanGraph s == Nothing = do
+      hPutStrLn stderr ("agda-optimization " ++ sub
+                          ++ ": missing <graph.json> (positional, or --graph FILE).")
       hPutStrLn stderr (subUsage sub)
       exitFailure
   | otherwise = do
@@ -467,11 +521,21 @@ dispatch sub s
       case scanPending s of
         Just e  -> hPutStrLn stderr (renderScanError e) >> exitFailure
         Nothing -> return ()
-      -- 'scanResidual' is non-empty here: 'null rawTail' was ruled out
-      -- above, and a non-empty raw tail always yields a path head.
-      let (path, subArgs) = case scanResidual s of
-                              (p:r) -> (p, r)
-                              []    -> error "dispatch: empty residual"
+      -- The graph path is `--graph` when given (it wins over any positional,
+      -- with a note), else the positional head. 'subArgs' is always the
+      -- residual tail (the first residual token is the positional path or the
+      -- redundant one --graph supersedes). When only --graph is given the
+      -- residual is empty, so 'drop 1' leaves it empty.
+      let subArgs = drop 1 (scanResidual s)
+      path <- case scanGraph s of
+        Just g  -> do
+          when (not (null (scanResidual s))) $
+            hPutStrLn stderr
+              "agda-optimization: both --graph and a positional graph.json given; using --graph."
+          pure g
+        Nothing -> case scanResidual s of
+          (p:_) -> pure p
+          []    -> error "dispatch: empty residual"   -- ruled out by the guard
       -- Discover + load the YAML config according to the documented
       -- priority order, then merge: global section before CLI's
       -- global flags (so CLI wins).

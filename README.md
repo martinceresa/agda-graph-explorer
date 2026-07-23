@@ -21,6 +21,28 @@ Runnable recipes: [Examples.md](Examples.md). YAML config:
 [TODO.md](TODO.md), [Backlog.md](Backlog.md), [Deferred.md](Deferred.md),
 [Changelog.md](Changelog.md).
 
+## Try it in 30 seconds
+
+No `agda-deps`, no `agda`, no project — every read tool runs against the
+committed fixture `test/deps.json`:
+
+```sh
+cabal build
+
+# Rank the definitions that most results rest on:
+cabal run -v0 agda-optimization -- load-bearing test/deps.json
+
+# Find a definition by name substring:
+cabal run -v0 agda-explore -- query search query=eval --graph test/deps.json
+
+# Orient on one definition — location, type, callers, callees, twins:
+cabal run -v0 agda-explore -- query brief name=Test.eval --graph test/deps.json
+```
+
+(The committed fixtures predate the current node-key convention, so the
+`explore` queries print a harmless one-line "stale format" note on stderr —
+that freshness tracking is a feature; the answers on stdout are correct.)
+
 ## Prerequisites
 
 - GHC 9.14.x + cabal 3.16 (older GHC ≥ 9.6 should work; CI pins 9.14.1).
@@ -35,6 +57,21 @@ Runnable recipes: [Examples.md](Examples.md). YAML config:
 cabal build
 ```
 
+### Installing the binaries
+
+`cabal run` works but re-checks the build and prints startup noise on every
+invocation. For repeated use, install real binaries onto your `PATH`:
+
+```sh
+cabal install exe:agda-explore exe:agda-auto exe:agda-optimization \
+              exe:agda-unused exe:agda-goals \
+              --installdir="$HOME/.local/bin" --overwrite-policy=always
+```
+
+The plugin launcher resolves `agda-explore` by precedence
+`$AGDA_EXPLORE_BIN` > `$PATH` > newest `dist-newstyle` build tree, so an
+installed binary wins over a stale in-tree build automatically.
+
 ## Producing the input graph
 
 Every tool consumes the **expanded** v2 JSON, produced by `agda-deps`:
@@ -47,16 +84,38 @@ agda-deps --format=json --json-mode=expanded -i src/ -o out/ src/Everything.agda
 Two committed fixtures let you try the tools without `agda-deps`:
 `test/deps.json` and `.agda-explore/deps.json`.
 
+### Getting `agda-deps`
+
+`agda-deps` is a **separate** repo (the Agda compiler backend that emits the
+graph). Build and install it once:
+
+```sh
+git clone https://github.com/input-output-hk/agda-dependencies
+cd agda-dependencies
+cabal install exe:agda-deps --installdir="$HOME/.local/bin" --overwrite-policy=always
+```
+
+Then put it on `$PATH`, or point `agda-explore` at it with `--agda-deps-bin`
+/ `$AGDA_DEPS_BIN`. Only live graph regeneration needs it — every tool in
+**preloaded mode** (`--graph FILE` / a positional `graph.json`) works with no
+`agda-deps` at all.
+
 ## Running the tools
 
 Essential invocations below; flag-by-flag recipes are in
 [Examples.md](Examples.md), YAML config in [Configuration.md](Configuration.md).
 
+**Flag conventions.** Across the tools, the input graph is `--graph FILE`
+(`agda-optimization` also takes it positionally) and the output format is
+`--format human|json`. The older spellings — `agda-unused`'s `--json=FILE`
+(input) and `--json-out`, and `--json` (output) on `agda-optimization` /
+`agda-auto` — remain as permanent aliases, so existing scripts keep working.
+
 ### `agda-unused` — flag unused imports / defs / opens
 
 ```sh
-cabal run agda-unused -- --json=out/deps.json ROOT…           # human-readable
-cabal run agda-unused -- --json=out/deps.json --json-out .    # JSON array
+cabal run agda-unused -- --graph=out/deps.json ROOT…            # human-readable
+cabal run agda-unused -- --graph=out/deps.json --format=json .  # JSON array
 ```
 
 ### `agda-optimization` — graph-level refactor candidates
@@ -95,6 +154,7 @@ cabal run agda-explore -- --version
 cabal run agda-explore -- --project /path/to/agda/project              # stdio MCP daemon
 cabal run agda-explore -- --graph out/deps.json                        # preloaded (no agda-deps)
 cabal run agda-explore -- query brief name=X --graph out/deps.json     # one-shot read query
+cabal run agda-explore -- doctor --graph out/deps.json                 # environment preflight
 cabal run agda-explore -- --project . --enable-interact                # + write-side bridge (needs agda)
 cabal run agda-explore -- --project . --inspect                        # + localhost web inspector
 ```
@@ -108,6 +168,11 @@ Claude Code plugin under [`plugin/`](plugin/README.md) bundles the server with a
 skill, two Agda agents, and two loop-closing hooks. Tool catalogues and full
 detail: [Examples.md](Examples.md), [`plugin/`](plugin/README.md).
 
+When the server or a tool misbehaves, run **`agda-explore doctor`** first: it
+checks `agda-deps` / `agda` resolution, the graph's schema and capabilities,
+and out-dir writability, printing a fix hint on every failure (`--json` for a
+structured envelope).
+
 ### `agda-auto` — batch hole-filling (needs `agda`)
 
 ```sh
@@ -120,6 +185,22 @@ Fills every open hole in a file — or a whole project — via the same Mimer +
 graph-hint ladder `agda-explore`'s `auto` uses; a diff by default, `--write`
 applies it (Agda-validated, zero-axiom). Exit codes: `0` = none open, `1` = holes
 remain, `2` = operational error.
+
+## Shell completions
+
+`agda-optimization` can print a completion script (generated from its flag
+table, so it never drifts from the parser):
+
+```sh
+# bash — install into your completions dir:
+agda-optimization --completion-script=bash \
+  > "${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions/agda-optimization"
+
+# zsh (reuses the bash function via bashcompinit):
+agda-optimization --completion-script=zsh > ~/.agda-optimization.zsh && echo 'source ~/.agda-optimization.zsh' >> ~/.zshrc
+```
+
+It completes the 19 subcommands and each subcommand's flags.
 
 ## Configuration (YAML)
 

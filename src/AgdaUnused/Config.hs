@@ -28,6 +28,7 @@ module AgdaUnused.Config
   , parseKindsToken
   ) where
 
+import           Control.Applicative ( (<|>) )
 import           Data.Aeson          ( FromJSON(..), (.:?), withObject, withText )
 import qualified Data.Aeson.Types    as A
 import           Data.Foldable       ( toList )
@@ -84,9 +85,15 @@ applyConfig ConfigTarget{..} Config{..} = id
 -- list element.
 instance FromJSON Config where
   parseJSON = withObject "agda-unused config" $ \o -> do
-    cfgJson      <- o .:? "json"
+    -- Input graph: canonical `graph:` wins over the legacy `json:` alias.
+    cfgJson      <- (\g j -> g <|> j) <$> o .:? "graph" <*> o .:? "json"
     cfgRelTo     <- o .:? "rel-to"
-    cfgJsonOut   <- o .:? "json-out"
+    -- Output format: canonical `format: human|json` wins over `json-out:`.
+    fmtKey       <- o .:? "format"
+    jsonOutKey   <- o .:? "json-out"
+    cfgJsonOut   <- case fmtKey of
+                      Just t  -> Just <$> parseFormatField t
+                      Nothing -> pure jsonOutKey
     rawKinds     <- o .:? "kinds"
     cfgKinds     <- traverse parseKindsField rawKinds
     cfgRoots     <- o .:? "roots"
@@ -96,6 +103,11 @@ instance FromJSON Config where
     cfgCountOnly <- o .:? "count-only"
     return Config{..}
     where
+      parseFormatField :: T.Text -> A.Parser Bool
+      parseFormatField t = case T.unpack t of
+        "json"  -> pure True
+        "human" -> pure False
+        other   -> fail ("unknown format: " ++ other ++ " (want human|json)")
       parseGroupByField :: A.Value -> A.Parser GroupBy
       parseGroupByField = withText "group-by" $ \t ->
         case parseGroupBy (T.unpack t) of

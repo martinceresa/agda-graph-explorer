@@ -41,6 +41,7 @@ import           System.IO ( hPutStrLn, stderr )
 
 import           AgdaGraph.ConfigCore ( extractConfigFlag, isAgdaSourceFile )
 import           AgdaGraph.Glob      ( globMatch )
+import           AgdaGraph.Version   ( numericVersion, versionLine )
 import           AgdaUnused.Analysis
 import           AgdaUnused.Config   ( ConfigTarget(..)
                                      , applyConfig, discoverConfigPath, loadConfig
@@ -80,22 +81,27 @@ usage = unlines
   [ "agda-unused — flag unused imports in an Agda project."
   , ""
   , "USAGE:"
-  , "  agda-unused --json=DEPS.JSON [--kinds=...] [--rel-to=DIR] [--json-out] ROOT…"
+  , "  agda-unused --graph=DEPS.JSON [--kinds=...] [--rel-to=DIR] [--format=json] ROOT…"
   , ""
   , "OPTIONS:"
-  , "  --json=FILE       agda-deps expanded JSON (produced by"
+  , "  --graph=FILE      agda-deps expanded JSON (produced by"
   , "                      `agda-deps --format=json --json-mode=expanded`)."
+  , "  --json=FILE       alias of --graph=FILE (kept for compatibility)."
   , "  --config=PATH     load options from YAML config (otherwise auto-discovered:"
   , "                      $AGDA_UNUSED_CONFIG, ./.agda-unused.yml, then walk-up to"
   , "                      the first dir containing a *.agda-lib)."
   , "  --show-defaults   print a starter .agda-unused.yml (all defaults) to stdout"
   , "                      and exit (redirect it: --show-defaults > .agda-unused.yml)."
+  , "  -h, --help        print this help and exit."
+  , "  -V, --version     print the agda-unused version and exit."
+  , "  --numeric-version print just the version number and exit."
   , "  --rel-to=DIR      print file paths relative to DIR (default: absolute)."
   , "  --exclude=GLOB    drop findings whose file path or module name matches GLOB"
   , "                      (repeatable). `**` spans directories, `*` stops at `/`,"
   , "                      `?` one char — e.g. `--exclude='**/Init.agda'` or"
   , "                      `--exclude='Prelude.*'`."
-  , "  --json-out        emit findings as a JSON array instead of plain text."
+  , "  --format=FMT      output format: 'human' (default) or 'json'."
+  , "  --json-out        alias of --format=json (kept for compatibility)."
   , "  --group-by=G      aggregate findings into per-group counts instead of"
   , "                      one line per finding. G is one of:"
   , "                      dir   — bucket by directory of the (relativised) path"
@@ -116,6 +122,11 @@ usage = unlines
   , "                      all            — every check above"
   , ""
   , "ROOT…  one or more directories to source-scan for `.agda` / `.lagda*` files."
+  , ""
+  , "EXIT CODES:"
+  , "  0  success (findings printed; a zero count is still success)."
+  , "  1  error: bad flags, unreadable/mismatched graph, config parse failure,"
+  , "     or a mis-scoped run (scanned files, none matched the graph)."
   ]
 
 -- | The @--show-defaults@ payload: a documented @.agda-unused.yml@ with the
@@ -131,14 +142,15 @@ defaultsYaml = unlines
   , "# Which checks to run. Tokens: using, duplicate, blanket, dead,"
   , "# internal-only, public, defined (= dead + internal-only), all."
   , "kinds: [" ++ intercalate ", " (map kindToken (optKinds defaultOptions)) ++ "]"
-  , "# Emit findings as a JSON array instead of plain text."
-  , "json-out: " ++ yn (case optFormat defaultOptions of OutJson -> True; OutPlain -> False)
+  , "# Output format: 'human' (plain text) or 'json' (a JSON array)."
+  , "format: " ++ (case optFormat defaultOptions of OutJson -> "json"; OutPlain -> "human")
   , "# Print only the grand total (wins over group-by)."
   , "count-only: " ++ yn (optCountOnly defaultOptions)
   , ""
   , "# --- Required / optional keys (uncomment and set a value to use) ---"
-  , "# agda-deps expanded JSON (also settable via --json=FILE on the CLI)."
-  , "# json: deps.json"
+  , "# agda-deps expanded JSON (also settable via --graph=FILE on the CLI;"
+  , "# the legacy key `json:` is still accepted)."
+  , "# graph: deps.json"
   , "# Directories to source-scan for .agda / .lagda* files (the ROOT args)."
   , "# roots: [src]"
   , "# Print file paths relative to this directory (default: absolute)."
@@ -170,7 +182,7 @@ parseArgs :: Options -> [String] -> Either String Options
 parseArgs seed = go ParseState { psOpts = seed, psCliRoots = [], psHadRoots = False }
   where
     finish (ParseState o cliRoots hadRoots)
-      | null (optJsonPath o) = Left "missing --json=…"
+      | null (optJsonPath o) = Left "missing input graph (--graph=FILE; the --json=FILE alias also works)"
       | hadRoots && null cliRoots && null (optRoots o)
           = Left "missing ROOT directory"
       | not hadRoots && null (optRoots o)
@@ -180,7 +192,12 @@ parseArgs seed = go ParseState { psOpts = seed, psCliRoots = [], psHadRoots = Fa
           else o
     go !st []      = finish st
     go !st (a:rest)
+      | Just v <- stripPrefix "--graph="   a = go st { psOpts = (psOpts st) { optJsonPath = v } } rest
       | Just v <- stripPrefix "--json="    a = go st { psOpts = (psOpts st) { optJsonPath = v } } rest
+      | Just v <- stripPrefix "--format="  a = case v of
+          "json"  -> go st { psOpts = (psOpts st) { optFormat = OutJson } } rest
+          "human" -> go st { psOpts = (psOpts st) { optFormat = OutPlain } } rest
+          _       -> Left ("unknown --format value: " ++ v ++ " (want human|json)")
       | Just v <- stripPrefix "--rel-to="  a = go st { psOpts = (psOpts st) { optRelTo    = Just v } } rest
       | Just v <- stripPrefix "--exclude=" a = go st { psOpts = (psOpts st) { optExclude  = optExclude (psOpts st) ++ [v] } } rest
       | Just v <- stripPrefix "--kinds="   a = case parseKinds v of
@@ -244,8 +261,10 @@ displayPath (Just root) p
 main :: IO ()
 main = do
   rawArgv <- getArgs
-  -- `--show-defaults` prints a starter config and exits before any config
-  -- discovery/load, so it works with no project / a broken config present.
+  -- `--version` / `--numeric-version` / `--show-defaults` short-circuit before
+  -- any config discovery/load, so they work with no project / a broken config.
+  when ("--numeric-version" `elem` rawArgv) (putStrLn numericVersion >> exitSuccess)
+  when (any (`elem` rawArgv) ["--version", "-V"]) (putStrLn (versionLine "agda-unused") >> exitSuccess)
   when ("--show-defaults" `elem` rawArgv) (putStr defaultsYaml >> exitSuccess)
   let (explicitCfg, argv) = extractConfigFlag rawArgv
 
@@ -264,7 +283,7 @@ main = do
     Left ""  -> putStrLn usage >> exitSuccess
     Left err -> do
       hPutStrLn stderr ("agda-unused: " ++ err)
-      hPutStrLn stderr usage
+      hPutStrLn stderr "Try 'agda-unused --help'."
       exitFailure
     Right o  -> return o
 
@@ -312,7 +331,7 @@ main = do
     hPutStrLn stderr $
       "agda-unused: scanned " ++ show (length pairs)
         ++ " source file(s) but none matched the graph's moduleFiles "
-        ++ "(paths don't line up — pass an absolute ROOT, or check --json is for this project)"
+        ++ "(paths don't line up — pass an absolute ROOT, or check --graph is for this project)"
     exitFailure
 
   let allFindings = analyse graph pairs

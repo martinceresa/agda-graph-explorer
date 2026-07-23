@@ -20,25 +20,29 @@ import           AgdaAuto.CLI       ( AutoOpts(..), defaultOpts, defaultsYaml,
 import           AgdaAuto.Config    ( applyConfig, discoverConfigPath, loadConfig )
 import           AgdaAuto.Run       ( runAuto )
 import           AgdaGraph.ConfigCore ( extractConfigFlag )
+import           AgdaGraph.Version  ( numericVersion, versionLine )
 import qualified BuildInfo
 
 versionStr :: String
-versionStr = "agda-auto 0.1 — batch hole-filling for Agda\n"
+versionStr = versionLine "agda-auto" ++ " — batch hole-filling for Agda\n"
           ++ BuildInfo.buildFingerprint
 
 main :: IO ()
 main = do
   argv <- getArgs
-  -- `--show-defaults` prints a starter config and exits, BEFORE any config
-  -- discovery/load — so it works with no project and even when a broken
-  -- .agda-auto.yml is present.
+  -- `--numeric-version` / `--show-defaults` short-circuit BEFORE any config
+  -- discovery/load — so they work with no project and even when a broken
+  -- .agda-auto.yml is present. (`--version` / `-V` flows through the parser so
+  -- it also reports the build fingerprint.)
+  when ("--numeric-version" `elem` argv) (putStrLn numericVersion >> exitSuccess)
   when ("--show-defaults" `elem` argv) (putStr defaultsYaml >> exitSuccess)
   -- Lift --config out before the parser (after the --key=value splitter, so
   -- only the space-separated form reaches here).
   let (mCfgArg, argv') = extractConfigFlag (preprocess argv)
   (seed, mApplied) <- loadSeed mCfgArg
   case parseArgs argv' seed of
-    Left e -> hPutStrLn stderr ("agda-auto: " ++ e) >> exitWith (ExitFailure 2)
+    Left e -> hPutStrLn stderr ("agda-auto: " ++ e)
+           >> hPutStrLn stderr "Try 'agda-auto --help'." >> exitWith (ExitFailure 2)
     Right o
       | aoHelp o  -> putStr usage >> exitSuccess
       | aoVer o   -> putStrLn versionStr >> exitSuccess

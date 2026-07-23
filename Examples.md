@@ -29,7 +29,7 @@ Defaults below were tuned on a ~21k-node reference Agda formalisation.
 
 ```bash
 cabal run agda-unused -- \
-  --json=out/deps.json --rel-to=src/ src/
+  --graph=out/deps.json --rel-to=src/ src/
 ```
 
 Reports unused imports / defs / opens as `file:line: name -- kind` rows. A
@@ -39,7 +39,7 @@ a run matching no scanned files).
 
 Default `--kinds=using,duplicate` — the lowest-noise combination. The other
 kinds (`blanket`, `defined`, `dead`, `public`) need more triage; enable all
-with `--kinds=all`. `--json-out` emits a JSON array (one object per finding);
+with `--kinds=all`. `--format=json` (alias `--json-out`) emits a JSON array (one object per finding);
 `--group-by=dir|file|kind` and `--count-only` aggregate the findings;
 positional `ROOTS…` accept multiple directories.
 

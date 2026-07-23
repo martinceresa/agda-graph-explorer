@@ -43,22 +43,25 @@ only edit what you want to change.
 
 | Key        | CLI flag           | Meaning                                                    |
 |------------|--------------------|------------------------------------------------------------|
-| `json`     | `--json`           | Path to the expanded `graph.json`.                         |
+| `graph`    | `--graph`          | Path to the expanded `graph.json` (canonical).             |
+| `json`     | `--json`           | Alias of `graph` (kept for compatibility).                 |
 | `rel-to`   | `--rel-to`         | Base directory findings are reported relative to.          |
-| `json-out` | `--json-out`       | Emit findings as a JSON array (bool).                      |
+| `format`   | `--format`         | Output format: `human` or `json` (canonical).              |
+| `json-out` | `--json-out`       | Alias of `format: json` (bool; kept for compatibility).    |
 | `kinds`    | `--kinds`          | Which finding kinds to report (YAML list or comma-string). |
 | `roots`    | positional `ROOTS` | Source roots to scan (YAML list).                          |
 | `exclude`  | `--exclude`        | Globs whose matching findings are dropped.                 |
 | `group-by`   | `--group-by`     | Group findings by `dir` / `file` / `kind`.                 |
 | `count-only` | `--count-only`   | Report per-group counts only, not each finding (bool).     |
 
-`json:` + `roots:` supply the required CLI inputs, so `agda-unused` can
-run with no arguments.
+`graph:` + `roots:` supply the required CLI inputs, so `agda-unused` can
+run with no arguments. When both a canonical key and its alias are present,
+the canonical key wins.
 
 ```yaml
-json: out/deps.json
+graph: out/deps.json
 rel-to: src/
-json-out: true
+format: json
 kinds: [using, blanket, duplicate]   # or the string "using,blanket"
 roots: [src/, lib/]
 exclude: ["**/Init.agda"]
@@ -69,12 +72,12 @@ exclude: ["**/Init.agda"]
 A top-level `global:` section plus one section per subcommand, named in
 **kebab-case** (`load-bearing`, not `loadBearing`). Within a section the
 keys are that subcommand's `--help` flags without the `--` (e.g.
-`--min-support` ↔ `min-support`). `global:` keys: `json` (bool) and `out`
-(output path).
+`--min-support` ↔ `min-support`). `global:` keys: `format` (`human`|`json`;
+`json: bool` is a legacy alias) and `out` (output path).
 
 ```yaml
 global:
-  json: false
+  format: human
   out: out/opt-reports
 motif:        { max-size: 3, min-support: 10, budget: 300, min-label-distinct: 2 }
 basket:       { budget: 600, min-support: 0.05, forced-suppress: true, forced-fraction: 0.5 }
@@ -170,9 +173,10 @@ coverage-ignore: ["**/scratch/**"]  # source outside every closure to ignore
 ## `.agda-auto.yml`
 
 Mirrors the CLI flags (kebab-case): `write`, `annotate`, `timeout`, `hints`,
-`graph`, `overlay-graphs` (list), `json`, `include-paths` (list), `agda-bin`,
-`agda-args` (list), `premise-select`, `rank-idf`, `no-hint-batch`,
-`no-auto-ladder`, `project`, `wall-budget`, `repair`, `fixpoint`, `ledger`.
+`graph`, `overlay-graphs` (list), `format` (`human`|`json`; `json: bool` is a
+legacy alias), `include-paths` (list), `agda-bin`, `agda-args` (list),
+`premise-select`, `rank-idf`, `no-hint-batch`, `no-auto-ladder`, `project`,
+`wall-budget`, `repair`, `fixpoint`, `ledger`.
 
 ```yaml
 timeout: 5

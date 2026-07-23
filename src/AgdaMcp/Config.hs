@@ -39,6 +39,7 @@ import           System.Environment (lookupEnv)
 import           System.Exit       (die)
 
 import           AgdaGraph.ConfigCore (DiscoverSpec (..), discoverInDir)
+import           AgdaMcp.State        (Tier (..))
 
 -- ---------------------------------------------------------------------
 -- The Opts record the CLI parser fills.
@@ -112,6 +113,9 @@ data Opts = Opts
   , oOverlayGraphs :: [FilePath]
     -- ^ static federated overlay graph files (repeatable @--overlay-graph@),
     -- e.g. a prebuilt agda-stdlib graph, unioned into every snapshot.
+  , oToolTier :: Tier
+    -- ^ @--tool-tier core|full@: which tools @tools/list@ advertises. Default
+    -- 'TierFull' (binary); the plugin launches with 'TierCore'.
   , oHelp     :: Bool
   , oVer      :: Bool
   }
@@ -167,6 +171,7 @@ data FileConfig = FileConfig
   , fcControlPort    :: Maybe Int
   , fcCoverageIgnore :: Maybe [String]
   , fcOverlayGraphs  :: Maybe [FilePath]
+  , fcToolTier       :: Maybe Tier
   }
 
 instance FromJSON FileConfig where
@@ -210,6 +215,13 @@ instance FromJSON FileConfig where
     fcControlPort    <- o .:? "control-port"
     fcCoverageIgnore <- o .:? "coverage-ignore"
     fcOverlayGraphs  <- o .:? "overlay-graphs"
+    fcToolTier       <- do
+      t <- o .:? "tool-tier"
+      case (t :: Maybe String) of
+        Nothing     -> pure Nothing
+        Just "core" -> pure (Just TierCore)
+        Just "full" -> pure (Just TierFull)
+        Just other  -> fail ("unknown tool-tier: " ++ other ++ " (want core|full)")
     pure FileConfig{..}
 
 -- ---------------------------------------------------------------------
@@ -272,6 +284,7 @@ applyConfig FileConfig{..} o = o
     -- Config sets the base overlay list; a CLI --overlay-graph then appends
     -- (union of config + CLI), mirroring the --agda-arg idiom above.
   , oOverlayGraphs  = fromMaybe (oOverlayGraphs o) fcOverlayGraphs
+  , oToolTier       = fromMaybe (oToolTier o) fcToolTier
   }
   where
     -- A present config value wins over the (default) seed; 'Maybe' field.

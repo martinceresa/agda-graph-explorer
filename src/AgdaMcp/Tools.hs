@@ -20,6 +20,7 @@ import           Data.Maybe         (fromMaybe)
 import           Data.Ord           (Down (..))
 import           Data.Text          (Text)
 import qualified Data.Text          as T
+import qualified Data.Set           as Set
 import           Data.Time.Clock    (NominalDiffTime, diffUTCTime,
                                      getCurrentTime)
 import           Data.Time.Format.ISO8601 (iso8601Show)
@@ -44,9 +45,32 @@ import qualified BuildInfo
 
 -- | The tool catalogue available for this server state: the read-side
 -- graph queries always, plus the write-side interaction-bridge tools
--- ('interactTools') only when started with @--enable-interact@.
+-- ('interactTools') only when started with @--enable-interact@. Under
+-- @--tool-tier core@ the catalogue is narrowed to 'coreToolNames' (the
+-- measured-used subset) to cut the agent's per-choice decision-load; every
+-- tool stays reachable through the one-shot @query@ CLI regardless.
 enabledTools :: ServerState -> [Tool]
-enabledTools ss = graphTools ++ [ t | cfgEnableInteract (ssConfig ss), t <- interactTools ]
+enabledTools ss = tierFilter (graphTools ++ interact)
+  where
+    interact = [ t | cfgEnableInteract (ssConfig ss), t <- interactTools ]
+    tierFilter = case cfgToolTier (ssConfig ss) of
+      TierFull -> id
+      TierCore -> filter ((`Set.member` coreToolNames) . tName)
+
+-- | The tools advertised under @--tool-tier core@: the read + validate/diagnose
+-- surface agents were measured to actually use (2026-07 telemetry), plus
+-- @brief@/@goal_brief@ (the designed one-call orientation entry points). The
+-- authoring tools (auto/construct/scratch/give_file/new_module) and the
+-- rarely-hit reads (path/roots/similar_*) are @full@-only. Keep in sync with
+-- the plugin skill and the PreToolUse routing message.
+coreToolNames :: Set.Set Text
+coreToolNames = Set.fromList
+  [ -- read
+    "brief", "locate", "search", "callers", "callees", "type_of"
+  , "find_lemma", "impact", "unused", "status", "rebuild"
+    -- interaction (validate / diagnose loop)
+  , "load", "goal_brief", "inspect", "check", "repair", "lemmas"
+  ]
 
 -- | The @format@ property, shared by the list tools (search / callers /
 -- callees). Kept terse — the structured-output contract is in the skill.

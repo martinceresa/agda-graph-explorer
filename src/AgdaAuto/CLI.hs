@@ -79,6 +79,11 @@ parseArgs (x : xs) o = case x of
   "--annotate"       -> parseArgs xs o { aoAnnotate = True }
   "--no-annotate"    -> parseArgs xs o { aoAnnotate = False }
   "--json"           -> parseArgs xs o { aoJson = True }
+  "--format"         -> case xs of
+      ("json"  : rest) -> parseArgs rest o { aoJson = True }
+      ("human" : rest) -> parseArgs rest o { aoJson = False }
+      (v : _)          -> Left ("unknown --format value: " ++ v ++ " (want human|json)")
+      []               -> Left "--format requires a value"
   "--premise-select" -> parseArgs xs o { aoPremiseSelect = True }
   "--rank-idf"       -> parseArgs xs o { aoRankIdf = True }
   "--no-hint-batch"  -> parseArgs xs o { aoNoHintBatch = True }
@@ -133,7 +138,8 @@ usage = unlines
   , "                        if present, else plain Mimer (no hints)."
   , "  --overlay-graph FILE  Federate an external graph (e.g. agda-stdlib) into"
   , "                        the hint corpus. Repeatable."
-  , "  --json                Emit a structured JSON report."
+  , "  --format human|json   Output format (default: human)."
+  , "  --json                Alias of --format=json."
   , "  -i, --include DIR     Agda include directory for loading (repeatable)."
   , "  --agda-bin P          Path to agda (else $AGDA_BIN, $PATH)."
   , "  --agda-arg ARG        Extra flag for `agda --interaction-json`"
@@ -155,7 +161,8 @@ usage = unlines
   , "                        stdout, then exit. Redirect it to create a config:"
   , "                        agda-auto --show-defaults > .agda-auto.yml"
   , "  -h, --help            This help."
-  , "  -V, --version         Version."
+  , "  -V, --version         Version (with build fingerprint)."
+  , "  --numeric-version     Print just the version number and exit."
   , ""
   , "Config: a .agda-auto.yml / .yaml is discovered from --config,"
   , "$AGDA_AUTO_CONFIG, ./.agda-auto.yml, or the nearest *.agda-lib ancestor."
@@ -183,8 +190,8 @@ defaultsYaml = unlines
   , "timeout: " ++ show (aoTimeout defaultOpts)
   , "# Graph lemma hints fetched per goal (0 = plain Mimer, no graph ranking)."
   , "hints: " ++ show (aoHints defaultOpts)
-  , "# Emit a structured JSON report instead of a human diff/table."
-  , "json: " ++ yn (aoJson defaultOpts)
+  , "# Output format: 'human' (diff/table) or 'json' (structured report)."
+  , "format: " ++ (if aoJson defaultOpts then "json" else "human")
   , "# Blend k-NN premise selection into hint ranking (needs provenance + sigs)."
   , "premise-select: " ++ yn (aoPremiseSelect defaultOpts)
   , "# IDF-weight the lemma ranker."

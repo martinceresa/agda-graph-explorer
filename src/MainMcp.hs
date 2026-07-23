@@ -33,16 +33,18 @@ import           System.Directory   (doesDirectoryExist, doesFileExist,
                                      getCurrentDirectory, listDirectory,
                                      makeAbsolute, removePathForcibly)
 import           System.Environment (getArgs, lookupEnv)
-import           System.Exit        (exitFailure, exitSuccess)
+import           System.Exit        (exitFailure, exitSuccess, exitWith)
 import           System.FilePath    (isAbsolute, splitSearchPath, takeDirectory,
                                      takeFileName, (</>))
 import           System.IO          (hPutStrLn, stderr)
 
 import           AgdaGraph.ConfigCore (firstExisting, isAgdaSourceFile, splitEqFlags)
+import           AgdaGraph.Version  (numericVersion, versionLine)
 import           AgdaMcp.Config     (Opts (..), applyConfig,
                                      discoverConfigPath, extractConfigArg,
                                      loadConfig, orderNub)
 import           AgdaMcp.Control    (startControl)
+import           AgdaMcp.Doctor     (runDoctor)
 import           AgdaMcp.Inspect    (startInspector)
 import           AgdaMcp.Rpc        (runStdioLoop)
 import           AgdaMcp.State
@@ -75,6 +77,7 @@ defOpts = Opts
   , oControlPort = 0
   , oCoverageIgnore = []
   , oOverlayGraphs = []
+  , oToolTier = TierFull
   , oHelp = False, oVer = False
   }
 
@@ -127,6 +130,11 @@ parseOpts (x : xs) o = case x of
   "--control-port"       -> need $ \v -> o { oControlPort = readInt v (oControlPort o) }
   "--coverage-ignore"    -> need $ \v -> o { oCoverageIgnore = oCoverageIgnore o ++ [v] }
   "--overlay-graph"      -> need $ \v -> o { oOverlayGraphs = oOverlayGraphs o ++ [v] }
+  "--tool-tier"          -> case xs of
+      ("core" : rest) -> parseOpts rest o { oToolTier = TierCore }
+      ("full" : rest) -> parseOpts rest o { oToolTier = TierFull }
+      (v : _)         -> Left ("unknown --tool-tier: " ++ v ++ " (want core|full)")
+      []              -> Left "--tool-tier requires a value"
   _ | isAgdaSourceFile x -> parseOpts xs o { oEntries = oEntries o ++ [x] }
     | otherwise       -> Left ("unknown argument: " ++ x)
   where
@@ -242,6 +250,7 @@ buildConfig o = do
         , cfgControlPort  = oControlPort o
         , cfgCoverageIgnore = oCoverageIgnore o
         , cfgOverlays     = overlays
+        , cfgToolTier     = oToolTier o
         , cfgIncludes     = bin
         }
       preloaded g incl = do
@@ -296,7 +305,7 @@ modeDesc c
 -- ---------------------------------------------------------------------
 
 versionStr :: String
-versionStr = "agda-explore 0.1 — interactive MCP server for agda-deps\n"
+versionStr = versionLine "agda-explore" ++ " — interactive MCP server for agda-deps\n"
           ++ BuildInfo.buildFingerprint
 
 usage :: String
@@ -312,6 +321,12 @@ usage = unlines
   , "    Runs a read tool once and prints its result (add --json for a structured"
   , "    envelope). E.g.:  agda-explore query brief name=Foo.bar --graph deps.json"
   , "                      agda-explore query search query=map --graph deps.json --json | jq"
+  , ""
+  , "Environment preflight (no daemon):"
+  , "  agda-explore doctor [--graph FILE | --project DIR] [--enable-interact] [--json]"
+  , "    Check that agda-deps / agda / the graph are ready — one ✓/✗ line per"
+  , "    check, a fix hint on each failure; exits 0 iff all pass. Run this first"
+  , "    when the server or a tool isn't behaving."
   , ""
   , "Options (server mode):"
   , "  --entry FILE          Agda entry module to build the graph from"
@@ -382,11 +397,15 @@ usage = unlines
   , "  --overlay-graph FILE  Federate a prebuilt expanded graph.json (e.g. an agda-stdlib"
   , "                        graph) into every snapshot so search/type_of/find_lemma see its"
   , "                        definitions ([external: …]-tagged). Project defs win. Repeatable."
+  , "  --tool-tier core|full Which tools tools/list advertises: 'full' (every tool,"
+  , "                        default) or 'core' (the measured-used subset — less agent"
+  , "                        decision-load; all tools stay reachable via the query CLI)."
   , "  --config FILE         Load this .agda-explore.yml (else discovered; see below)."
   , "  --show-defaults       Print a starter .agda-explore.yml (all defaults) to stdout"
   , "                        and exit (redirect it: --show-defaults > .agda-explore.yml)."
   , "  -h, --help            This help."
-  , "  -V, --version         Version."
+  , "  -V, --version         Version (with build fingerprint + binary identity)."
+  , "  --numeric-version     Print just the version number and exit."
   , ""
   , "Config: a .agda-explore.yml / .yaml is discovered from --config,"
   , "$AGDA_EXPLORE_CONFIG, ./.agda-explore.yml, or the nearest *.agda-lib ancestor."
@@ -491,6 +510,10 @@ defaultsYaml = unlines
   , "# Seed the check-time probe with the top N in-scope graph hints (0 = plain Mimer)."
   , "auto-hints-lemmas: " ++ show (oAutoHintsLemmas defOpts)
   , ""
+  , "# --- Tool catalogue ---"
+  , "# Which tools tools/list advertises: core (measured-used subset) | full (all)."
+  , "tool-tier: " ++ (case oToolTier defOpts of TierCore -> "core"; TierFull -> "full")
+  , ""
   , "# --- Side channels ---"
   , "# Localhost web inspector (activity feed + editing view)."
   , "inspect: " ++ yn (oInspect defOpts)
@@ -561,12 +584,33 @@ coerceVal s
 main :: IO ()
 main = do
   argv <- getArgs
-  -- `--show-defaults` prints a starter config and exits before any project
-  -- discovery / graph build, so it works from anywhere.
+  -- `--numeric-version` / `--show-defaults` short-circuit before any project
+  -- discovery / graph build, so they work from anywhere. (`--version` / `-V`
+  -- is handled in the server path — it also reports the binary identity.)
+  when ("--numeric-version" `elem` argv) (putStrLn numericVersion >> exitSuccess)
   when ("--show-defaults" `elem` argv) (putStr defaultsYaml >> exitSuccess)
   case argv of
-    ("query" : rest) -> runQuery rest
-    _                -> mainServer argv
+    ("query" : rest)  -> runQuery rest
+    ("doctor" : rest) -> runDoctorCli rest
+    _                 -> mainServer argv
+
+-- | @agda-explore doctor [--graph FILE | --project DIR] [--enable-interact]
+-- [--json]@ — a one-shot environment preflight (no daemon). Builds the same
+-- 'Config' the server would and hands it to "AgdaMcp.Doctor". Exit 0 iff every
+-- check passed. Accepts the same server flags (parsed by 'parseOpts') plus
+-- @--json@ for a structured envelope.
+runDoctorCli :: [String] -> IO ()
+runDoctorCli rest = do
+  let asJson         = "--json" `elem` rest
+      flags0         = filter (/= "--json") rest
+      (mCfgArg, fl') = extractConfigArg (splitEqFlags flags0)
+  (seed, mApplied) <- loadSeed mCfgArg
+  finalOpts <- case parseOpts fl' seed of
+    Left e  -> hPutStrLn stderr ("agda-explore: " ++ e) >> exitFailure
+    Right f -> pure f
+  cfg  <- buildConfig finalOpts
+  code <- runDoctor cfg mApplied asJson
+  exitWith code
 
 -- | The default mode: the long-lived MCP stdio server.
 mainServer :: [String] -> IO ()
@@ -575,7 +619,8 @@ mainServer argv = do
   -- --key=value splitter, so only the space-separated form reaches here).
   let (mCfgArg, argv') = extractConfigArg (splitEqFlags argv)
   case parseOpts argv' defOpts of
-    Left err -> hPutStrLn stderr ("agda-explore: " ++ err) >> exitFailure
+    Left err -> hPutStrLn stderr ("agda-explore: " ++ err)
+             >> hPutStrLn stderr "Try 'agda-explore --help'." >> exitFailure
     Right o
       | oHelp o   -> putStr usage
       | oVer o    -> do

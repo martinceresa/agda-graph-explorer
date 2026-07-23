@@ -44,7 +44,12 @@ One shared library and five executables:
   `[external: …]` tag; project defs win key collisions. A closure-coverage
   warning (config `coverage-ignore:` globs) flags source files outside every
   entry's closure. A one-shot `agda-explore query <tool> key=value…` CLI
-  dispatches through the same read-tool table without a daemon. Under
+  dispatches through the same read-tool table without a daemon; an
+  `agda-explore doctor` subcommand runs a read-only environment preflight
+  (agda-deps/agda resolution, graph decode + capabilities, out-dir). Which
+  tools `tools/list` advertises is set by `--tool-tier core|full` (default
+  `full`; `core` is the measured-used subset — the query CLI ignores it, so
+  every tool stays reachable). Under
   `--enable-interact` it also exposes a **write-side
   interaction bridge** (`load` / `goal_brief` / `inspect` / `auto` /
   `construct` / `scratch` / `check` / `give_file` / `new_module` / `lemmas` /
@@ -247,7 +252,12 @@ src/
     Tools.hs                    MCP lifecycle + read-side tool catalogue +
                                 tools/call dispatch; `unused` shells to
                                 agda-unused; appends interactTools (gated on
-                                --enable-interact).
+                                --enable-interact). `enabledTools` also narrows
+                                the catalogue to `coreToolNames` under
+                                --tool-tier=core (the measured-used subset; keep
+                                it in sync with the plugin skill + PreToolUse
+                                routing message). Every tool stays reachable via
+                                the one-shot `query` CLI regardless of tier.
     ToolDef.hs                  shared Tool/ToolRunner record + schema builders
                                 + arg accessors (shared by Tools.hs and
                                 AgdaInteract.Tools, no cycle).
@@ -269,6 +279,16 @@ src/
                                 to <out-dir>/control-port (removed on
                                 shutdown). Serves the plugin's PostToolUse
                                 hook.
+    Doctor.hs                   `agda-explore doctor`: one-shot environment
+                                preflight (beside the `query` dispatch). Runs
+                                read-only checks — binary identity, discovered
+                                config, mode, graph decode + node-key version +
+                                capability probes (signatures / provenance /
+                                subterm hashes), agda-deps / agda resolution,
+                                out-dir writability, overlays — printing one
+                                ✓/!/✗/– line each (fix hint on failures);
+                                --json envelope; exit 0 iff no ✗. Never spawns
+                                a build.
 
   MainAuto.hs                   agda-auto entry point: argv → AgdaAuto.CLI →
                                 AgdaAuto.Run (merge defaults < .agda-auto.yml <
@@ -454,12 +474,30 @@ src-agda-graph/AgdaGraph/       Shared library.
                                 by agda-unused --exclude and agda-explore
                                 coverage-ignore.
   ConfigCore.hs                 shared config-file discovery + raw YAML load +
-                                extractConfigFlag, behind the four per-executable
-                                Config modules.
+                                extractConfigFlag / extractValueFlag (the
+                                position-independent --key VALUE lifter, used by
+                                agda-optimization for --graph / --format),
+                                behind the four per-executable Config modules.
+  Version.hs                    single version source: versionLine /
+                                numericVersion off Paths_agda_graph_explorer,
+                                backing --version / --numeric-version on every
+                                executable (so they can't disagree; CI asserts
+                                cabal == plugin.json == each --numeric-version).
+  Completion.hs                 shell-completion script generation from plain
+                                flag/subcommand data (bash + zsh-via-bashcompinit);
+                                agda-optimization --completion-script feeds it the
+                                FlagSpec-derived names, so completions can't drift.
 
 scripts/
   fiedler_helper.py             SciPy λ₂ / Fiedler-vector helper for
                                 AgdaOptimization.Fiedler (stdin → stdout).
+  help-golden.sh                capture/check the committed --help + tools/list
+                                goldens (test/help/); version + build fingerprint
+                                normalized. The CLI-surface drift guard (CI + the
+                                `just help-goldens` regen).
+  tool-usage-report.sh          summarize a query-log.jsonl into a per-tool
+                                count / error% / stale% / p50-p95 table (jq only)
+                                — the evidence for --tool-tier decisions.
   build-stdlib-graph.sh         build a reusable overlay graph (e.g. agda-stdlib)
                                 for agda-explore --overlay-graph.
                                 Needs `pip install scipy numpy`.

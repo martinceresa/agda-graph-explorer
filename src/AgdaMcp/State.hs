@@ -19,6 +19,7 @@
 module AgdaMcp.State
   ( -- * Config
     Config(..)
+  , Tier(..)
   , defaultConfig
     -- * Loaded snapshot
   , Loaded(..)
@@ -151,7 +152,15 @@ data Config = Config
   , cfgControlPort  :: !Int              -- ^ localhost control endpoint start port (hooks call @/check@); @<= 0@ = off.
   , cfgCoverageIgnore :: ![String]       -- ^ globs for source files intentionally outside every entry's closure; suppressed from the coverage warning.
   , cfgOverlays     :: ![ExpandedGraph]  -- ^ static overlay graphs (e.g. a prebuilt agda-stdlib graph), decoded once at startup and unioned into every snapshot so queries see external defs. Project defs win collisions.
+  , cfgToolTier     :: !Tier             -- ^ which tools appear in @tools/list@: 'TierFull' (every tool, default) or 'TierCore' (the measured-used subset, less agent decision-load). Reachability is unchanged — the one-shot @query@ CLI ignores the tier.
   }
+
+-- | The MCP tool catalogue tier. 'TierFull' exposes every tool (no behaviour
+-- change); 'TierCore' exposes only the subset agents were measured to use,
+-- shrinking the decision-load at each tool choice. The plugin launches with
+-- 'TierCore'; the binary defaults to 'TierFull'.
+data Tier = TierCore | TierFull
+  deriving (Eq, Show)
 
 defaultConfig :: Config
 defaultConfig = Config
@@ -195,6 +204,7 @@ defaultConfig = Config
   , cfgControlPort  = 0            -- control endpoint off unless configured
   , cfgCoverageIgnore = []
   , cfgOverlays     = []
+  , cfgToolTier     = TierFull
   }
 
 -- | A cheap fingerprint of the source tree: file count + newest mtime.

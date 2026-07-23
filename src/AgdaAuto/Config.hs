@@ -64,7 +64,15 @@ instance FromJSON FileConfig where
     fcHints         <- o .:? "hints"
     fcGraph         <- o .:? "graph"
     fcOverlays      <- o .:? "overlay-graphs"
-    fcJson          <- o .:? "json"
+    -- Output: canonical `format: human|json` wins over the `json: bool` alias.
+    fcJson          <- do
+      j   <- o .:? "json"
+      fmt <- o .:? "format"
+      case (fmt :: Maybe String) of
+        Just "json"  -> pure (Just True)
+        Just "human" -> pure (Just False)
+        Just other   -> fail ("unknown format: " ++ other ++ " (want human|json)")
+        Nothing      -> pure j
     fcIncludes      <- o .:? "include-paths"
     fcAgdaBin       <- o .:? "agda-bin"
     fcAgdaArgs      <- o .:? "agda-args"

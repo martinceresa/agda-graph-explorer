@@ -21,6 +21,7 @@ module AgdaGraph.ConfigCore
   , firstExisting
   , loadYamlConfig
   , extractConfigFlag
+  , extractValueFlag
   , isAgdaSourceFile
   , splitEqFlags
   ) where
@@ -93,6 +94,25 @@ extractConfigFlag = go []
           (v:rest') -> (Just v, reverse acc ++ rest')
           []        -> (Nothing, reverse acc)
       | otherwise = go (a : acc) rest
+
+-- | Lift a value-taking flag @--name VALUE@ / @--name=VALUE@ out of argv,
+-- returning the value (last occurrence wins) and the remaining args with
+-- every occurrence removed. Position-independent, so a caller can support a
+-- global flag uniformly without threading it through an intricate positional
+-- parser (the pattern 'extractConfigFlag' uses for @--config@, generalised).
+-- A trailing bare @--name@ with no value is dropped (the caller treats an
+-- absent value as "not given").
+extractValueFlag :: String -> [String] -> (Maybe String, [String])
+extractValueFlag name = go Nothing []
+  where
+    eq = name ++ "="
+    go found acc [] = (found, reverse acc)
+    go found acc (a:rest)
+      | Just v <- stripPrefix eq a = go (Just v) acc rest
+      | a == name = case rest of
+          (v:rest') -> go (Just v) acc rest'
+          []        -> (found, reverse acc)
+      | otherwise = go found (a : acc) rest
 
 -- | Return the first path in the list that exists as a regular file.
 firstExisting :: [FilePath] -> IO (Maybe FilePath)
