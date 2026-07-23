@@ -1,0 +1,15 @@
+agda-optimization load-bearing — definitions that support the most valuable results
+
+USAGE:
+  agda-optimization load-bearing <graph.json> [options...]
+
+OPTIONS:
+  --results=tagged|exported|terminals  result-set selector (default exported)
+  --weight=unit|loc                    span weighting (default unit)
+  --top-n=N                            rows to keep (default 50)
+  --exclude-name-regex=PATTERN         POSIX-ERE on unqualified name (default ^[_─═]+$)
+
+Plus the global flags --json, --out FILE, and --config FILE
+(parsed before subcommand flags). YAML defaults under the
+'load-bearing:' section override defaults; CLI flags override config.
+See README.md for per-flag semantics.

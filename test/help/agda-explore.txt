@@ -1,0 +1,106 @@
+agda-explore VERSION — interactive MCP server for agda-deps
+
+An MCP (Model Context Protocol) stdio server exposing point queries over
+an Agda project's dependency graph. Normally launched by the bundled
+Claude Code plugin, not by hand.
+
+One-shot query (no daemon), for scripting / non-MCP use:
+  agda-explore query <tool> [key=value ...] [--json] [--graph FILE] [-i DIR]
+    Runs a read tool once and prints its result (add --json for a structured
+    envelope). E.g.:  agda-explore query brief name=Foo.bar --graph deps.json
+                      agda-explore query search query=map --graph deps.json --json | jq
+
+Environment preflight (no daemon):
+  agda-explore doctor [--graph FILE | --project DIR] [--enable-interact] [--json]
+    Check that agda-deps / agda / the graph are ready — one ✓/✗ line per
+    check, a fix hint on each failure; exits 0 iff all pass. Run this first
+    when the server or a tool isn't behaving.
+
+Options (server mode):
+  --entry FILE          Agda entry module to build the graph from
+                        (repeatable; several entries union their import
+                        closures into one graph — see config `entries:`).
+  -i, --include DIR     Agda include directory (repeatable).
+  --graph FILE          Serve a fixed graph.json; disables rebuilds.
+  --project DIR         Project root / subprocess cwd (default: cwd).
+  --out-dir DIR         Where the generated graph.json lives
+                        (default: <project>/.agda-explore).
+  --agda-deps-bin P     Path to agda-deps   (else $AGDA_DEPS_BIN, $PATH).
+  --agda-unused-bin P   Path to agda-unused (else $AGDA_UNUSED_BIN, $PATH).
+  --no-term-hashes      Build without AST term hashes (disables similar_bodies).
+  --no-signatures       Build without rendered type signatures (type_of falls
+                        back to a source scrape).
+  --normalise-signatures  Normalise type signatures (semantic form) for type_of.
+  --show-implicit       Render type signatures with implicit arguments shown.
+  --min-term-depth N    Term-hash depth filter (default 3).
+  --no-auto-rebuild     Do not regenerate the graph when sources change.
+  --no-watch            Disable the fsnotify watcher; poll on each query instead.
+  --require-well-typed  Only promote a rebuild that fully type-checks; while a
+                        module has a type error, keep serving the last well-typed
+                        graph (holes still refresh). Off by default.
+  --strict-producer     Run agda-deps strictly: drop --keep-going for its
+                        --incremental cache (faster rebuilds; needs Agda >= VERSION).
+  --rank-idf            IDF-weight the lemma ranker (find_lemma/auto hints):
+                        rare identifiers out-vote ubiquitous ones. Off by default
+                        (baseline coverage) pending a hint-bench measurement.
+  --premise-select      Blend k-NN premise selection into find_lemma/auto ranking:
+                        recommend the premises of proved theorems similar to the goal
+                        (~3x any-hit@6 on stdlib scale). Off by default; needs edge
+                        provenance + signatures in the graph.
+  --no-hint-batch       Disable the auto hint-batch tier (Phase-3a): plain then
+                        per-hint only, no batched-hint call. Benchmark A/B toggle.
+  --no-auto-ladder      Disable the auto_all budget ladder (Phase-3b): one full-
+                        budget pass over all goals. Benchmark A/B toggle.
+  --no-query-log        Disable per-query telemetry (else appends one JSON line
+                        per tools/call to <out-dir>/query-log.jsonl; on by default
+                        in live mode, off in preloaded mode).
+  --no-auto-resolve     Do not auto-resolve a name to its sole near-match candidate
+                        (on by default; a one-line note flags any auto-resolution).
+  --enable-interact     Expose the write-side interaction-bridge tools (load,
+                        goal_type, goal_context, infer, normalize, case_split,
+                        refine, give) backed by a live `agda --interaction-json`
+                        session. Needs `agda` on $PATH (or --agda-bin).
+  --agda-bin P          Path to agda for interaction sessions (else $AGDA_BIN, $PATH).
+  --agda-arg ARG        Extra flag for `agda --interaction-json` (repeatable;
+                        e.g. --agda-arg --safe).
+  --inspect             Serve a localhost web inspector (activity feed + live
+                        editing view) at http://VERSION.1:7000 over Server-Sent
+                        Events. Off by default; localhost-only, no auth.
+  --inspect-port N      Inspector start port (implies --inspect; probes upward
+                        from N if busy, so several projects don't clash).
+  --no-auto-hints       Disable the speculative Mimer probe `check` runs over
+                        remaining goals (on by default; solutions it finds are
+                        reported inline).
+  --auto-hints-limit N  Max goals the check-time Mimer probe tries (default 3).
+  --auto-hints-timeout N  Mimer budget per probed goal, seconds (default 1).
+  --auto-hints-lemmas N  Seed the check-time probe with the top N in-scope graph
+                        hints (default 2; 0 = plain Mimer). A hint that closes a
+                        goal is named inline, teaching the agent the lemma exists.
+  --control-port N      Serve a localhost control endpoint (GET /check?file=…)
+                        for PostToolUse hooks; probes upward from N, writes the
+                        bound port to <out-dir>/control-port. Needs
+                        --enable-interact. Off by default.
+  --coverage-ignore GLOB  Source files (matching GLOB) intentionally outside every
+                        entry's closure; excluded from the coverage warning. Repeatable.
+  --overlay-graph FILE  Federate a prebuilt expanded graph.json (e.g. an agda-stdlib
+                        graph) into every snapshot so search/type_of/find_lemma see its
+                        definitions ([external: …]-tagged). Project defs win. Repeatable.
+  --tool-tier core|full Which tools tools/list advertises: 'full' (every tool,
+                        default) or 'core' (the measured-used subset — less agent
+                        decision-load; all tools stay reachable via the query CLI).
+  --config FILE         Load this .agda-explore.yml (else discovered; see below).
+  --show-defaults       Print a starter .agda-explore.yml (all defaults) to stdout
+                        and exit (redirect it: --show-defaults > .agda-explore.yml).
+  -h, --help            This help.
+  -V, --version         Version (with build fingerprint + binary identity).
+  --numeric-version     Print just the version number and exit.
+
+Config: a .agda-explore.yml / .yaml is discovered from --config,
+$AGDA_EXPLORE_CONFIG, ./.agda-explore.yml, or the nearest *.agda-lib ancestor.
+Keys are kebab-case mirrors of the flags above (e.g. no-watch, min-term-depth);
+merge order is defaults < config < CLI.
+
+Environment fallbacks: AGDA_EXPLORE_ENTRY (PATH-sep, multi-entry),
+AGDA_EXPLORE_INCLUDE (PATH-sep),
+AGDA_EXPLORE_GRAPH, AGDA_EXPLORE_PROJECT, AGDA_EXPLORE_CONFIG, AGDA_DEPS_BIN,
+AGDA_UNUSED_BIN.

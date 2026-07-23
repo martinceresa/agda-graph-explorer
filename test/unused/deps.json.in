@@ -1,0 +1,10 @@
+{ "v": 2, "schemaVersion": 2, "mode": "expanded",
+  "definitions": [
+    { "name": "Main.run", "module": "Main", "kind": "function", "line": 6, "access": "public" },
+    { "name": "Lib.foo", "module": "Lib", "kind": "function", "line": 3, "access": "public" },
+    { "name": "Lib.bar", "module": "Lib", "kind": "function", "line": 6, "access": "public" }
+  ],
+  "definitionEdges": [ ["Main.run", "Lib.foo"] ],
+  "moduleFiles": { "Main": "@ROOT@/Main.agda", "Lib": "@ROOT@/Lib.agda" },
+  "modules": [ "Main", "Lib" ]
+}

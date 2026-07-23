@@ -1,0 +1,17 @@
+brief
+callees
+callers
+check
+find_lemma
+goal_brief
+impact
+inspect
+lemmas
+load
+locate
+rebuild
+repair
+search
+status
+type_of
+unused

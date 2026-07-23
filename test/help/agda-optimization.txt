@@ -1,0 +1,54 @@
+agda-optimization — graph-level analyses for an agda-deps expanded JSON.
+
+USAGE:
+  agda-optimization <subcommand> <graph.json> [options...]
+
+SUBCOMMANDS:
+  motif           frequent subgraph motifs across the project
+  load-bearing    definitions that support the most valuable results
+  polyglot        definitions used widely across disparate contexts
+  fingerprint     near-duplicate subgraphs via Weisfeiler-Lehman labels
+  debt            postulates / holes / foundational shims propagating downstream
+  basket          association rules over co-used definitions
+  ledger          per-theorem trust budget: axiom footprint + cohorts
+  echo            reverse-direction fingerprint: who ANSWERS the same callers
+  gravity         PageRank / PPR / HITS centrality + blast radius
+  pyre            graph-only typecheck-cost prediction (elaborator hotspots)
+  chokepoint      node-capacitated min-cut + articulation points from theorems to axioms
+  silhouette      signature-vs-body topology twins (signature-tagged edges)
+  entwine         pairwise mutual information over caller baskets
+  fiedler         spectral bisection: bridge edges + low-lambda2 modules (SciPy)
+  horizon         eccentricity / proof geometry: diameter, radius, periphery, center
+  strata          declared-hierarchy module cohesion: LCOM' / instability / abstractness
+  term-cluster    AST-level subterm fingerprint clusters (needs --with-term-hashes)
+  concept-bundle  frequent itemsets over signature-provenance edges
+  hint-bench      leave-one-out premise-selection recall of the lemma ranker
+
+GLOBAL OPTIONS:
+  --graph FILE        input graph (alias of the positional <graph.json>;
+                      usable in any position, and wins over a positional).
+  --format human|json output format (default: human).
+  --json              alias of --format=json.
+  --out FILE          write the report to FILE (default: stdout).
+  --config FILE       load defaults from a YAML config file.
+  -h, --help          print this help and exit.
+  -V, --version       print the agda-optimization version and exit.
+  --numeric-version   print just the version number and exit.
+  --show-defaults     print a starter .agda-optimization.yml skeleton (global +
+                      one section per subcommand) to stdout and exit.
+
+YAML CONFIG:
+  Defaults can also be loaded from a YAML file (CLI flags override).
+  Discovery order: --config=PATH, $AGDA_OPTIMIZATION_CONFIG,
+  ./.agda-optimization.yml (or .yaml), then walking up to the
+  nearest *.agda-lib directory. Top-level keys: 'global:' plus one
+  per subcommand (e.g. 'load-bearing:'). Field names are the CLI
+  flag names without the '--' prefix.
+
+Run 'agda-optimization <subcommand> --help' for subcommand-specific options.
+
+EXIT CODES:
+  0  success.
+  1  error: bad flags/subcommand, unreadable or mismatched graph, config failure.
+  2  fiedler: helper script (scripts/fiedler_helper.py) not found.
+  3  fiedler: SciPy/NumPy not importable in the helper's Python.

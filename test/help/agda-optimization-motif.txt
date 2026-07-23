@@ -1,0 +1,20 @@
+agda-optimization motif — frequent subgraph motifs across the project
+
+USAGE:
+  agda-optimization motif <graph.json> [options...]
+
+OPTIONS:
+  --min-support=N         minimum embedding count (default 3)
+  --min-size=N            minimum motif size in nodes (default 2)
+  --max-size=N            maximum motif size in nodes (default 3)
+  --per-module            mine per-module (currently warns + falls back to global)
+  --top-n=N               rows to keep (default 50)
+  --exclude-hub-pct=F     drop top-pct% hub nodes by fan-in
+  --max-fan-out=N         skip seeds whose fan-out exceeds N
+  --budget=F              wall-clock seconds; 0 = unlimited (default)
+  --min-label-distinct=N  require >= N distinct (kind, state) labels (default 2)
+
+Plus the global flags --json, --out FILE, and --config FILE
+(parsed before subcommand flags). YAML defaults under the
+'motif:' section override defaults; CLI flags override config.
+See README.md for per-flag semantics.

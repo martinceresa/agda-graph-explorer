@@ -1,0 +1,56 @@
+agda-auto — batch hole-filling for Agda (a delivery vehicle for
+agda-explore's Mimer/lemma-search ladder; links no Agda, drives `agda`).
+
+Usage:
+  agda-auto [options] FILE.agda [FILE.agda ...]
+
+Runs the same auto ladder the agda-explore daemon uses over every open
+hole in each file: plain Mimer, then graph-ranked in-scope lemma hints.
+Prints a unified diff by default; --write applies it (Agda-validated,
+under the zero-axiom guard). Needs `agda` on $PATH (or --agda-bin).
+
+Options:
+  --write               Apply the solutions (write + reload) instead of
+                        printing a diff.
+  --annotate            Leave a marker comment in each unsolved hole
+                        (default on): its goal type + lemmas to try.
+  --no-annotate         Do not annotate unsolved holes.
+  --timeout N           Per-goal Mimer budget in seconds (default 5).
+  --hints K             Graph lemma hints fetched per goal (default 6;
+                        0 = plain Mimer, no graph ranking).
+  --graph FILE          Prebuilt expanded graph.json for hint ranking.
+                        Default: ./deps.json or ./.agda-explore/deps.json
+                        if present, else plain Mimer (no hints).
+  --overlay-graph FILE  Federate an external graph (e.g. agda-stdlib) into
+                        the hint corpus. Repeatable.
+  --format human|json   Output format (default: human).
+  --json                Alias of --format=json.
+  -i, --include DIR     Agda include directory for loading (repeatable).
+  --agda-bin P          Path to agda (else $AGDA_BIN, $PATH).
+  --agda-arg ARG        Extra flag for `agda --interaction-json`
+                        (repeatable; e.g. --agda-arg --safe).
+  --premise-select      Blend k-NN premise selection into hint ranking
+                        (needs edge provenance + signatures in the graph).
+  --rank-idf            IDF-weight the lemma ranker.
+  --no-hint-batch       Disable the batched-hint probe tier (A/B toggle).
+  --no-auto-ladder      Disable the two-pass budget ladder (A/B toggle).
+  --project DIR         Project root / agda cwd (default: current dir).
+  --wall-budget N       Overall wall cap in seconds (0 = none).
+  --repair              If a file fails to load with a scope error, add the
+                        missing imports first (import-only), then re-probe.
+  --fixpoint            With --write, re-sweep a project until a pass fills no
+                        new hole (a filled import can unblock a dependent).
+  --ledger FILE         Append one JSON line per goal (an attempt log) to FILE.
+  --config FILE         Load this .agda-auto.yml (else discovered).
+  --show-defaults       Print a starter .agda-auto.yml (all defaults) to
+                        stdout, then exit. Redirect it to create a config:
+                        agda-auto --show-defaults > .agda-auto.yml
+  -h, --help            This help.
+  -V, --version         Version (with build fingerprint).
+  --numeric-version     Print just the version number and exit.
+
+Config: a .agda-auto.yml / .yaml is discovered from --config,
+$AGDA_AUTO_CONFIG, ./.agda-auto.yml, or the nearest *.agda-lib ancestor.
+Keys are kebab-case mirrors of the flags; merge order defaults < config < CLI.
+
+Exit codes: 0 = no holes remain, 1 = holes remain, 2 = error.

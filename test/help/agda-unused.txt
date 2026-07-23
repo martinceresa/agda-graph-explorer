@@ -1,0 +1,49 @@
+agda-unused — flag unused imports in an Agda project.
+
+USAGE:
+  agda-unused --graph=DEPS.JSON [--kinds=...] [--rel-to=DIR] [--format=json] ROOT…
+
+OPTIONS:
+  --graph=FILE      agda-deps expanded JSON (produced by
+                      `agda-deps --format=json --json-mode=expanded`).
+  --json=FILE       alias of --graph=FILE (kept for compatibility).
+  --config=PATH     load options from YAML config (otherwise auto-discovered:
+                      $AGDA_UNUSED_CONFIG, ./.agda-unused.yml, then walk-up to
+                      the first dir containing a *.agda-lib).
+  --show-defaults   print a starter .agda-unused.yml (all defaults) to stdout
+                      and exit (redirect it: --show-defaults > .agda-unused.yml).
+  -h, --help        print this help and exit.
+  -V, --version     print the agda-unused version and exit.
+  --numeric-version print just the version number and exit.
+  --rel-to=DIR      print file paths relative to DIR (default: absolute).
+  --exclude=GLOB    drop findings whose file path or module name matches GLOB
+                      (repeatable). `**` spans directories, `*` stops at `/`,
+                      `?` one char — e.g. `--exclude='**/Init.agda'` or
+                      `--exclude='Prelude.*'`.
+  --format=FMT      output format: 'human' (default) or 'json'.
+  --json-out        alias of --format=json (kept for compatibility).
+  --group-by=G      aggregate findings into per-group counts instead of
+                      one line per finding. G is one of:
+                      dir   — bucket by directory of the (relativised) path
+                      file  — bucket by the (relativised) file path
+                      kind  — bucket by finding kind
+                      Output is sorted by descending count, ties broken by
+                      group key ascending.
+  --count-only      print only the grand total (`# total: N finding(s)`).
+                      Wins over --group-by if both are given.
+  --kinds=K[,K…]    which checks to run (default: 'using,duplicate').
+                      using          — symbols in `using (…)` not referenced in body
+                      duplicate      — same module opened twice from same file
+                      blanket        — blanket `open import M` with no observed use
+                      defined        — alias for `dead,internal-only`
+                      dead           — no callers anywhere (deletion candidate)
+                      internal-only  — intra-module callers only (private candidate)
+                      public         — `open … public` re-exports with no consumer
+                      all            — every check above
+
+ROOT…  one or more directories to source-scan for `.agda` / `.lagda*` files.
+
+EXIT CODES:
+  0  success (findings printed; a zero count is still success).
+  1  error: bad flags, unreadable/mismatched graph, config parse failure,
+     or a mis-scoped run (scanned files, none matched the graph).

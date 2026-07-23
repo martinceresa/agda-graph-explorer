@@ -1,0 +1,35 @@
+agda-goals — bucket goal types from `agda --interaction-json` to surface missing lemmas.
+
+USAGE:
+  agda-goals [OPTIONS] FILE...
+
+OPTIONS:
+  -i, --include=DIR    pass DIR to agda as an include path (repeatable).
+      --agda-bin=PATH  use the given agda binary instead of $PATH lookup.
+      --agda-arg=A     extra argument forwarded to agda (repeatable, e.g.
+                         --agda-arg=--allow-unsolved-metas).
+      --config=PATH    load options from YAML config (otherwise auto-discovered:
+                         $AGDA_GOALS_CONFIG, ./.agda-goals.yml, then walk up to
+                         the first dir containing a *.agda-lib).
+      --show-defaults  print a starter .agda-goals.yml (all defaults) to stdout
+                         and exit (redirect it: --show-defaults > .agda-goals.yml).
+      --format=FMT     output format: 'human' (default) or 'json'.
+      --top-n=N        in human mode, show only the top-N buckets (default 25).
+      --quiet          suppress the 'applied config' stderr breadcrumb.
+      --verbose        echo the IOTCM command and agda's raw output to stderr.
+  -h, --help           print this help and exit.
+  -V, --version        print the agda-goals version and exit.
+      --numeric-version  print just the version number and exit.
+
+ENVIRONMENT:
+  AGDA_GOALS_AGDA_BIN  fallback for --agda-bin when neither flag nor config set it.
+  AGDA_GOALS_CONFIG    explicit config-file path (highest priority after --config).
+
+EXIT CODES:
+  0  success.
+  1  CLI / usage error.
+  2  agda binary missing or could not be exec'd.
+  3  agda exited non-zero.
+  4  agda emitted output we couldn't parse.
+  5  no AllGoalsWarnings reply (protocol skew).
+  6  agda reported a structured error before reaching the goal pass.

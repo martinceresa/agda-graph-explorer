@@ -1,0 +1,4 @@
+{"info":{"errors":[],"invisibleGoals":[],"kind":"AllGoalsWarnings","visibleGoals":[{"constraintObj":{"id":0,"range":[{"end":{"col":18,"line":19,"pos":767},"start":{"col":9,"line":19,"pos":758}}]},"kind":"OfType","type":"n + 0 ≡ n"}],"warnings":[]},"kind":"DisplayInfo"}
+{"interactionPoints":[{"id":0,"range":[{"end":{"col":18,"line":19,"pos":767},"start":{"col":9,"line":19,"pos":758}}]}],"kind":"InteractionPoints"}
+{"info":{"info":"No solution found","kind":"Auto"},"kind":"DisplayInfo"}
+{"interactionPoints":[{"id":0,"range":[{"end":{"col":18,"line":19,"pos":767},"start":{"col":9,"line":19,"pos":758}}]}],"kind":"InteractionPoints"}
