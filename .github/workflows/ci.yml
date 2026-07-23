@@ -44,6 +44,22 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-ghc9.14.1-
 
+    - name: Canary fixture guard (files only ci-live reads)
+      # Fixtures referenced only by the non-blocking weekly ci-live canary (or
+      # silently skipped by it, like regen.sh behind an `if [ -f ]`) fail no
+      # PR gate when a `git add` is forgotten — that exact miss has shipped
+      # once. Assert they are tracked, and syntax-check the smoke script.
+      run: |
+        for f in test/auto/smoke.sh \
+                 test/interaction/regen.sh \
+                 test/interaction/src/Combine.agda \
+                 test/interaction/src/HoleHint.agda; do
+          git ls-files --error-unmatch "$f" >/dev/null \
+            || { echo "canary fixture untracked/missing: $f"; exit 1; }
+        done
+        bash -n test/auto/smoke.sh
+        echo "canary fixture guard OK"
+
     - name: Update Hackage index
       run: cabal update
 

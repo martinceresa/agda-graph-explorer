@@ -79,11 +79,17 @@ jobs:
       # Regenerate the committed transcripts against the installed agda; any
       # diff means the wire shape changed (an Agda bump) — the early warning
       # that today only surfaces when a human notices.
+      # `git status --porcelain`, not `git diff`: regen.sh writes into
+      # $(agda --version)/, so a version bump lands as an UNTRACKED dir that
+      # `git diff` would silently ignore — drift must catch that too.
       run: |
         if [ -f test/interaction/regen.sh ]; then
           bash test/interaction/regen.sh || { echo "regen failed"; exit 1; }
-          git diff --exit-code test/interaction/ \
-            || { echo "PROTOCOL DRIFT: golden transcripts changed — review + commit the regen."; exit 1; }
+          if [ -n "$(git status --porcelain -- test/interaction/)" ]; then
+            git status --porcelain -- test/interaction/
+            echo "PROTOCOL DRIFT: golden transcripts changed — review + commit the regen."
+            exit 1
+          fi
         fi
 
     - name: Edit hook Phase-2 (control endpoint warm check)
