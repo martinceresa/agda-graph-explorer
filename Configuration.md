@@ -39,6 +39,45 @@ skeleton with a `global:` section plus one section per subcommand, each key
 documented with its default. Saved verbatim the dump is a no-op overlay, so you
 only edit what you want to change.
 
+## Zero-config bootstrap (all tools at once)
+
+`scripts/zero-config.py` does the whole set in one shot: it runs each binary's
+own `--show-defaults`, points all of them at **one shared graph**
+(`.agda-deps/deps.json` by default), and writes the six files — the five tool
+configs plus a producer-side `.agda-deps.yml` holding the build recipe.
+
+```sh
+python3 scripts/zero-config.py --project /path/to/agda-project
+```
+
+Detection: include dirs come from the project's `*.agda-lib`, and the entry
+module from the root modules nobody imports (`--include` / `--entry` override,
+both repeatable). Then every tool runs bare:
+
+```sh
+agda-deps --config .agda-deps.yml src/Everything.agda   # build the shared graph
+agda-optimization motif                                 # graph from `global: graph:`
+agda-unused                                             # graph + roots from the config
+```
+
+Two deliberate asymmetries: `agda-explore` is wired **live** (`entries:` +
+`include:` + `out-dir:`, not `graph:`) because its graph path is
+`<out-dir>/deps.json` — so the daemon regenerates that same shared file and the
+other tools read what it published; pinning `graph:` would switch it to
+preloaded mode (no rebuilds, no watcher). `agda-goals` reads no graph at all, so
+it just gets `roots:` + `include-paths:`.
+
+The script **never builds the graph** (it spawns no Agda work) — it verifies
+one: that it exists and decodes as v2 expanded, that it carries the
+capabilities the configs assume (signatures / edge provenance / subterm
+hashes, delegated to `agda-explore doctor`), and that every config resolves to
+the same file — then prints the exact `agda-deps` command to build it. Existing
+configs are kept unless `--force`, and a kept config that reads a *different*
+graph is reported as a failure. Exit codes: `0` clean, `1` a check failed
+(disagreement, or an undecodable graph — a not-yet-built graph is only a
+warning), `2` usage/environment error. `--json` emits a machine-readable
+envelope; `--dry-run` writes nothing.
+
 ## `.agda-unused.yml`
 
 | Key        | CLI flag           | Meaning                                                    |
@@ -72,11 +111,23 @@ exclude: ["**/Init.agda"]
 A top-level `global:` section plus one section per subcommand, named in
 **kebab-case** (`load-bearing`, not `loadBearing`). Within a section the
 keys are that subcommand's `--help` flags without the `--` (e.g.
-`--min-support` ↔ `min-support`). `global:` keys: `format` (`human`|`json`;
-`json: bool` is a legacy alias) and `out` (output path).
+`--min-support` ↔ `min-support`).
+
+`global:` keys:
+
+| Key      | CLI flag                       | Meaning                                                        |
+|----------|--------------------------------|----------------------------------------------------------------|
+| `graph`  | `--graph` / positional         | Input expanded `graph.json`.                                   |
+| `format` | `--format`                     | `human` or `json` (`json: bool` is a legacy alias).            |
+| `out`    | `--out`                        | Write the report to this path instead of stdout.               |
+
+With `graph:` set, every subcommand runs with no path — `agda-optimization
+motif`. Precedence for the input graph is `--graph FILE` > a positional
+`<graph.json>` > this key.
 
 ```yaml
 global:
+  graph: .agda-deps/deps.json
   format: human
   out: out/opt-reports
 motif:        { max-size: 3, min-support: 10, budget: 300, min-label-distinct: 2 }

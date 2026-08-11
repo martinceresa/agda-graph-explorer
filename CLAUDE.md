@@ -501,9 +501,34 @@ scripts/
   build-stdlib-graph.sh         build a reusable overlay graph (e.g. agda-stdlib)
                                 for agda-explore --overlay-graph.
                                 Needs `pip install scipy numpy`.
-  run_all_opts.sh               build an expanded JSON (subterm hashes) for an
-                                entry module, then run every agda-optimization
-                                subcommand into an out-dir (one .txt + .json each).
+  zero-config.py                write a config for EVERY tool over one project
+                                (+ a producer .agda-deps.yml), all pointed at one
+                                shared graph <graph-dir>/deps.json (default
+                                .agda-deps/). Each file is that binary's own
+                                --show-defaults payload with keys overlaid at the
+                                line level (comments + order preserved, re-runs
+                                byte-identical). agda-explore is wired LIVE
+                                (out-dir, not graph:) so IT regenerates the shared
+                                file; agda-goals gets no graph. Builds nothing:
+                                verifies the graph (delegating to `agda-explore
+                                doctor --json`), cross-checks every config names
+                                the same file, and prints the agda-deps command.
+                                Exit 0/1/2 (`just zero-config`).
+  zero-config-smoke.sh          offline acceptance for the above: write +
+                                agreement + idempotence + a no-path
+                                agda-optimization run + disagreement→exit 1
+                                (CI; `just zero-config-smoke`).
+  run_all_opts.sh               run EVERY agda-optimization subcommand over one
+                                graph into an out-dir (one .txt + .json + an
+                                .err on diagnostics each), tolerating a failing
+                                analysis. Run from the top level: it passes no
+                                analysis flags and never cd's, so each run takes
+                                its defaults from ./.agda-optimization.yml; the
+                                subcommand list is parsed from the binary's own
+                                --help. Zero-arg = test/deps.json → opt-report/
+                                (`just opts`); given a src dir + entry it builds
+                                the expanded JSON (subterm hashes) with
+                                agda-deps first.
 
 plugin/                         Claude Code plugin: agda-explore MCP server +
                                 skill + two Agda agents.
@@ -553,7 +578,11 @@ plugin/                         Claude Code plugin: agda-explore MCP server +
   Merge order: **defaults → config → CLI**. Keys are kebab-case flag mirrors;
   `agda-optimization` nests per-subcommand sections (`load-bearing`, not
   `loadBearing`). A stderr breadcrumb fires on apply (suppressed by
-  `--json-out` / `--json`).
+  `--json-out` / `--json`). `agda-optimization`'s `global:` section also names
+  the **input** graph (`graph:`, read by `globalGraph` — not a `GlobalOpts`
+  field), so its config is loaded *before* the graph is resolved; precedence is
+  `--graph` > positional > config, and the positional is only claimed from the
+  residual when it doesn't look like a flag (`takePositional`).
 
 - **`BuildInfo` is split for the TH stage restriction.** The git-revision
   splice lives in `BuildInfoTH`; `BuildInfo` does the splice + CPP

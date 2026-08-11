@@ -26,7 +26,8 @@ SUBCOMMANDS:
 
 GLOBAL OPTIONS:
   --graph FILE        input graph (alias of the positional <graph.json>;
-                      usable in any position, and wins over a positional).
+                      usable in any position, and wins over a positional.
+                      Config fallback: `graph:` under `global:`).
   --format human|json output format (default: human).
   --json              alias of --format=json.
   --out FILE          write the report to FILE (default: stdout).
@@ -39,6 +40,8 @@ GLOBAL OPTIONS:
 
 YAML CONFIG:
   Defaults can also be loaded from a YAML file (CLI flags override).
+  The 'global:' section also names the INPUT graph ('graph: FILE'), so
+  a configured project needs no path on the command line.
   Discovery order: --config=PATH, $AGDA_OPTIMIZATION_CONFIG,
   ./.agda-optimization.yml (or .yaml), then walking up to the
   nearest *.agda-lib directory. Top-level keys: 'global:' plus one

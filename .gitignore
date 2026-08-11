@@ -25,6 +25,12 @@ PyRun/**/__pycache__/
 BattleTest/
 OptSite/
 
+# Default out-dir of scripts/run_all_opts.sh (one .txt/.json per subcommand).
+opt-report/
+
+# Byte-compiled scripts/ helpers (zero-config.py).
+scripts/__pycache__/
+
 # Note: .agda-explore/deps.json IS tracked here as a query/test fixture
 # (it is not this project's own generated graph — this repo links no Agda).
 

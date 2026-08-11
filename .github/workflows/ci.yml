@@ -161,6 +161,14 @@ jobs:
           || { echo "doctor missing-graph hint absent"; cat /tmp/doctor.out; exit 1; }
         echo "doctor (missing graph) exit 1 + hint OK"
 
+    - name: zero-config bootstrap (offline acceptance)
+      # Writes every tool's config for a throwaway project, asserts they all
+      # resolve to ONE graph, that a re-run is byte-identical, that
+      # agda-optimization then runs with no graph path, and that a hand-repointed
+      # config is caught (exit 1). No agda / agda-deps needed — their absence is
+      # a warning here, which this run also proves.
+      run: bash scripts/zero-config-smoke.sh
+
     - name: Shell completion script (agda-optimization)
       # Generated from the FlagSpec table: must be syntactically valid bash and
       # mention every subcommand (so completion can't drift from the parser).

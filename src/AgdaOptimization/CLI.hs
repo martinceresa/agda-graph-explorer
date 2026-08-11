@@ -46,7 +46,8 @@ import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , defaultGlobalOpts )
 import           AgdaOptimization.Config ( Config(..), discoverConfigPath
                                          , loadConfig, subSectionFor
-                                         , globalSection, applyGlobal )
+                                         , globalSection, applyGlobal
+                                         , globalGraph )
 import           AgdaOptimization.FlagSpec ( FlagSpec, flagName, flagHelp
                                            , renderFlagHelp )
 import qualified AgdaOptimization.Motif       as Motif
@@ -110,7 +111,8 @@ usage = unlines $
   [ ""
   , "GLOBAL OPTIONS:"
   , "  --graph FILE        input graph (alias of the positional <graph.json>;"
-  , "                      usable in any position, and wins over a positional)."
+  , "                      usable in any position, and wins over a positional."
+  , "                      Config fallback: `graph:` under `global:`)."
   , "  --format human|json output format (default: human)."
   , "  --json              alias of --format=json."
   , "  --out FILE          write the report to FILE (default: stdout)."
@@ -123,6 +125,8 @@ usage = unlines $
   , ""
   , "YAML CONFIG:"
   , "  Defaults can also be loaded from a YAML file (CLI flags override)."
+  , "  The 'global:' section also names the INPUT graph ('graph: FILE'), so"
+  , "  a configured project needs no path on the command line."
   , "  Discovery order: --config=PATH, $AGDA_OPTIMIZATION_CONFIG,"
   , "  ./.agda-optimization.yml (or .yaml), then walking up to the"
   , "  nearest *.agda-lib directory. Top-level keys: 'global:' plus one"
@@ -150,9 +154,11 @@ subUsage sub = unlines $
   , "OPTIONS:"
   ] ++ map ("  " ++) (subFlags sub) ++
   [ ""
-  , "Plus the global flags --json, --out FILE, and --config FILE"
-  , "(parsed before subcommand flags). YAML defaults under the"
-  , "'" ++ sub ++ ":' section override defaults; CLI flags override config."
+  , "Plus the global flags --graph FILE, --json, --out FILE, and --config"
+  , "FILE (parsed before subcommand flags). The graph may also come from"
+  , "'graph:' under 'global:' in the config, in which case <graph.json>"
+  , "can be omitted. YAML defaults under the '" ++ sub ++ ":' section"
+  , "override defaults; CLI flags override config."
   , "See README.md for per-flag semantics."
   ]
   where
@@ -238,6 +244,9 @@ defaultsYaml = unlines $
   , "# to override; the section headers below stay harmless no-ops until you do."
   , ""
   , "global:"
+  , "  # input graph (the positional <graph.json>; --graph FILE and a"
+  , "  # positional both win over this key)"
+  , "  # graph: deps.json"
   , "  # output format: human | json (default: human). `json: true` is a"
   , "  # legacy alias still accepted."
   , "  # format: json"
@@ -510,35 +519,18 @@ dispatch sub s
   | "--help" `elem` rawTail || "-h" `elem` rawTail = do
       putStrLn (subUsage sub)
       exitSuccess
-  | null rawTail && scanGraph s == Nothing = do
-      hPutStrLn stderr ("agda-optimization " ++ sub
-                          ++ ": missing <graph.json> (positional, or --graph FILE).")
-      hPutStrLn stderr (subUsage sub)
-      exitFailure
   | otherwise = do
       -- Surface a deferred trailing malformed-global error now — after
-      -- the subcommand-validation + @--help@ + missing-path guards.
+      -- the subcommand-validation + @--help@ guards.
       case scanPending s of
         Just e  -> hPutStrLn stderr (renderScanError e) >> exitFailure
         Nothing -> return ()
-      -- The graph path is `--graph` when given (it wins over any positional,
-      -- with a note), else the positional head. 'subArgs' is always the
-      -- residual tail (the first residual token is the positional path or the
-      -- redundant one --graph supersedes). When only --graph is given the
-      -- residual is empty, so 'drop 1' leaves it empty.
-      let subArgs = drop 1 (scanResidual s)
-      path <- case scanGraph s of
-        Just g  -> do
-          when (not (null (scanResidual s))) $
-            hPutStrLn stderr
-              "agda-optimization: both --graph and a positional graph.json given; using --graph."
-          pure g
-        Nothing -> case scanResidual s of
-          (p:_) -> pure p
-          []    -> error "dispatch: empty residual"   -- ruled out by the guard
       -- Discover + load the YAML config according to the documented
       -- priority order, then merge: global section before CLI's
-      -- global flags (so CLI wins).
+      -- global flags (so CLI wins). This runs BEFORE the input graph is
+      -- resolved, because `global: graph:` is one of the three ways to name
+      -- it — a missing positional is only an error once the config has had
+      -- its say.
       mCfgPath <- discoverConfigPath (scanConfig s)
       eCfg <- loadConfig mCfgPath
       cfg <- case eCfg of
@@ -546,17 +538,42 @@ dispatch sub s
           hPutStrLn stderr ("agda-optimization: " ++ err)
           exitFailure
         Right c -> pure c
+      let gSection = cfg >>= globalSection
       -- Merge order for the global block:
       --   1. start from defaults
       --   2. overlay YAML's global: section
       --   3. overlay CLI flags via 'overlayCli' (only the fields the
       --      scanner actually saw — tracked as 'Maybe', no sentinel
       --      value-equality guesswork)
-      gOpts <- case applyGlobal (cfg >>= globalSection) defaultGlobal of
+      gOpts <- case applyGlobal gSection defaultGlobal of
         Left err -> do
           hPutStrLn stderr ("agda-optimization: " ++ err)
           exitFailure
         Right g -> pure (overlayCli s g)
+      mCfgGraph <- case globalGraph gSection of
+        Left err -> do
+          hPutStrLn stderr ("agda-optimization: " ++ err)
+          exitFailure
+        Right g -> pure g
+      -- Input-graph precedence: `--graph` > positional > config's
+      -- `global: graph:`. 'takePositional' only claims the residual head as
+      -- the path when it is not itself a flag, so a subcommand flag can never
+      -- be mistaken for the graph (nor silently dropped from 'subArgs').
+      let (mPositional, subArgs) = takePositional (scanResidual s)
+      path <- case (scanGraph s, mPositional, mCfgGraph) of
+        (Just g, Just _, _) -> do
+          hPutStrLn stderr
+            "agda-optimization: both --graph and a positional graph.json given; using --graph."
+          pure g
+        (Just g,  Nothing, _)      -> pure g
+        (Nothing, Just p,  _)      -> pure p
+        (Nothing, Nothing, Just g) -> pure g
+        (Nothing, Nothing, Nothing) -> do
+          hPutStrLn stderr ("agda-optimization " ++ sub
+                              ++ ": missing <graph.json> (positional, --graph FILE,"
+                              ++ " or `graph:` under `global:` in the config).")
+          hPutStrLn stderr (subUsage sub)
+          exitFailure
       -- Stderr breadcrumb. Suppressed under --json so JSON-consuming
       -- pipelines stay quiet. Mirrors agda-deps / agda-unused.
       case (mCfgPath, gOutFormat gOpts) of
@@ -566,6 +583,14 @@ dispatch sub s
       runSubcommand sub path cfg gOpts subArgs
   where
     rawTail = scanRawTail s
+
+-- | Split the residual into @(positional graph path, subcommand args)@. The
+-- head is the path only when it does not look like a flag: with @--graph@ (or
+-- a config @graph:@) supplying the path, the residual head is a subcommand
+-- flag and must stay in the args.
+takePositional :: [String] -> (Maybe FilePath, [String])
+takePositional (p : rest) | take 1 p /= "-" = (Just p, rest)
+takePositional args                         = (Nothing, args)
 
 -- | Overlay the CLI's global choices (as captured in the 'Scan') onto a
 -- config-derived base 'GlobalOpts'. Each field is set iff the scanner

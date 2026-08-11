@@ -33,6 +33,7 @@ module AgdaOptimization.Config
   , subSectionFor
   , globalSection
   , applyGlobal
+  , globalGraph
     -- * Helpers re-used by per-subcommand 'applyConfig'
   , lookupKey
   , lookupKeyEnum
@@ -179,6 +180,15 @@ lookupKeyTextList section obj key =
 -- Global section overlay
 ----------------------------------------------------------------------
 
+-- | Read the @global: graph:@ key — the /input/ graph path, the config-file
+-- spelling of @--graph FILE@ / the positional @\<graph.json\>@ (CLI wins; see
+-- 'AgdaOptimization.CLI.dispatch'). Kept out of 'applyGlobal' because
+-- 'GlobalOpts' models the output side (format / out path) and the input graph
+-- is resolved before any subcommand runs.
+globalGraph :: Maybe A.Object -> Either String (Maybe FilePath)
+globalGraph Nothing    = Right Nothing
+globalGraph (Just obj) = lookupKey "global" obj "graph"
+
 -- | Apply the @global:@ section over a seed 'GlobalOpts'. Recognised
 -- keys:
 --
@@ -187,7 +197,9 @@ lookupKeyTextList section obj key =
 --     Canonical @format@ wins when both are present.
 --   * @out: PATH@          — sets 'gOutPath'.
 --
--- Unknown keys are silently ignored (forward-compatible).
+-- The section's @graph:@ key is read separately by 'globalGraph' (an input,
+-- not a 'GlobalOpts' field). Unknown keys are silently ignored
+-- (forward-compatible).
 applyGlobal :: Maybe A.Object -> GlobalOpts -> Either String GlobalOpts
 applyGlobal Nothing    g = Right g
 applyGlobal (Just obj) g0 = do

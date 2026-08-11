@@ -208,8 +208,10 @@ Each binary reads an optional YAML config; every key is a kebab-case mirror of a
 CLI flag, merged **defaults → config → CLI** (the command line always wins).
 Discovery, first match wins: `--config=PATH` > `$AGDA_<TOOL>_CONFIG` >
 `./.agda-<tool>.yml` > nearest ancestor with a `*.agda-lib`. Bootstrap a
-ready-to-edit file with `<binary> --show-defaults`. Full per-tool key reference:
-[Configuration.md](Configuration.md).
+ready-to-edit file with `<binary> --show-defaults`, or all of them at once —
+each pointed at one shared `.agda-deps/deps.json` — with
+`python3 scripts/zero-config.py --project DIR`, after which every tool runs with
+no flags. Full per-tool key reference: [Configuration.md](Configuration.md).
 
 ## Cross-repo runtime link
 
