@@ -213,6 +213,13 @@ each pointed at one shared `.agda-deps/deps.json` — with
 `python3 scripts/zero-config.py --project DIR`, after which every tool runs with
 no flags. Full per-tool key reference: [Configuration.md](Configuration.md).
 
+An **unknown key is an error**, not a silent no-op — the same treatment the
+argv parsers give an unknown flag, since a mistyped key would otherwise just
+fail to do anything. The diagnostic names the offender and suggests the
+intended key (`unknown key: min-suport (did you mean min-support?)`). A `--no-x`
+flag reads the positive key `x`, so write `x: false` rather than `no-x: true`;
+`--show-defaults` prints only keys that load.
+
 ## Cross-repo runtime link
 
 - **`agda-explore` → `agda-deps`.** Resolution: `--agda-deps-bin` >

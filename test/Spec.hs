@@ -65,6 +65,8 @@ import qualified AgdaRepair.Diagnostic as RD
 import qualified AgdaRepair.Edit       as RE
 import qualified AgdaRepair.Strategy   as RS
 import           Data.Aeson            ( Value, eitherDecode, encode, object, (.=) )
+import qualified Data.Aeson.Key        as K
+import qualified Data.Aeson.KeyMap     as KM
 import qualified Data.Map.Strict       as Map
 import           AgdaGraph.Schema      ( ExpandedGraph(..), Definition(..), ReExport(..)
                                        , State(..), Kind(..), Access(..)
@@ -72,6 +74,8 @@ import           AgdaGraph.Schema      ( ExpandedGraph(..), Definition(..), ReEx
 import           AgdaGraph.Index       ( buildIndex, lookupId, unsafeDeps, defAt
                                        , idxRealCount, moduleDependencyOrder )
 import           AgdaUnused.Analysis   ( Finding(..), FindingKind(..), analyse )
+import           AgdaGraph.ConfigCore  ( unknownKeys, unknownKeyError, nearestKey
+                                       , checkKnownKeys, extractValueFlag )
 
 ----------------------------------------------------------------------
 -- Tiny harness.
@@ -122,6 +126,7 @@ main = do
   sequence_ (map ($ fails) annotateTests)
   sequence_ (map ($ fails) aggregateTests)
   sequence_ (map ($ fails) moduleTopoTests)
+  sequence_ (map ($ fails) configKeyTests)
   premiseBenchTests fails
   replayTests fails
   schemaErrorTests fails
@@ -1771,3 +1776,70 @@ litFixture = T.unlines
   , ""
   , "More prose after the block."
   ]
+
+----------------------------------------------------------------------
+-- Config-file key vocabulary (AgdaGraph.ConfigCore).
+--
+-- A YAML key no reader looks up is a typo or a stale name; either way the
+-- value silently does nothing, which is the one failure mode a config file
+-- cannot show you. These pin the rejection + the suggestion heuristic, plus
+-- the `extractValueFlag` lifting that makes `--config` position-independent
+-- (see AgdaOptimization.CLI.run — the scanner reserves the post-subcommand
+-- slot for the graph path and never peels it).
+
+configKeyTests :: [Check]
+configKeyTests =
+  [ checkEq "unknownKeys: reports only the strays, ascending"
+      ["aa", "zz"] (unknownKeys ["a", "b"] (keyObj ["b", "zz", "aa"]))
+  , check "unknownKeyError: a fully-known object is accepted"
+      (unknownKeyError "cfg" ["a", "b"] (keyObj ["a"]) == Nothing)
+  , checkEq "unknownKeyError: one stray, with a near-miss suggestion"
+      (Just "cfg: unknown key: min-suport (did you mean min-support?)")
+      (unknownKeyError "cfg" ["min-support", "top-n"] (keyObj ["min-suport"]))
+  , checkEq "unknownKeyError: several strays are pluralised and joined"
+      (Just "cfg: unknown keys: min-suport (did you mean min-support?), \
+            \topn (did you mean top-n?)")
+      (unknownKeyError "cfg" ["min-support", "top-n"] (keyObj ["topn", "min-suport"]))
+  , checkEq "unknownKeyError: an unrelated key gets no misleading suggestion"
+      (Just "cfg: unknown key: zzzzzzzzzz")
+      (unknownKeyError "cfg" ["min-support", "top-n"] (keyObj ["zzzzzzzzzz"]))
+  , check "checkKnownKeys: Right on a clean object, Left otherwise"
+      (checkKnownKeys "cfg" ["a"] (keyObj ["a"]) == Right ()
+        && isLeftE (checkKnownKeys "cfg" ["a"] (keyObj ["b"])))
+  -- Suggestions: a toggle pair puts the CLI flag (`--no-include-postulates`)
+  -- three edits from the key it reads, so containment is tried first.
+  , checkEq "nearestKey: a negated flag spelling finds its positive key"
+      (Just "include-postulates")
+      (nearestKey "no-include-postulates" ["include-postulates", "foundational-inventory"])
+  , checkEq "nearestKey: a one-character typo"
+      (Just "graph") (nearestKey "grap" ["graph", "format", "out"])
+  , checkEq "nearestKey: containment needs to dominate both keys"
+      Nothing (nearestKey "timeout" ["out"])
+  , checkEq "nearestKey: nothing close enough stays silent"
+      Nothing (nearestKey "wholly-different" ["graph", "format"])
+  , checkEq "nearestKey: a short key gets a tighter budget"
+      Nothing (nearestKey "abcd" ["wxyz"])
+  -- The agda-auto instance, as a live example of the FromJSON-side check.
+  , check "agda-auto config: an unknown key fails the decode"
+      (isLeftY (decodeAuto "timeuot: 5\n"))
+  , check "agda-auto config: the same key spelled right decodes"
+      (either (const False) ((== Just 5) . AC.fcTimeout) (decodeAuto "timeout: 5\n"))
+  -- `--config` is lifted out of argv exactly like `--graph`, so both
+  -- spellings work in every position — including the slot right after the
+  -- subcommand, which the positional scanner takes verbatim as the path.
+  , checkEq "extractValueFlag: --config F peeled from the post-subcommand slot"
+      (Just "f.yml", ["motif", "g.json"])
+      (extractValueFlag "--config" ["motif", "--config", "f.yml", "g.json"])
+  , checkEq "extractValueFlag: --config=F peeled from the same slot"
+      (Just "f.yml", ["motif", "g.json"])
+      (extractValueFlag "--config" ["motif", "--config=f.yml", "g.json"])
+  , checkEq "extractValueFlag: a trailing bare --config yields no value"
+      (Nothing, ["motif", "g.json"])
+      (extractValueFlag "--config" ["motif", "g.json", "--config"])
+  ]
+  where
+    keyObj ks  = KM.fromList [ (K.fromText k, Y.Null) | k <- ks ]
+    isLeftE    = either (const True) (const False)
+    isLeftY    = either (const True) (const False)
+    decodeAuto :: Text -> Either Y.ParseException AC.FileConfig
+    decodeAuto = Y.decodeEither' . TE.encodeUtf8

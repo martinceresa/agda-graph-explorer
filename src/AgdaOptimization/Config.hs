@@ -34,6 +34,9 @@ module AgdaOptimization.Config
   , globalSection
   , applyGlobal
   , globalGraph
+    -- * Unknown-key rejection
+  , globalConfigKeys
+  , checkConfigKeys
     -- * Helpers re-used by per-subcommand 'applyConfig'
   , lookupKey
   , lookupKeyEnum
@@ -50,7 +53,8 @@ import           Data.Text               ( Text )
 import qualified Data.Text               as T
 import qualified Data.Yaml               as Y
 
-import           AgdaGraph.ConfigCore    ( DiscoverSpec(..), discoverWith )
+import           AgdaGraph.ConfigCore    ( DiscoverSpec(..), discoverWith
+                                         , checkKnownKeys )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..) )
 
 ----------------------------------------------------------------------
@@ -128,6 +132,38 @@ globalSection cfg = case KM.lookup "global" (cfgRoot cfg) of
   _                 -> Nothing
 
 ----------------------------------------------------------------------
+-- Unknown-key rejection
+----------------------------------------------------------------------
+
+-- | The keys the @global:@ section accepts. @graph@ is read by
+-- 'globalGraph', the other three by 'applyGlobal' — keep this list in step
+-- with both (it is the only place the section's vocabulary is enumerated,
+-- since the section is hand-walked rather than 'FlagSpec'-driven).
+globalConfigKeys :: [Text]
+globalConfigKeys = [ "graph", "format", "json", "out" ]
+
+-- | Reject any top-level section, or any key inside a section, that no
+-- reader looks up. @sections@ pairs every recognised section name with the
+-- keys it accepts; the top-level vocabulary is exactly those names.
+--
+-- Sections are checked whichever subcommand is running, so a typo in the
+-- @ledger:@ block surfaces on the next run of any analysis rather than
+-- lying dormant until someone happens to run @ledger@. Errors are prefixed
+-- with the config's own path, matching 'loadConfig'.
+checkConfigKeys :: Config -> [(String, [Text])] -> Either String ()
+checkConfigKeys cfg sections = do
+  checkKnownKeys (cfgSource cfg <> ": top level")
+                 [ T.pack name | (name, _) <- sections ]
+                 (cfgRoot cfg)
+  mapM_ checkSection sections
+  where
+    checkSection (name, known) = case KM.lookup (K.fromString name) (cfgRoot cfg) of
+      Just (A.Object o) -> checkKnownKeys (cfgSource cfg <> ": " <> name) known o
+      -- A non-mapping (or absent) section contributes no keys; 'subSectionFor'
+      -- already ignores it, and a scalar there is the user's own oddity.
+      _                 -> Right ()
+
+----------------------------------------------------------------------
 -- Helpers re-used by per-subcommand applyConfig
 ----------------------------------------------------------------------
 
@@ -198,8 +234,8 @@ globalGraph (Just obj) = lookupKey "global" obj "graph"
 --   * @out: PATH@          — sets 'gOutPath'.
 --
 -- The section's @graph:@ key is read separately by 'globalGraph' (an input,
--- not a 'GlobalOpts' field). Unknown keys are silently ignored
--- (forward-compatible).
+-- not a 'GlobalOpts' field); an unrecognised key is rejected up front by
+-- 'checkConfigKeys' (see 'globalConfigKeys').
 applyGlobal :: Maybe A.Object -> GlobalOpts -> Either String GlobalOpts
 applyGlobal Nothing    g = Right g
 applyGlobal (Just obj) g0 = do

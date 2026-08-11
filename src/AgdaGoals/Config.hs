@@ -23,8 +23,10 @@ module AgdaGoals.Config
   ) where
 
 import           Data.Aeson           ( FromJSON(..), (.:?), withObject )
+import           Data.Text            ( Text )
 
-import           AgdaGraph.ConfigCore ( DiscoverSpec(..), discoverWith, loadYamlConfig )
+import           AgdaGraph.ConfigCore ( DiscoverSpec(..), discoverWith, loadYamlConfig
+                                      , checkKnownKeysP )
 
 ----------------------------------------------------------------------
 -- Config shape.
@@ -70,8 +72,17 @@ applyConfig ConfigTarget{..} Config{..} = id
   . maybe id ctSetTopN      cfgTopN
   . maybe id ctSetRoots     cfgRoots
 
+-- | Every key the instance below reads. Keep the two in step: a key here
+-- with no @.:?@ silently does nothing, and a @.:?@ missing from here is
+-- rejected as unknown.
+knownKeys :: [Text]
+knownKeys =
+  [ "agda-bin", "include-paths", "agda-args", "format", "quiet", "top-n"
+  , "roots" ]
+
 instance FromJSON Config where
   parseJSON = withObject "agda-goals config" $ \o -> do
+    checkKnownKeysP "agda-goals config" knownKeys o
     cfgAgdaBin   <- o .:? "agda-bin"
     cfgIncludes  <- o .:? "include-paths"
     cfgExtraArgs <- o .:? "agda-args"

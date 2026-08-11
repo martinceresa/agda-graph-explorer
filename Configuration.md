@@ -1,10 +1,19 @@
 # Configuration (YAML)
 
 Each of the five binaries reads an optional YAML config. **Every key is a
-kebab-case mirror of a CLI flag** (`--json-out` ↔ `json-out`; `no-*` keys
-mirror the negative flags). Merge order is **defaults → config → CLI** — the
-command line always wins. A bad value type (and, for `agda-optimization`, an
-unknown key) fails fast with an error naming the file / section / key, exit 1.
+kebab-case mirror of a CLI flag** (`--json-out` ↔ `json-out`). Most `no-*`
+flags keep the negative spelling as their key (`--no-watch` ↔ `no-watch`), but
+where a flag pair toggles one setting the key is the **positive** name —
+`agda-optimization`'s `--no-include-postulates` reads `include-postulates`, so
+write `include-postulates: false`. `--show-defaults` prints exactly the keys
+that load, so copy from there when in doubt.
+
+Merge order is **defaults → config → CLI** — the command line always wins. A
+bad value type, or an unknown key/section, fails fast with an error naming the
+file / section / key, exit 1: a key no reader looks up would otherwise silently
+do nothing, which is the one mistake a config file cannot show you. The
+diagnostic suggests the intended key where it can
+(`unknown key: min-suport (did you mean min-support?)`).
 A stderr breadcrumb (`<binary>: applied config from …`) fires when a config
 applies, suppressed by `--quiet`, `agda-unused`'s `--json-out`, and
 `agda-optimization`'s `--json`.

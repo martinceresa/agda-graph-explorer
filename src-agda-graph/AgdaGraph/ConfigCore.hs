@@ -24,11 +24,24 @@ module AgdaGraph.ConfigCore
   , extractValueFlag
   , isAgdaSourceFile
   , splitEqFlags
+    -- * Unknown-key rejection
+  , unknownKeys
+  , unknownKeyError
+  , checkKnownKeys
+  , checkKnownKeysP
+  , nearestKey
   ) where
 
 import           Control.Exception  ( IOException, catch )
-import           Data.Aeson         ( FromJSON )
-import           Data.List          ( isPrefixOf, isSuffixOf, stripPrefix )
+import           Data.Aeson         ( FromJSON, Object )
+import qualified Data.Aeson.Key     as K
+import qualified Data.Aeson.KeyMap  as KM
+import qualified Data.Aeson.Types   as A
+import           Data.List          ( intercalate, isPrefixOf, isSuffixOf
+                                    , minimumBy, sort, sortOn, stripPrefix )
+import           Data.Ord           ( comparing )
+import           Data.Text          ( Text )
+import qualified Data.Text          as T
 import qualified Data.Yaml          as Y
 
 import           System.Directory   ( doesDirectoryExist, doesFileExist
@@ -151,6 +164,90 @@ splitEqFlags = concatMap split
       | "--" `isPrefixOf` a
       , (k, '=' : v) <- break (== '=') a = [k, v]
       | otherwise = [a]
+
+----------------------------------------------------------------------
+-- Unknown-key rejection
+----------------------------------------------------------------------
+
+-- | Keys present in @obj@ that are not in the known set, ascending.
+--
+-- The known set is the config-file counterpart of a parser's flag table:
+-- a key outside it is a typo or a stale key, and either way the value the
+-- user wrote has no effect. Every executable's @Config@ module rejects
+-- those rather than dropping them, matching the CLI parsers' treatment of
+-- an unknown flag (a hard error, so a typo never silently no-ops).
+unknownKeys :: [Text] -> Object -> [Text]
+unknownKeys known obj =
+  sort [ k | k <- map K.toText (KM.keys obj), k `notElem` known ]
+
+-- | Render the unknown-key diagnostic for a YAML object, or 'Nothing' when
+-- every key is recognised. Each offender carries a 'nearestKey' suggestion
+-- when one is close enough, so the common case (a one-character typo) names
+-- the key the user meant.
+unknownKeyError :: String -> [Text] -> Object -> Maybe String
+unknownKeyError label known obj = case unknownKeys known obj of
+  []  -> Nothing
+  bad -> Just $ label <> ": unknown key" <> plural bad <> ": "
+             <> intercalate ", " (map describe bad)
+  where
+    describe k = T.unpack k <> case nearestKey k known of
+      Just s  -> " (did you mean " <> T.unpack s <> "?)"
+      Nothing -> ""
+    plural [_] = ""
+    plural _   = "s"
+
+-- | 'Either'-flavoured 'unknownKeyError', for the hand-rolled config
+-- readers (@agda-optimization@, whose sections are walked by hand).
+checkKnownKeys :: String -> [Text] -> Object -> Either String ()
+checkKnownKeys label known obj =
+  maybe (Right ()) Left (unknownKeyError label known obj)
+
+-- | 'FromJSON'-flavoured 'unknownKeyError': fails the decode from inside a
+-- @withObject@ body, so the tools whose config is one aeson instance reject
+-- a stray key with the same wording. Call it as the first statement of the
+-- instance, passing the same key strings the @.:?@ lines use.
+checkKnownKeysP :: String -> [Text] -> Object -> A.Parser ()
+checkKnownKeysP label known obj =
+  maybe (pure ()) fail (unknownKeyError label known obj)
+
+-- | The known key the user most likely meant, or 'Nothing' when nothing is
+-- close enough — better silence than a misleading suggestion.
+--
+-- Containment is tried before edit distance so a negated flag spelling finds
+-- its key however long the affix is: several toggles share one key under the
+-- positive name (CLI @--no-include-postulates@, YAML @include-postulates@),
+-- which is far enough in edits to score as unrelated but is the single most
+-- predictable mistake in these files. Otherwise it is edit distance within 2
+-- (1 for keys too short for 2 edits to still mean the same key).
+nearestKey :: Text -> [Text] -> Maybe Text
+nearestKey _ []    = Nothing
+nearestKey k known
+  | (c : _) <- contained = Just c
+  | dist <= budget       = Just best
+  | otherwise            = Nothing
+  where
+    -- Longest first, and only when the overlap dominates both strings: `out`
+    -- sits inside `timeout` without the two being the same key.
+    contained = [ c | c <- sortOn (negate . T.length) known
+                    , c `T.isInfixOf` k || k `T.isInfixOf` c
+                    , let short = min (T.length c) (T.length k)
+                    , let long  = max (T.length c) (T.length k)
+                    , short >= 4, 2 * short >= long ]
+    scored       = [ (c, editDistance k c) | c <- known ]
+    (best, dist) = minimumBy (comparing snd) scored
+    budget       = if T.length k <= 4 then 1 else 2
+
+-- | Levenshtein distance over the two short strings a config key can be.
+-- Straight dynamic programming on rows; the inputs are key-sized, so the
+-- quadratic cost is irrelevant and the clarity is worth more than a
+-- band-limited variant.
+editDistance :: Text -> Text -> Int
+editDistance a b = last (foldl step [0 .. T.length b] (T.unpack a))
+  where
+    step row@(d : ds) c = scanl next (d + 1) (zip3 (T.unpack b) row ds)
+      where next left (cb, diag, up) =
+              minimum [ left + 1, up + 1, if c == cb then diag else diag + 1 ]
+    step [] _ = []
 
 -- | Read and parse a YAML config file. On a parse failure returns
 -- @Left@ with the library's clean, pretty-printed message; on success

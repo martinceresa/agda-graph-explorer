@@ -24,7 +24,7 @@ import           Control.Exception  (SomeException, finally, try)
 import           Control.Monad      (forM, void, when)
 import           Data.Aeson         (Value (..), object, toJSON, (.=))
 import qualified Data.Aeson.Key     as Key
-import           Data.List          (intercalate, isPrefixOf,
+import           Data.List          (intercalate, isPrefixOf, isSuffixOf,
                                      partition, sortOn)
 import           Data.Maybe         (fromMaybe)
 import qualified Data.Text          as T
@@ -142,6 +142,36 @@ parseOpts (x : xs) o = case x of
       (v : rest) -> parseOpts rest (f v)
       []         -> Left (x ++ " requires a value")
     readInt s d = case reads s of [(n, "")] -> n; _ -> d
+
+-- | Does this flag consume the token after it?
+--
+-- Probed from 'parseOpts' itself — a value-taking flag with nothing following
+-- fails with the parser's own @requires a value@ — so it cannot drift out of
+-- step with the flag table the way a hand-kept list would. @--config@ is the
+-- one flag the parser never sees ('extractConfigArg' lifts it out first), so
+-- it is named here.
+consumesValue :: String -> Bool
+consumesValue "--config" = True
+consumesValue f          = case parseOpts [f] defOpts of
+  Left e  -> "requires a value" `isSuffixOf` e
+  Right _ -> False
+
+-- | Pull the first bare token satisfying @p@ out of argv, returning it and
+-- argv without it. Flags are stepped over, along with the values they consume,
+-- so a token is only claimed when it is genuinely positional: @--graph doctor@
+-- names a file, not the subcommand.
+--
+-- This is what lets a subcommand follow the global flags instead of having to
+-- be @argv[0]@ — @agda-explore --config f.yml doctor@ used to fail with
+-- @unknown argument: doctor@.
+takeBareToken :: (String -> Bool) -> [String] -> Maybe (String, [String])
+takeBareToken p = go []
+  where
+    go _   []          = Nothing
+    go acc (a : rest)
+      | not ("-" `isPrefixOf` a), p a         = Just (a, reverse acc ++ rest)
+      | consumesValue a, (v : rest') <- rest  = go (v : a : acc) rest'
+      | otherwise                             = go (a : acc) rest
 
 orElse :: Maybe a -> Maybe a -> Maybe a
 orElse (Just x) _ = Just x
@@ -537,12 +567,21 @@ defaultsYaml = unlines
 -- server/config flags (@--graph FILE@, @-i DIR@). Read-oriented; the write
 -- bridge stays MCP-only.
 runQuery :: [String] -> IO ()
-runQuery [] = do
-  hPutStrLn stderr "usage: agda-explore query <tool> [key=value ...] [--json] [--graph FILE] [-i DIR ...]"
-  exitFailure
-runQuery (tool : rest) = do
-  let isKv a         = not ("-" `isPrefixOf` a) && '=' `elem` a
-      (kvs, flags0)  = partition isKv rest
+runQuery argv = case takeBareToken (not . isKv) argv of
+  -- The tool name is the first bare token that isn't a `key=value` arg, so it
+  -- may follow the server flags rather than leading them.
+  Nothing -> do
+    hPutStrLn stderr "usage: agda-explore query <tool> [key=value ...] [--json] [--graph FILE] [-i DIR ...]"
+    exitFailure
+  Just (tool, rest) -> runQueryWith tool rest
+
+-- | A @key=value@ tool argument, as opposed to a flag or the tool name.
+isKv :: String -> Bool
+isKv a = not ("-" `isPrefixOf` a) && '=' `elem` a
+
+runQueryWith :: String -> [String] -> IO ()
+runQueryWith tool rest = do
+  let (kvs, flags0)  = partition isKv rest
       wantJson       = "--json" `elem` flags0
       flags          = filter (/= "--json") flags0
       (mCfgArg, fl') = extractConfigArg (splitEqFlags flags)
@@ -589,10 +628,13 @@ main = do
   -- is handled in the server path — it also reports the binary identity.)
   when ("--numeric-version" `elem` argv) (putStrLn numericVersion >> exitSuccess)
   when ("--show-defaults" `elem` argv) (putStr defaultsYaml >> exitSuccess)
-  case argv of
-    ("query" : rest)  -> runQuery rest
-    ("doctor" : rest) -> runDoctorCli rest
-    _                 -> mainServer argv
+  -- The subcommand may sit anywhere among the global flags, not just at
+  -- argv[0]: `--config`/`--graph`/… are commonly written first, and the
+  -- flags left in `rest` are re-parsed by the subcommand itself.
+  case takeBareToken (`elem` ["query", "doctor"]) argv of
+    Just ("query",  rest) -> runQuery rest
+    Just ("doctor", rest) -> runDoctorCli rest
+    _                     -> mainServer argv
 
 -- | @agda-explore doctor [--graph FILE | --project DIR] [--enable-interact]
 -- [--json]@ — a one-shot environment preflight (no daemon). Builds the same

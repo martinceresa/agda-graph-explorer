@@ -476,8 +476,13 @@ src-agda-graph/AgdaGraph/       Shared library.
   ConfigCore.hs                 shared config-file discovery + raw YAML load +
                                 extractConfigFlag / extractValueFlag (the
                                 position-independent --key VALUE lifter, used by
-                                agda-optimization for --graph / --format),
-                                behind the four per-executable Config modules.
+                                agda-optimization for --graph / --format /
+                                --config) + the unknown-key rejection every
+                                Config module funnels through (unknownKeyError /
+                                checkKnownKeys for hand-walked sections,
+                                checkKnownKeysP inside a FromJSON instance;
+                                nearestKey suggests the intended key),
+                                behind the five per-executable Config modules.
   Version.hs                    single version source: versionLine /
                                 numericVersion off Paths_agda_graph_explorer,
                                 backing --version / --numeric-version on every
@@ -518,6 +523,15 @@ scripts/
                                 agreement + idempotence + a no-path
                                 agda-optimization run + disagreement→exit 1
                                 (CI; `just zero-config-smoke`).
+  config-smoke.sh               offline acceptance for the shared YAML config
+                                surface: --config honoured in EVERY argv
+                                position (incl. the un-peelable
+                                post-subcommand slot, and beside --graph), an
+                                unknown key/section rejected with a near-miss
+                                suggestion by every tool, each tool loading its
+                                own --show-defaults skeleton, and
+                                agda-explore's doctor/query accepting leading
+                                global flags (CI; `just config-smoke`).
   run_all_opts.sh               run EVERY agda-optimization subcommand over one
                                 graph into an out-dir (one .txt + .json + an
                                 .err on diagnostics each), tolerating a failing
@@ -583,6 +597,41 @@ plugin/                         Claude Code plugin: agda-explore MCP server +
   field), so its config is loaded *before* the graph is resolved; precedence is
   `--graph` > positional > config, and the positional is only claimed from the
   residual when it doesn't look like a flag (`takePositional`).
+
+- **An unknown config key is an error, and the known set is a second source
+  of truth — keep it in step.** A key no reader looks up silently does
+  nothing, which is the one mistake a config file can't show you, so every
+  `Config.hs` rejects it (`AgdaGraph.ConfigCore`). The four `FromJSON`-shaped
+  tools list their vocabulary in a `knownKeys` beside the instance: **add a
+  key there whenever you add a `.:?`**, or the new key is rejected as unknown.
+  `agda-optimization` instead derives its vocabulary from the `FlagSpec`
+  tables (`subConfigKeys`), so it can't drift — but read keys through
+  `flagConfigKey`, never `flagName`: a toggle pair shares one key under the
+  positive spelling (`--no-include-postulates` reads `include-postulates`) and
+  a secondary switch spelling contributes no key at all. `--show-defaults` is
+  built from the same accessor, so the skeleton can only advertise keys that
+  load — a property `scripts/config-smoke.sh` asserts per tool.
+
+- **`agda-optimization`'s `--graph` / `--format` / `--config` are lifted out
+  of argv before the positional scanner runs** (`extractValueFlag` in `run`).
+  This is load-bearing, not tidiness: `scanGlobals` takes the one token after
+  the subcommand verbatim as the graph path and never peels it, so a scanned
+  `--config` was silently unusable there — and `--graph`'s own lifting SHIFTS
+  a later flag into that slot, which made `motif --graph g.json --config f.yml`
+  fail with `unknown flag: --config` even though `--config` was written last.
+  Don't move one of the three back into the scanner. A trailing bare
+  `--config` is diagnosed explicitly in `run`, because `extractValueFlag`
+  drops it.
+
+- **`agda-explore`'s `doctor` / `query` are found anywhere in argv, not just
+  at `argv[0]`** (`MainMcp.takeBareToken`), so the flag-first habit every
+  other tool encourages works here too (`--config f.yml doctor` used to die
+  with `unknown argument: doctor`). It steps over flags *and the values they
+  consume*, so `--graph doctor` still names a file. Which flags consume a
+  value is **probed from `parseOpts` itself** (`consumesValue`: a value flag
+  with nothing after it fails with `requires a value`) rather than kept as a
+  second list — the one exception is `--config`, which `extractConfigArg`
+  lifts out before `parseOpts` ever sees it, so it is named explicitly there.
 
 - **`BuildInfo` is split for the TH stage restriction.** The git-revision
   splice lives in `BuildInfoTH`; `BuildInfo` does the splice + CPP

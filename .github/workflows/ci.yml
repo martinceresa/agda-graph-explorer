@@ -169,6 +169,14 @@ jobs:
       # a warning here, which this run also proves.
       run: bash scripts/zero-config-smoke.sh
 
+    - name: Config surface (offline acceptance)
+      # Two contracts users read as "my config is ignored" when they break:
+      # `--config FILE` / `--config=FILE` honoured in EVERY argv position (the
+      # positional scanner reserves the post-subcommand slot for the graph
+      # path), and an unknown key rejected rather than silently dropped — per
+      # tool, since each has its own key vocabulary.
+      run: bash scripts/config-smoke.sh
+
     - name: Shell completion script (agda-optimization)
       # Generated from the FlagSpec table: must be syntactically valid bash and
       # mention every subcommand (so completion can't drift from the parser).

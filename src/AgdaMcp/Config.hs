@@ -33,12 +33,14 @@ module AgdaMcp.Config
 import           Control.Exception (SomeException, displayException, try)
 import           Data.Aeson        (FromJSON (..), withObject, (.:?))
 import           Data.Maybe        (fromMaybe, isJust)
+import           Data.Text         (Text)
 import qualified Data.Yaml         as Y
 import           System.Directory  (doesFileExist, getCurrentDirectory)
 import           System.Environment (lookupEnv)
 import           System.Exit       (die)
 
-import           AgdaGraph.ConfigCore (DiscoverSpec (..), discoverInDir)
+import           AgdaGraph.ConfigCore (DiscoverSpec (..), discoverInDir
+                                      , checkKnownKeysP)
 import           AgdaMcp.State        (Tier (..))
 
 -- ---------------------------------------------------------------------
@@ -174,8 +176,25 @@ data FileConfig = FileConfig
   , fcToolTier       :: Maybe Tier
   }
 
+-- | Every key the instance below reads, back-compat spellings included.
+-- Keep the two in step: a key here with no @.:?@ silently does nothing, and
+-- a @.:?@ missing from here is rejected as unknown.
+knownKeys :: [Text]
+knownKeys =
+  [ "entry", "entries", "include", "graph", "project", "out-dir"
+  , "agda-deps-bin", "agda-unused-bin", "no-term-hashes", "no-signatures"
+  , "normalise-signatures", "show-implicit", "min-term-depth"
+  , "no-auto-rebuild", "no-watch", "no-incremental", "require-well-typed"
+  , "strict-producer", "rank-idf", "premise-select", "no-hint-batch"
+  , "no-auto-ladder", "no-query-log", "no-auto-resolve", "enable-interact"
+  , "agda-bin", "agda-arg", "interaction-heap-mb", "max-interaction-sessions"
+  , "interaction-idle-timeout", "inspect", "inspect-port", "no-auto-hints"
+  , "auto-hints-limit", "auto-hints-timeout", "auto-hints-lemmas"
+  , "control-port", "coverage-ignore", "overlay-graphs", "tool-tier" ]
+
 instance FromJSON FileConfig where
   parseJSON = withObject "agda-explore config" $ \o -> do
+    checkKnownKeysP "agda-explore config" knownKeys o
     fcEntry         <- o .:? "entry"
     fcEntries       <- o .:? "entries"
     fcInclude       <- o .:? "include"

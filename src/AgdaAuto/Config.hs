@@ -20,9 +20,11 @@ module AgdaAuto.Config
 
 import           Data.Aeson           ( FromJSON(..), (.:?), withObject )
 import           Data.Maybe           ( fromMaybe )
+import           Data.Text            ( Text )
 
 import           AgdaAuto.CLI         ( AutoOpts(..) )
-import           AgdaGraph.ConfigCore ( DiscoverSpec(..), discoverWith, loadYamlConfig )
+import           AgdaGraph.ConfigCore ( DiscoverSpec(..), discoverWith, loadYamlConfig
+                                      , checkKnownKeysP )
 
 -- | A parsed @.agda-auto.yml@. Every field 'Maybe'/absent-tolerant so an
 -- unset key leaves the seed untouched.
@@ -56,8 +58,21 @@ emptyFileConfig = FileConfig
   Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
   Nothing Nothing Nothing
 
+-- | Every key the instance below reads, aliases included. Keep the two in
+-- step: a key here with no @.:?@ silently does nothing, and a @.:?@ missing
+-- from here is rejected as unknown. (The @--show-defaults@ round-trip in
+-- test/Spec.hs decodes the emitted skeleton, so a key the dump advertises but
+-- this list omits fails the suite.)
+knownKeys :: [Text]
+knownKeys =
+  [ "write", "annotate", "timeout", "hints", "graph", "overlay-graphs"
+  , "json", "format", "include-paths", "agda-bin", "agda-args"
+  , "premise-select", "rank-idf", "no-hint-batch", "no-auto-ladder"
+  , "project", "wall-budget", "repair", "fixpoint", "ledger" ]
+
 instance FromJSON FileConfig where
   parseJSON = withObject "agda-auto config" $ \o -> do
+    checkKnownKeysP "agda-auto config" knownKeys o
     fcWrite         <- o .:? "write"
     fcAnnotate      <- o .:? "annotate"
     fcTimeout       <- o .:? "timeout"

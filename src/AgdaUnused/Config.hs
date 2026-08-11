@@ -34,7 +34,8 @@ import qualified Data.Aeson.Types    as A
 import           Data.Foldable       ( toList )
 import qualified Data.Text           as T
 
-import           AgdaGraph.ConfigCore ( DiscoverSpec(..), discoverWith, loadYamlConfig )
+import           AgdaGraph.ConfigCore ( DiscoverSpec(..), discoverWith, loadYamlConfig
+                                      , checkKnownKeysP )
 import           AgdaUnused.Analysis ( FindingKind(..), GroupBy, parseGroupBy )
 
 -- | Externally-supplied configuration. Every field is 'Maybe' so a
@@ -83,8 +84,17 @@ applyConfig ConfigTarget{..} Config{..} = id
 -- (@kinds: [using, blanket]@). Each token is expanded via
 -- 'parseKindsToken' so aliases like @\"defined\"@ still work in a
 -- list element.
+-- | Every key the instance below reads, aliases included. Keep the two in
+-- step: a key here with no @.:?@ silently does nothing, and a @.:?@ missing
+-- from here is rejected as unknown.
+knownKeys :: [T.Text]
+knownKeys =
+  [ "graph", "json", "rel-to", "format", "json-out", "kinds", "roots"
+  , "exclude", "group-by", "count-only" ]
+
 instance FromJSON Config where
   parseJSON = withObject "agda-unused config" $ \o -> do
+    checkKnownKeysP "agda-unused config" knownKeys o
     -- Input graph: canonical `graph:` wins over the legacy `json:` alias.
     cfgJson      <- (\g j -> g <|> j) <$> o .:? "graph" <*> o .:? "json"
     cfgRelTo     <- o .:? "rel-to"

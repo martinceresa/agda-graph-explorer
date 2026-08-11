@@ -28,6 +28,7 @@ module AgdaOptimization.FlagSpec
     -- * Spec accessors
   , flagName
   , flagHelp
+  , flagConfigKey
     -- * Interpreters
   , parseFlags
   , applyFlagConfig
@@ -145,6 +146,25 @@ flagName (TextFlag     n _ _)     = n
 flagName (StrFlag      n _ _)     = n
 flagName (TextListFlag n _ _ _)   = n
 flagName (EnumFlag     n _ _ _ _) = n
+
+-- | The YAML key this flag reads under, or 'Nothing' when it takes no part
+-- in the config overlay.
+--
+-- NOT the same as 'flagName' in general, which is why the unknown-key check
+-- and the @--show-defaults@ skeleton both go through here: a 'SwitchFlag'
+-- carries its key explicitly, so a toggle pair shares one key under the
+-- positive spelling (@--no-include-postulates@ reads @include-postulates@)
+-- and the secondary spelling contributes no key at all. Reading keys off
+-- 'flagName' would advertise — and then accept — names 'applyFlagConfig'
+-- never looks up.
+flagConfigKey :: FlagSpec o -> Maybe Text
+flagConfigKey (SwitchFlag _ _ _ _ key _) = key
+flagConfigKey (IntFlag      n _ _)       = Just (T.pack n)
+flagConfigKey (DblFlag      n _ _)       = Just (T.pack n)
+flagConfigKey (TextFlag     n _ _)       = Just (T.pack n)
+flagConfigKey (StrFlag      n _ _)       = Just (T.pack n)
+flagConfigKey (TextListFlag n _ _ _)     = Just (T.pack n)
+flagConfigKey (EnumFlag     n _ _ _ _)   = Just (T.pack n)
 
 -- | The flag's verbatim help line (no leading indent).
 flagHelp :: FlagSpec o -> String
