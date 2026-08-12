@@ -186,12 +186,20 @@ printf 'graph: %s\n' "$graph" > "$tmp/x.yml"
 for form in "--config=$tmp/x.yml doctor --json" \
             "--config $tmp/x.yml doctor --json" \
             "doctor --config=$tmp/x.yml --json" \
-            "--graph $graph doctor --json" \
-            "--enable-interact --graph $graph doctor --json"; do
+            "--graph $graph doctor --json"; do
   # shellcheck disable=SC2086
   run "$exp" $form
   [ "$code" -eq 0 ] || fail "agda-explore $form: exit $code ($(printf '%s' "$err" | head -1))"
 done
+
+# A value-LESS global flag before the subcommand, where what is under test is
+# that `doctor` was still FOUND — not the verdict it then reports. Asserting
+# exit 0 here would be asserting the machine has Agda: --enable-interact adds
+# the `agda` probe, which legitimately fails (exit 1) on a host without it.
+# So look for the report itself; a misparse exits before printing one.
+run "$exp" --enable-interact --graph "$graph" doctor --json
+printf '%s' "$out" | grep -q '"checks"' \
+  || fail "agda-explore --enable-interact … doctor --json: no report ($(printf '%s' "$err" | head -1))"
 
 # `query` likewise, and the answer must not depend on where the flags sit.
 "$exp" query search query=eval --graph "$graph" > "$tmp/q1" 2>/dev/null || true

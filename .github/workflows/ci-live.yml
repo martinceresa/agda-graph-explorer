@@ -24,7 +24,19 @@ jobs:
     - name: Check out the repository
       uses: actions/checkout@v4
 
+    - name: Set up GHC 9.10.3 (builds Agda only, not this project)
+      # Agda 2.8.0 caps base < 4.22, so it cannot be built with the project's
+      # pinned 9.14.1 (base-4.22) at all. `agda` is a standalone executable, so
+      # the compiler behind it is independent of ours: build it with a version
+      # Agda is tested against. 9.10.3 rather than its newest tested 9.12.4,
+      # whose RTS is the one cabal.project documents as heap-corrupting.
+      uses: haskell-actions/setup@v2
+      with:
+        ghc-version: '9.10.3'
+        cabal-version: '3.16'
+
     - name: Set up Haskell (GHC 9.14.1 + cabal 3.16)
+      # Last, so the project's pinned compiler is the default `ghc`.
       uses: haskell-actions/setup@v2
       with:
         ghc-version: '9.14.1'
@@ -48,10 +60,13 @@ jobs:
     - name: Install Agda (pinned)
       # A slow first run; cached across weekly runs. Pin a version whose
       # --interaction-json wire shape our golden transcripts were regenerated
-      # against (test/interaction/<version>/).
+      # against (test/interaction/<version>/) — hence no fallback to the newest
+      # release: a different Agda would fail the drift check for a reason that
+      # has nothing to do with drift. --with-compiler overrides cabal.project's
+      # with-compiler even from inside the tree (see the 9.10.3 step above).
       run: |
-        cabal install Agda-2.8.0 --installdir="$HOME/.local/bin" --overwrite-policy=always || \
-          cabal install Agda      --installdir="$HOME/.local/bin" --overwrite-policy=always
+        cabal install Agda-2.8.0 --with-compiler=ghc-9.10.3 \
+          --installdir="$HOME/.local/bin" --overwrite-policy=always
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
     - name: Build all targets
