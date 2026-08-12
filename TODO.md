@@ -20,12 +20,12 @@ Forward-looking work. Recipes: [Examples.md](Examples.md); deferred/refused:
 - [ ] **Stdlib federation follow-ups** — auto-build/register a stdlib overlay on
   first run; a producer flag keeping cross-boundary external edges as dangling
   refs (agda-deps), so `callers`/`impact` can cross into the overlay.
-- [ ] **File-level option escapes (producer half)** — surface
-  `--no-positivity-check` / `--type-in-type` / `--no-termination-check` once
-  `agda-deps` emits `moduleOptionEscapes`. Per-def `unsafe` half + taint ship.
+- [ ] **File-level option escapes (producer half)** — the consumer half ships
+  (`moduleOptionEscapes` decoded, folded into `defUnsafe` by `buildIndex`, taint
+  + `unsafe=` audit); needs `agda-deps` to emit the field for real projects.
 - [ ] **Structural goal canonicalisation** — `agda-goals` canonicalises goal
   types textually; a `Term`-level version needs a Backend hook or a surface-AST
-  parser (see `AgdaGoals.Canon` haddock).
+  parser (see `AgdaGraph.GoalCanon` haddock).
 - [ ] **Surface-AST simplifier with typecheck rollback** — mechanical local
   rewrites with per-module typecheck + rollback; highest-risk; defer until
   `term-cluster` surfaces candidates. See [Backlog.md](Backlog.md).

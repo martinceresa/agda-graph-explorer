@@ -134,12 +134,7 @@ extractValueFlag name = go Nothing []
 -- counterpart of 'extractValueFlag', for the same reason: a global switch
 -- that must work in any position cannot be left to a positional parser.
 extractSwitchFlag :: String -> [String] -> (Bool, [String])
-extractSwitchFlag name = go False []
-  where
-    go found acc [] = (found, reverse acc)
-    go found acc (a:rest)
-      | a == name = go True acc rest
-      | otherwise = go found (a : acc) rest
+extractSwitchFlag name args = (name `elem` args, filter (/= name) args)
 
 -- | Lift a toggle PAIR (@--foo@ / @--no-foo@) out of argv, returning the
 -- last occurrence of either spelling and the remaining args with every

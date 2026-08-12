@@ -28,7 +28,7 @@ module AgdaOptimization.CLI
   ) where
 
 import           Control.Applicative     ( (<|>) )
-import           Control.Monad           ( when )
+import           Control.Monad           ( forM_, when )
 import qualified Data.Aeson              as A
 import           Data.List               ( find, stripPrefix )
 import           Data.Maybe              ( fromMaybe, mapMaybe )
@@ -163,11 +163,12 @@ subUsage sub = unlines $
   , "OPTIONS:"
   ] ++ map ("  " ++) (subFlags sub) ++
   [ ""
-  , "Plus the global flags --graph FILE, --json, --out FILE, --no-explain"
-  , "and --config FILE (parsed before subcommand flags). The graph may also"
-  , "come from 'graph:' under 'global:' in the config, in which case <graph.json>"
-  , "can be omitted. YAML defaults under the '" ++ sub ++ ":' section"
-  , "override defaults; CLI flags override config."
+  , "Plus the global flags --graph FILE, --format human|json, --json, --out FILE,"
+  , "--explain/--no-explain and --config FILE (all usable in any position, before"
+  , "or after the subcommand). The graph may also come from 'graph:' under"
+  , "'global:' in the config, in which case <graph.json> can be omitted. YAML"
+  , "defaults under the '" ++ sub ++ ":' section override defaults; CLI flags"
+  , "override config."
   , "See README.md for per-flag semantics."
   ]
   where
@@ -355,8 +356,8 @@ withSpecs sub k nothing = case sub of
 --   3. Subcommand dispatch.
 -- | Completion data for @agda-optimization@, derived from the subcommand list
 -- and each subcommand's 'flagSpecs' (via 'subFlagPairs'), so the completion
--- script can't drift from the parser. Global flags are the ones 'scanGlobals'
--- / the pre-pass recognise, plus the meta flags.
+-- script can't drift from the parser. Global flags are the ones the
+-- argv pre-pass in 'run' lifts, plus the meta flags.
 completionSpec :: CompletionSpec
 completionSpec = CompletionSpec
   { csProg    = "agda-optimization"
@@ -383,29 +384,28 @@ run = do
       putStr (renderCompletion shell completionSpec)
       exitSuccess
     [] -> pure ()
-  -- Lift EVERY global out of argv before the positional scanner runs. The
-  -- scanner reserves the one token after the subcommand for the graph path
-  -- and never peels it (see 'scanGlobals'), so any global landing in that
-  -- slot was silently unusable — and each lifted flag SHIFTS the next one
-  -- into it, which is why `motif --graph g.json --config f.yml` used to die
-  -- with `unknown flag: --config` even though `--config` was written last.
+  -- Lift EVERY global out of argv before the positional split runs. That
+  -- split reserves the one token after the subcommand for the graph path
+  -- and never peels it, so any global landing in that slot was silently
+  -- unusable — and each lifted flag SHIFTS the next one into it, which is
+  -- why `motif --graph g.json --config f.yml` used to die with
+  -- `unknown flag: --config` even though `--config` was written last.
   -- Lifting the whole group removes the slot from the question: every
   -- global now works in every position, which is what `--help` has always
-  -- claimed by listing them together.
+  -- claimed by listing them together. Don't move one back into the split:
+  -- peeling there cannot see the slot.
   let (mGraph,      argv1) = extractValueFlag  "--graph"  argv0
       (mFmtRaw,     argv2) = extractValueFlag  "--format" argv1
       (mCfgPathArg, argv3) = extractValueFlag  "--config" argv2
       (mOutPath,    argv4) = extractValueFlag  "--out"    argv3
       (sawJson,     argv5) = extractSwitchFlag "--json"   argv4
       (mExplain,    argv)  = extractToggleFlag "--explain" "--no-explain" argv5
-  -- 'extractValueFlag' drops a trailing bare `--config` / `--out` (no FILE);
+  -- 'extractValueFlag' drops a trailing bare value flag (no FILE);
   -- diagnose rather than silently running without it.
-  when (mCfgPathArg == Nothing && "--config" `elem` argv0) $ do
-    hPutStrLn stderr "agda-optimization: --config: missing FILE argument"
-    exitFailure
-  when (mOutPath == Nothing && "--out" `elem` argv0) $ do
-    hPutStrLn stderr "agda-optimization: --out: missing FILE argument"
-    exitFailure
+  forM_ [(mCfgPathArg, "--config"), (mOutPath, "--out")] $ \(mv, flag) ->
+    when (mv == Nothing && flag `elem` argv0) $ do
+      hPutStrLn stderr ("agda-optimization: " ++ flag ++ ": missing FILE argument")
+      exitFailure
   fmtOverride <- case mFmtRaw of
     Nothing      -> pure Nothing
     Just "json"  -> pure (Just OutJson)
@@ -424,82 +424,43 @@ run = do
     ("-V":_)                    -> printVersion False >> exitSuccess
     ("--version":_)             -> printVersion False >> exitSuccess
     ("--numeric-version":_)     -> printVersion True  >> exitSuccess
-    _ -> case scanGlobals argv of
-      Scan{ scanSub = Nothing } -> do
-        hPutStrLn stderr "agda-optimization: missing subcommand."
-        hPutStrLn stderr "Try 'agda-optimization --help' for the list of subcommands."
-        exitFailure
-      s0@Scan{ scanSub = Just sub } ->
-        -- Fold in the lifted-out globals. `--graph` sets 'scanGraph' (wins
-        -- over any positional in 'dispatch'); `--config` is the explicit
-        -- path handed to 'discoverConfigPath'; `--format` still beats
-        -- `--json`, in either position, since it names the format outright.
-        dispatch sub s0 { scanGraph     = mGraph
+    -- Everything left is the subcommand and its own args: no global
+    -- reaches here. `--graph` wins over any positional in 'dispatch';
+    -- `--config` is the explicit path handed to 'discoverConfigPath';
+    -- `--format` beats `--json`, in either position, since it names the
+    -- format outright.
+    (sub:subArgv) ->
+      dispatch sub Scan { scanGraph     = mGraph
                         , scanConfig    = mCfgPathArg
                         , scanOutPath   = mOutPath
                         , scanExplain   = mExplain
                         , scanOutFormat =
                             fmtOverride
-                              <|> (if sawJson then Just OutJson else Nothing) }
+                              <|> (if sawJson then Just OutJson else Nothing)
+                        , scanArgs      = subArgv }
 
--- | The split argv, plus the globals 'run' lifted out before scanning.
--- Each global field records whether the corresponding flag was seen
--- (@Nothing@ = not set, so the default applies), which lets the final
+-- | The globals 'run' lifted out of argv, plus the args left over for the
+-- subcommand. Each global field records whether the corresponding flag was
+-- seen (@Nothing@ = not set, so the default applies), which lets the final
 -- 'GlobalOpts' be @scanned '<|>' defaults@ with no
 -- value-equality-against-default heuristic.
 --
--- 'scanRawTail' is the raw list of args after the subcommand. 'dispatch'
--- makes the unknown-subcommand / @--help@ / missing-path decisions
--- against it rather than 'scanResidual'.
+-- 'scanArgs' is everything after the subcommand token, verbatim: the head
+-- is the positional graph path when it doesn't look like a flag (see
+-- 'takePositional'), and 'dispatch' makes its unknown-subcommand /
+-- @--help@ / missing-path decisions against the same list. There is no
+-- second, peeled copy — @--graph@, @--format@, @--config@, @--out@,
+-- @--json@ and the @--explain@ pair are all lifted in 'run', so nothing
+-- here needs peeling.
 data Scan = Scan
   { scanOutFormat :: !(Maybe OutFormat) -- ^ @Just OutJson@ once @--json@ seen.
   , scanOutPath   :: !(Maybe FilePath)  -- ^ @--out@ / @--out=@ value, last wins.
   , scanConfig    :: !(Maybe FilePath)  -- ^ @--config@ / @--config=@ value.
   , scanGraph     :: !(Maybe FilePath)  -- ^ @--graph@ / @--graph=@ value; wins
                                         --   over any positional graph path.
-  , scanSub       :: !(Maybe String)    -- ^ the subcommand token, once found.
-  , scanRawTail   :: ![String]          -- ^ raw args after the subcommand.
-  , scanResidual  :: ![String]          -- ^ args for the subcommand parser (head = path).
   , scanExplain   :: !(Maybe Bool)      -- ^ @--explain@ / @--no-explain@, last wins.
+  , scanArgs      :: ![String]          -- ^ args after the subcommand (head = path).
   }
-
--- | Single pass over the argv left after 'run' has lifted every global
--- out, splitting it into the subcommand token and the subcommand's own
--- args.
---
--- No global reaches here any more — @--graph@, @--format@, @--config@,
--- @--out@, @--json@ and the @--explain@ pair are all lifted in 'run'
--- ('extractValueFlag' / 'extractSwitchFlag' / 'extractToggleFlag'), which
--- is what makes them work in every position INCLUDING the un-peelable
--- path slot below. Don't move one back into this scanner: peeling here
--- cannot see the slot, and lifting one flag shifts the next into it.
---
--- Positional contract:
---
---   * The first token is the subcommand.
---   * The token immediately after it is taken as-is (the graph path).
---   * Everything after that accumulates into the residual args handed to
---     the subcommand's own parser.
-scanGlobals :: [String] -> Scan
-scanGlobals argv = case argv of
-  []       -> empty
-  (a:rest) -> case rest of
-    []          -> empty { scanSub = Just a, scanRawTail = rest }
-    (path:more) -> empty { scanSub      = Just a
-                         , scanRawTail  = rest
-                         , scanResidual = path : more
-                         }
-  where
-    empty = Scan
-      { scanOutFormat = Nothing
-      , scanOutPath   = Nothing
-      , scanConfig    = Nothing
-      , scanGraph     = Nothing
-      , scanSub       = Nothing
-      , scanRawTail   = []
-      , scanResidual  = []
-      , scanExplain   = Nothing
-      }
 
 -- | Print the version. With @numericOnly = True@, just the bare
 -- semver (@X.Y.Z@); otherwise @agda-optimization X.Y.Z@. Format and
@@ -511,11 +472,10 @@ printVersion numericOnly
   | otherwise   = putStrLn (versionLine "agda-optimization")
 
 -- | Dispatch a resolved 'Scan' to the chosen subcommand. The guards
--- below decide unknown-subcommand / @--help@ / missing-path against the
--- /raw/ post-subcommand tail ('scanRawTail') — so a trailing global the
--- single-pass scanner already peeled cannot reorder these. Only once
--- those pass do we run the analysis with the scanned 'GlobalOpts' /
--- config path / residual.
+-- below decide unknown-subcommand / @--help@ / missing-path first, so a
+-- @--help@ anywhere after the subcommand wins over a missing graph path.
+-- Only once those pass do we run the analysis with the scanned
+-- 'GlobalOpts' / config path / args.
 dispatch :: String -> Scan -> IO ()
 dispatch sub s
   | sub `elem` ["-h", "--help"] = putStrLn usage >> exitSuccess
@@ -523,7 +483,7 @@ dispatch sub s
       hPutStrLn stderr ("agda-optimization: unknown subcommand: " ++ sub)
       hPutStrLn stderr "Try 'agda-optimization --help' for the list of subcommands."
       exitFailure
-  | "--help" `elem` rawTail || "-h" `elem` rawTail = do
+  | "--help" `elem` scanArgs s || "-h" `elem` scanArgs s = do
       putStrLn (subUsage sub)
       exitSuccess
   | otherwise = do
@@ -568,10 +528,10 @@ dispatch sub s
           exitFailure
         Right g -> pure g
       -- Input-graph precedence: `--graph` > positional > config's
-      -- `global: graph:`. 'takePositional' only claims the residual head as
-      -- the path when it is not itself a flag, so a subcommand flag can never
-      -- be mistaken for the graph (nor silently dropped from 'subArgs').
-      let (mPositional, subArgs) = takePositional (scanResidual s)
+      -- `global: graph:`. 'takePositional' only claims the head as the path
+      -- when it is not itself a flag, so a subcommand flag can never be
+      -- mistaken for the graph (nor silently dropped from 'subArgs').
+      let (mPositional, subArgs) = takePositional (scanArgs s)
       path <- case (scanGraph s, mPositional, mCfgGraph) of
         (Just g, Just _, _) -> do
           hPutStrLn stderr
@@ -593,10 +553,8 @@ dispatch sub s
           hPutStrLn stderr $ "agda-optimization: applied config from " ++ p
         _ -> return ()
       runSubcommand sub path cfg gOpts subArgs
-  where
-    rawTail = scanRawTail s
 
--- | Split the residual into @(positional graph path, subcommand args)@. The
+-- | Split the args into @(positional graph path, subcommand args)@. The
 -- head is the path only when it does not look like a flag: with @--graph@ (or
 -- a config @graph:@) supplying the path, the residual head is a subcommand
 -- flag and must stay in the args.

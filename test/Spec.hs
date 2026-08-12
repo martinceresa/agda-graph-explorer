@@ -80,7 +80,7 @@ import           AgdaUnused.Analysis   ( Finding(..), FindingKind(..), analyse )
 import           AgdaGraph.ConfigCore  ( unknownKeys, unknownKeyError, nearestKey
                                        , checkKnownKeys, extractValueFlag )
 import           AgdaOptimization.Legend ( legendKeys, renderLegend )
-import           AgdaOptimization.FlagSpec ( helpDefaultDrift )
+import           AgdaOptimization.FlagSpec ( FlagSpec, helpDefaultDrift )
 import qualified AgdaOptimization.Basket        as Basket
 import qualified AgdaOptimization.Chokepoint    as Chokepoint
 import qualified AgdaOptimization.ConceptBundle as ConceptBundle
@@ -269,29 +269,33 @@ helpDefaultTests =
 -- | One entry per subcommand: the drift lines its flag table produces.
 -- Each entry monomorphises 'helpDefaultDrift' at that subcommand's own
 -- @Options@ type, which is why this is a list of results rather than a
--- list of (specs, defaults) pairs.
+-- list of (specs, defaults) pairs. 'drift' names the subcommand once —
+-- writing it twice per row let a typo mislabel a passing test.
 helpDefaultDrifts :: [(String, [String])]
 helpDefaultDrifts =
-  [ ("motif",          helpDefaultDrift "motif" Motif.flagSpecs Motif.defaultOptions)
-  , ("load-bearing",   helpDefaultDrift "load-bearing" LoadBearing.flagSpecs LoadBearing.defaultOptions)
-  , ("polyglot",       helpDefaultDrift "polyglot" Polyglot.flagSpecs Polyglot.defaultOptions)
-  , ("fingerprint",    helpDefaultDrift "fingerprint" Fingerprint.flagSpecs Fingerprint.defaultOptions)
-  , ("debt",           helpDefaultDrift "debt" Debt.flagSpecs Debt.defaultOptions)
-  , ("basket",         helpDefaultDrift "basket" Basket.flagSpecs Basket.defaultOptions)
-  , ("ledger",         helpDefaultDrift "ledger" Ledger.flagSpecs Ledger.defaultOptions)
-  , ("echo",           helpDefaultDrift "echo" Echo.flagSpecs Echo.defaultOptions)
-  , ("gravity",        helpDefaultDrift "gravity" Gravity.flagSpecs Gravity.defaultOptions)
-  , ("pyre",           helpDefaultDrift "pyre" Pyre.flagSpecs Pyre.defaultOptions)
-  , ("chokepoint",     helpDefaultDrift "chokepoint" Chokepoint.flagSpecs Chokepoint.defaultOptions)
-  , ("silhouette",     helpDefaultDrift "silhouette" Silhouette.flagSpecs Silhouette.defaultOptions)
-  , ("entwine",        helpDefaultDrift "entwine" Entwine.flagSpecs Entwine.defaultOptions)
-  , ("fiedler",        helpDefaultDrift "fiedler" Fiedler.flagSpecs Fiedler.defaultOptions)
-  , ("horizon",        helpDefaultDrift "horizon" Horizon.flagSpecs Horizon.defaultOptions)
-  , ("strata",         helpDefaultDrift "strata" Strata.flagSpecs Strata.defaultOptions)
-  , ("term-cluster",   helpDefaultDrift "term-cluster" TermCluster.flagSpecs TermCluster.defaultOptions)
-  , ("concept-bundle", helpDefaultDrift "concept-bundle" ConceptBundle.flagSpecs ConceptBundle.defaultOptions)
-  , ("hint-bench",     helpDefaultDrift "hint-bench" HintBench.flagSpecs HintBench.defaultOptions)
+  [ drift "motif" Motif.flagSpecs Motif.defaultOptions
+  , drift "load-bearing" LoadBearing.flagSpecs LoadBearing.defaultOptions
+  , drift "polyglot" Polyglot.flagSpecs Polyglot.defaultOptions
+  , drift "fingerprint" Fingerprint.flagSpecs Fingerprint.defaultOptions
+  , drift "debt" Debt.flagSpecs Debt.defaultOptions
+  , drift "basket" Basket.flagSpecs Basket.defaultOptions
+  , drift "ledger" Ledger.flagSpecs Ledger.defaultOptions
+  , drift "echo" Echo.flagSpecs Echo.defaultOptions
+  , drift "gravity" Gravity.flagSpecs Gravity.defaultOptions
+  , drift "pyre" Pyre.flagSpecs Pyre.defaultOptions
+  , drift "chokepoint" Chokepoint.flagSpecs Chokepoint.defaultOptions
+  , drift "silhouette" Silhouette.flagSpecs Silhouette.defaultOptions
+  , drift "entwine" Entwine.flagSpecs Entwine.defaultOptions
+  , drift "fiedler" Fiedler.flagSpecs Fiedler.defaultOptions
+  , drift "horizon" Horizon.flagSpecs Horizon.defaultOptions
+  , drift "strata" Strata.flagSpecs Strata.defaultOptions
+  , drift "term-cluster" TermCluster.flagSpecs TermCluster.defaultOptions
+  , drift "concept-bundle" ConceptBundle.flagSpecs ConceptBundle.defaultOptions
+  , drift "hint-bench" HintBench.flagSpecs HintBench.defaultOptions
   ]
+  where
+    drift :: Show o => String -> [FlagSpec o] -> o -> (String, [String])
+    drift sub specs defs = (sub, helpDefaultDrift sub specs defs)
 
 -- | Pull the subcommand names out of the golden's SUBCOMMANDS block: the
 -- indented lines between that heading and the next unindented one.

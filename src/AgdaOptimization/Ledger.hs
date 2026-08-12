@@ -51,7 +51,8 @@ module AgdaOptimization.Ledger
 
 import           Control.DeepSeq      ( NFData(..) )
 import           Control.Monad        ( when )
-import           Control.Parallel.Strategies ( parMap, rdeepseq )
+import           Control.Parallel.Strategies ( parListChunk, rdeepseq
+                                             , withStrategy )
 import qualified Data.IntMap.Strict   as IM
 import qualified Data.IntSet          as IS
 import           Data.List            ( intercalate, sortBy )
@@ -189,12 +190,12 @@ applyConfig :: A.Object -> Options -> Either String Options
 applyConfig obj o0 = applyFlagConfig "ledger" flagSpecs obj o0
 
 -- ---------------------------------------------------------------------
--- Core data shapes (kept tiny on purpose — the hot loop is parMap)
+-- Core data shapes (kept tiny on purpose — the hot loop is sparked)
 -- ---------------------------------------------------------------------
 
 -- | Trust budget for one public theorem.
 --
--- Fields are strict so 'parMap rdeepseq' over a list of 'TheoremTrust'
+-- Fields are strict so the chunked 'rdeepseq' spark over a list of 'TheoremTrust'
 -- forces the full intersection result inside the spark, not later in
 -- the main thread.
 data TheoremTrust = TheoremTrust
@@ -231,11 +232,13 @@ run ix gOpts opts = do
       !theoremIds = collectPublicTheorems opts mes defs
 
       -- (3) Per-theorem trust budget. descendants() is an independent
-      -- BFS per node; spark it via 'parMap rdeepseq'.
+      -- BFS per node, so spark it — but in CHUNKS, not one spark per
+      -- theorem: at stdlib scale (18k theorems) a spark-per-node overflows
+      -- the pool and over half get re-run serially on the reducing thread.
+      -- Order-preserving, so the -N1/-NK byte-identity contract holds.
       !theorems =
-        parMap rdeepseq
-          (computeTrust ix axiomSet foundSet)
-          theoremIds
+        withStrategy (parListChunk 64 rdeepseq)
+          (map (computeTrust ix axiomSet foundSet) theoremIds)
 
       !nTheorems = length theorems
       !nAxioms   = IS.size axiomSet
@@ -418,7 +421,7 @@ isModulePrefix prefix m
   | otherwise   = (prefix `T.append` ".") `T.isPrefixOf` m
 
 -- ---------------------------------------------------------------------
--- The hot loop (sparked via parMap rdeepseq in 'run')
+-- The hot loop (sparked via parListChunk rdeepseq in 'run')
 -- ---------------------------------------------------------------------
 
 -- | Per-theorem trust budget. 'descendants' gives the forward closure

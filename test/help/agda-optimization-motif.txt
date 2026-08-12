@@ -14,9 +14,10 @@ OPTIONS:
   --budget=F              wall-clock seconds; 0 = unlimited (default)
   --min-label-distinct=N  require >= N distinct (kind, state) labels (default 2)
 
-Plus the global flags --graph FILE, --json, --out FILE, --no-explain
-and --config FILE (parsed before subcommand flags). The graph may also
-come from 'graph:' under 'global:' in the config, in which case <graph.json>
-can be omitted. YAML defaults under the 'motif:' section
-override defaults; CLI flags override config.
+Plus the global flags --graph FILE, --format human|json, --json, --out FILE,
+--explain/--no-explain and --config FILE (all usable in any position, before
+or after the subcommand). The graph may also come from 'graph:' under
+'global:' in the config, in which case <graph.json> can be omitted. YAML
+defaults under the 'motif:' section override defaults; CLI flags
+override config.
 See README.md for per-flag semantics.

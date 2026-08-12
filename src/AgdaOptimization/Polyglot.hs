@@ -126,8 +126,9 @@ run ix gOpts opts@Options{..} = do
       reDiscount = reExportDiscount ix
 
       -- Per-node analysis: only nodes with enough consumers, and among
-      -- those only the ones diverse enough to clear --threshold.
-      (scored, totalConsidered, droppedByMin, droppedByThreshold) =
+      -- those only the ones diverse enough to clear --threshold. Every
+      -- node is considered, so 'nNodes' IS the considered count.
+      (scored, droppedByMin, droppedByThreshold) =
         scoreAll ix opts louvainNodeComm reDiscount
 
       qCount = countCommunities louvainNodeComm
@@ -156,14 +157,14 @@ run ix gOpts opts@Options{..} = do
   case gOutFormat gOpts of
     OutJson ->
       emitJsonReport (gOutPath gOpts) $
-        polyglotJson ix opts totalConsidered droppedByMin droppedByThreshold
+        polyglotJson ix opts nNodes droppedByMin droppedByThreshold
                      qCount louvainModularity lowQ topRows godSet recs
     OutHuman -> withHumanReport gOpts "polyglot" $ do
       -- Header & stats
       putStrLn $ "# Polyglot — top " ++ show optTopN
               ++ " (min-uses=" ++ show optMinUses
               ++ ", threshold=" ++ printf "%.4f" optDiversityThreshold ++ ")"
-      putStrLn $ "  nodes considered     : " ++ show totalConsidered
+      putStrLn $ "  nodes considered     : " ++ show nNodes
       putStrLn $ "  dropped (min-uses)   : " ++ show droppedByMin
       putStrLn $ "  dropped (threshold)  : " ++ show droppedByThreshold
       putStrLn $ "  communities found    : " ++ show qCount
@@ -498,6 +499,18 @@ data Score = Score
 instance NFData Score where
   rnf (Score a b c d e) = a `seq` b `seq` c `seq` d `seq` rnf e
 
+-- | What became of one node: which gate dropped it, or its 'Score'.
+-- Named rather than an @Either Bool Score@ so the fold below reads as
+-- the two questions it is counting instead of two anonymous booleans.
+data Verdict
+  = TooFewUses   -- ^ fewer consumers than 'optMinUses'.
+  | TooUniform   -- ^ judged, but under 'optDiversityThreshold'.
+  | Kept !Score
+
+instance NFData Verdict where
+  rnf (Kept s) = rnf s
+  rnf _        = ()
+
 -- | Filter nodes by 'optMinUses' then by 'optDiversityThreshold', and
 -- compute scores for the survivors. Per-node work (the 'ancestors' BFS +
 -- the entropy compute) is sparked across nodes via 'parListChunk'; the
@@ -509,36 +522,33 @@ instance NFData Score where
 scoreAll
   :: Index
   -> Options
-  -> IntMap Int                -- ^ node -> community
-  -> IntSet                    -- ^ "discount this consumer" set (per spec)
-  -> ([Score], Int, Int, Int)
-     -- ^ (scored, totalConsidered, droppedByMinUses, droppedByThreshold)
+  -> IntMap Int           -- ^ node -> community
+  -> IntSet               -- ^ "discount this consumer" set (per spec)
+  -> ([Score], Int, Int)  -- ^ (scored, droppedByMinUses, droppedByThreshold)
 scoreAll ix Options{..} nodeComm discountSet =
   let n = idxNodeCount ix
-      -- Per-node verdict: which cut (if either) removed it.
-      perNode :: Int -> Either Bool Score
+      perNode :: Int -> Verdict
       perNode !i =
         let consSet = ancestors ix (IS.singleton i)
             count   = IS.size consSet
         in if count < optMinUses
-             then Left True   -- dropped by min-uses
+             then TooFewUses
              else let !s = computeScore nodeComm discountSet i consSet
                   in if sDiversity s < optDiversityThreshold
-                       then Left False  -- dropped by threshold
-                       else Right s
+                       then TooUniform
+                       else Kept s
       -- Sparked list of results in ascending i order.
-      sparked :: [Either Bool Score]
+      sparked :: [Verdict]
       sparked = withStrategy (parListChunk 64 rdeepseq)
                              (map perNode [0 .. n - 1])
       -- Sequential reduction. Cons-prepend to preserve the original
       -- descending-i ordering of the returned [Score].
-      go !rows !nConsidered !nMin !nThr []         =
-        (rows, nConsidered, nMin, nThr)
-      go !rows !nConsidered !nMin !nThr (mx : xs') = case mx of
-        Left True  -> go rows       (nConsidered + 1) (nMin + 1) nThr       xs'
-        Left False -> go rows       (nConsidered + 1) nMin       (nThr + 1) xs'
-        Right s    -> go (s : rows) (nConsidered + 1) nMin       nThr       xs'
-  in go [] 0 0 0 sparked
+      go !rows !nMin !nThr []         = (rows, nMin, nThr)
+      go !rows !nMin !nThr (v : vs) = case v of
+        TooFewUses -> go rows       (nMin + 1) nThr       vs
+        TooUniform -> go rows       nMin       (nThr + 1) vs
+        Kept s     -> go (s : rows) nMin       nThr       vs
+  in go [] 0 0 sparked
 
 -- | Compute the Score record for one node from its consumer set.
 computeScore

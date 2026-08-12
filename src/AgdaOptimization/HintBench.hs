@@ -196,9 +196,8 @@ emitHuman Options{..} nRows reports = do
                  ++ [ showD3 v | (_, v) <- brpRecallAt r ]
                  ++ [ showD3 v | (_, v) <- brpAnyHitAt r ]
                  ++ [ showD3 (brpMRR r), showD3 (brpMeanCand r) ]
-  -- The R@k / A@k / MRR gloss that used to sit here now lives in
-  -- 'AgdaOptimization.Legend' with the rest of the column glossary, so
-  -- the metrics are described in exactly one place.
+  -- R@k / A@k / MRR are glossed in 'AgdaOptimization.Legend' with the rest
+  -- of the column glossary, so the metrics are described in one place.
   putStr (renderTable header (map row reports))
 
 -- | The empty-corpus report: state the reason and stop, exit 0.

@@ -219,8 +219,10 @@ legends =
           ]
       , lgBlocks =
           [ ("Header block",
-              [ ("nodes considered", "definitions that reached the scoring stage.")
+              [ ("nodes considered", "definitions examined — every node in the graph.")
               , ("dropped (min-uses)", "definitions with too few consumers to judge.")
+              , ("dropped (threshold)", "definitions judged, but with diversity D \
+                                        \below --threshold.")
               , ("communities found", "clusters Louvain settled on.")
               , ("modularity Q", "how cleanly the graph splits into them. Below ~0.3 \
                                  \the clustering is weak and the D column is worth \

@@ -52,7 +52,7 @@ reason: they usually mark a split the codebase never resolved.
 | `--min-co-callers=N` | `3` | pair must co-occur in ≥N callers. |
 | `--min-iqr=F` | `0.5` | min IQR. |
 | `--min-g-stat=F` | `6.635` | min G-statistic (≈ `p < 0.01`). |
-| `--transitive` | off | use ancestors as the basket instead of direct callers. |
+| `--transitive` | off | use the transitive callee closure as the basket instead of direct callees. |
 | `--max-basket-size=N` | `0` (off) | drop baskets exceeding N items; auto-bounds under `--transitive`. |
 | `--exclude-name-regex=PATTERN` | none | POSIX-ERE on the unqualified name. |
 | `--top-n=N` | `100` | rows to keep. |

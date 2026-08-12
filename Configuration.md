@@ -157,7 +157,7 @@ term-cluster:
 |-----------------|--------------|-------------------------------------------------|
 | `agda-bin`      | `--agda-bin` | Path to the `agda` binary to drive.             |
 | `include-paths` | `-i`         | Include paths passed to `agda` (YAML list).     |
-| `agda-args`     | —            | Extra raw args forwarded to `agda` (YAML list). |
+| `agda-args`     | `--agda-arg` | Extra raw args forwarded to `agda` (YAML list). |
 | `format`        | `--format`   | `human` or `json`.                              |
 | `quiet`         | `--quiet`    | Suppress the config breadcrumb (bool).          |
 | `top-n`         | `--top-n`    | How many buckets to report.                     |
@@ -197,13 +197,20 @@ Mirrors the daemon's CLI flags.
   check-time Mimer probe tries, default 3); `auto-hints-timeout` (Mimer
   budget per goal, seconds, default 1); `auto-hints-lemmas` (top in-scope
   graph hints seeded into that probe, default 2; `0` = plain Mimer);
-  `control-port` (localhost `/check` endpoint for the edit hook; needs
-  `enable-interact`; `0` = off); `inspect-port` (start port, default 7000;
+  `control-port` (localhost `/check` + `/repair` endpoint for the edit hook;
+  needs `enable-interact`; `0` = off); `inspect-port` (start port, default 7000;
   implies `inspect`); `agda-arg` (extra flags for `agda --interaction-json`,
   e.g. `--safe`); `interaction-heap-mb` (per-session `agda` heap cap in MB;
   `0` = unset); `max-interaction-sessions` (interaction session-pool cap,
   default 2); `interaction-idle-timeout` (seconds before an idle session is
-  reaped; `0` = never).
+  reaped; `0` = never); `tool-tier` (`core` | `full`, default `full` — which
+  tools `tools/list` advertises; every tool stays reachable via the one-shot
+  `query` CLI either way).
+- **Lists:** `overlay-graphs` (prebuilt expanded graphs federated into every
+  snapshot, e.g. an agda-stdlib graph — their defs render `[external: …]`,
+  project defs win a key collision); `coverage-ignore` (globs for source
+  files intentionally outside every entry's closure, excluded from the
+  closure-coverage warning).
 
 **Multiple entry modules.** `--entry` is repeatable on the CLI and the
 config accepts an `entries:` list alongside the back-compat scalar

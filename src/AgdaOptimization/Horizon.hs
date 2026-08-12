@@ -102,7 +102,7 @@ data LeavesMode
   | LvTerminalLeaves
     -- ^ Any node with no outgoing edge — useful for graphs scrubbed of
     -- their externals (@agda-deps --no-externals@).
-  deriving (Show, Eq)
+  deriving (Show, Eq, Enum, Bounded)
 
 -- | Which nodes are considered /roots/ for ε⁻.
 data RootsMode
@@ -112,7 +112,7 @@ data RootsMode
   | RtTerminals
     -- ^ Nodes with no incoming edges (true terminals — nothing depends
     -- on them).
-  deriving (Show, Eq)
+  deriving (Show, Eq, Enum, Bounded)
 
 -- | User-facing options. The CLI flags map one-to-one onto these
 -- fields; see 'parseOptions' for the spellings.
@@ -365,10 +365,15 @@ rootCoverage !cond !epPlusSCC !rootSet
 run :: Index -> GlobalOpts -> Options -> IO ()
 run !ix !gOpts !opts0 = do
   let !cond          = buildCondensation ix
-      !rootSet0      = collectRoots ix (optRoots opts0)
-      !leafSet0      = collectLeaves ix (optLeaves opts0)
-      !epPlusSCC0    = forwardEccSCC cond (seedsToSccs cond leafSet0)
-      !coverage0     = rootCoverage cond epPlusSCC0 rootSet0
+      -- Resolve one --leaves mode to its leaf set + forward DP. The chosen
+      -- mode, the fallback and the refusal's enumeration all go through
+      -- this, so they cannot disagree about what a mode resolves to.
+      leafDP lm      = let !ls = collectLeaves ix lm
+                           !ep = forwardEccSCC cond (seedsToSccs cond ls)
+                       in (ls, ep)
+      !rootSet       = collectRoots ix (optRoots opts0)
+      (!leafSet0, !epPlusSCC0) = leafDP (optLeaves opts0)
+      !coverage0     = rootCoverage cond epPlusSCC0 rootSet
       !degenerate    = coverage0 < minRootCoverage
       !extSumPresent = externalsSummaryHasRows (idxExternalsSummary ix)
 
@@ -379,18 +384,20 @@ run !ix !gOpts !opts0 = do
       "[horizon] error: --leaves=" ++ leavesLabel (optLeaves opts0)
         ++ " resolves to " ++ show (IS.size leafSet0) ++ " leaf node(s) reachable"
         ++ " from " ++ showPct coverage0 ++ " of the "
-        ++ show (IS.size rootSet0) ++ " --roots=" ++ rootsLabel (optRoots opts0)
+        ++ show (IS.size rootSet) ++ " --roots=" ++ rootsLabel (optRoots opts0)
         ++ " roots;\n             ε⁺ would be undefined on essentially every"
         ++ " row, making the (ε⁺ + ε⁻) ranking arbitrary."
-    let working = [ (lm, rm, c)
-                  | lm <- [LvPostulatesAxioms, LvTerminalLeaves]
-                  , rm <- [RtPublicTheorems, RtTerminals]
-                  , let c = rootCoverage cond
-                              (forwardEccSCC cond
-                                 (seedsToSccs cond (collectLeaves ix lm)))
-                              (collectRoots ix rm)
-                  , c >= minRootCoverage
-                  ]
+    -- One DP per leaves mode and one scan per roots mode, reused across the
+    -- product; [minBound ..] so a mode added later can't be left out of the
+    -- advice, which is worth nothing if it isn't exhaustive.
+    let leafDPs  = [ (lm, snd (leafDP lm))    | lm <- [minBound .. maxBound] ]
+        rootSets = [ (rm, collectRoots ix rm) | rm <- [minBound .. maxBound] ]
+        working  = [ (lm, rm, c)
+                   | (lm, ep) <- leafDPs
+                   , (rm, rs) <- rootSets
+                   , let c = rootCoverage cond ep rs
+                   , c >= minRootCoverage
+                   ]
     if null working
       then hPutStrLn stderr $
               "             No --leaves/--roots combination ranks on this graph."
@@ -429,21 +436,13 @@ run !ix !gOpts !opts0 = do
   let !opts
         | fellBack  = opts0 { optLeaves = LvTerminalLeaves }
         | otherwise = opts0
-      !leafSet
-        | fellBack  = collectLeaves ix LvTerminalLeaves
-        | otherwise = leafSet0
-      !rootSet = rootSet0
-      !leafSccs = seedsToSccs cond leafSet
-      !rootSccs = seedsToSccs cond rootSet
-      !epPlusSCC
-        | fellBack  = forwardEccSCC cond leafSccs
-        | otherwise = epPlusSCC0
-      !epMinusSCC = backwardEccSCC cond rootSccs
+      (leafSet, epPlusSCC, coverage)
+        | fellBack  = let (ls, ep) = leafDP LvTerminalLeaves
+                      in (ls, ep, rootCoverage cond ep rootSet)
+        | otherwise = (leafSet0, epPlusSCC0, coverage0)
+      !epMinusSCC = backwardEccSCC cond (seedsToSccs cond rootSet)
       !epPlus     = sccMapToNodeMap cond epPlusSCC
       !epMinus    = sccMapToNodeMap cond epMinusSCC
-      !coverage
-        | fellBack  = rootCoverage cond epPlusSCC rootSet
-        | otherwise = coverage0
 
   -- Diagnostics. An empty leaf set or root set is a real degradation:
   -- the corresponding eccentricities will all be sentinel -1. Surface

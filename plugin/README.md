@@ -160,7 +160,7 @@ used, and how reliably). Needs `jq`.
 
 ### Control endpoint (Phase 2 of the edit hook)
 
-Start the daemon with **`--control-port N`** (or `control-port: N` in `.agda-explore.yml`; needs `--enable-interact`) to serve `GET /check?file=…` on localhost — the same warm check the MCP `check` tool runs, callable by the hook from outside the MCP transport. The bound port (probed upward from N) is written to `<out-dir>/control-port` for discovery and removed on shutdown; a busy endpoint answers `503` and the hook degrades to the nudge. Localhost-only, off by default.
+Start the daemon with **`--control-port N`** (or `control-port: N` in `.agda-explore.yml`; needs `--enable-interact`) to serve `GET /check?file=…` and `GET /repair?file=…` (diff-only, never writes) on localhost — the same warm check and repair the MCP `check` / `repair` tools run, callable by the hook from outside the MCP transport. The bound port (probed upward from N) is written to `<out-dir>/control-port` for discovery and removed on shutdown; a busy endpoint answers `503` and the hook degrades to the nudge. Localhost-only, off by default.
 
 ## Live web inspector (opt-in)
 

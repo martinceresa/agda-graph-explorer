@@ -37,6 +37,8 @@ module AgdaOptimization.FlagSpec
   , helpDefaultDrift
   ) where
 
+import           Data.List                 ( dropWhileEnd, stripPrefix, tails )
+import           Data.Maybe                ( listToMaybe )
 import           Data.Text                 ( Text )
 import qualified Data.Text                 as T
 import qualified Data.Aeson                as A
@@ -330,10 +332,11 @@ renderFlagHelp = map flagHelp
 -- The help text is a hand-written string and the default is a record
 -- field: two sources of truth for one fact, and they had drifted in five
 -- places before this check existed. Applying a flag's OWN claimed default
--- must be a no-op, so we parse @--flag=V@ against the defaults and compare
--- the rendered record. The setters are opaque functions, so 'show' is the
--- only handle on "did that change anything" — every subcommand's
--- @Options@ derives 'Show'.
+-- must be a no-op, so we run @--flag=V@ back through 'parseFlags' — the
+-- same interpreter the real argv goes through, so the check cannot pass
+-- on a parse this CLI would reject — and compare the rendered record. The
+-- setters are opaque functions, so 'show' is the only handle on "did that
+-- change anything" — every subcommand's @Options@ derives 'Show'.
 --
 -- Only 'IntFlag' / 'DblFlag' are checked: they are the constructors whose
 -- help states a bare numeric default. Enum and switch defaults state a
@@ -344,23 +347,17 @@ renderFlagHelp = map flagHelp
 helpDefaultDrift :: Show o => String -> [FlagSpec o] -> o -> [String]
 helpDefaultDrift sub specs defs = concatMap check specs
   where
-    check (IntFlag n h set) = compareClaim n h (\v -> set <$> readsClaim v)
-    check (DblFlag n h set) = compareClaim n h (\v -> set <$> readsClaim v)
-    check _                 = []
+    check (IntFlag n h _) = compareClaim n h
+    check (DblFlag n h _) = compareClaim n h
+    check _               = []
 
-    -- The claimed value, parsed at the setter's own numeric type.
-    readsClaim :: Read a => String -> Maybe a
-    readsClaim v = case reads v of
-      [(x, "")] -> Just x
-      _         -> Nothing
-
-    compareClaim n h mkSetter = case claimedDefault h of
+    compareClaim n h = case claimedDefault h of
       Nothing -> []
-      Just v  -> case mkSetter v of
+      Just v  -> case parseFlags sub specs defs ["--" ++ n ++ "=" ++ v] of
         -- Not a number at this flag's type (e.g. "(default none)").
-        Nothing  -> []
-        Just set
-          | show (set defs) == show defs -> []
+        Left _  -> []
+        Right o
+          | show o == show defs -> []
           | otherwise ->
               [ sub ++ " --" ++ n ++ ": help says (default " ++ v
                   ++ ") but applying it changes defaultOptions — the help"
@@ -370,13 +367,6 @@ helpDefaultDrift sub specs defs = concatMap check specs
 -- Whitespace-trimmed and unvalidated: 'helpDefaultDrift' decides whether
 -- it parses at the flag's type.
 claimedDefault :: String -> Maybe String
-claimedDefault = go
-  where
-    marker = "(default "
-    go s
-      | null s                     = Nothing
-      | marker `isPrefix` s        = Just (trim (takeWhile (/= ')')
-                                                 (drop (length marker) s)))
-      | otherwise                  = go (drop 1 s)
-    isPrefix p s = take (length p) s == p
-    trim = dropWhile (== ' ') . reverse . dropWhile (== ' ') . reverse
+claimedDefault h = listToMaybe
+  [ dropWhileEnd (== ' ') (dropWhile (== ' ') (takeWhile (/= ')') rest))
+  | t <- tails h, Just rest <- [stripPrefix "(default " t] ]

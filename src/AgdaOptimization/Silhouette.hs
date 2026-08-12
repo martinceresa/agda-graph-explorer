@@ -332,9 +332,14 @@ runProvenance ix gOpts opts@Options{..} sf = do
       !topClusters = take (max 0 optTopN) ranked
       !nClus      = length ranked
 
-      !nCombinator = length [ () | (_, s) <- ranked, csTag s == TagCombinator ]
-      !nCopyPaste  = length [ () | (_, s) <- ranked, csTag s == TagCopyPaste  ]
-      !nMixed      = length [ () | (_, s) <- ranked, csTag s == TagMixed      ]
+      !nCombinator = countTag TagCombinator ranked
+      !nCopyPaste  = countTag TagCopyPaste  ranked
+      !nMixed      = countTag TagMixed      ranked
+      -- Whole-population counts, in the order 'clusterRankCmp' ranks the
+      -- classes; 'truncationNote' subtracts what the table actually shows.
+      population   = [ (TagCopyPaste,  nCopyPaste)
+                     , (TagMixed,      nMixed)
+                     , (TagCombinator, nCombinator) ]
 
   let !sigEdgeCount  = sbfSigEdges sf
       !bodyEdgeCount = sbfBodyEdges sf
@@ -367,7 +372,7 @@ runProvenance ix gOpts opts@Options{..} sf = do
         else do
           forM_ (zip [1 :: Int ..] topClusters) $ \(rank, (members, cs)) ->
             renderCluster ix candVec rank members cs
-          mapM_ putStrLn (truncationNote optTopN ranked topClusters)
+          mapM_ putStrLn (truncationNote optTopN population topClusters)
 
 -- | Sort key for the cluster output. Copy-paste-tagged clusters first,
 -- then mixed (which contain copy-paste pairs), then combinator. Within a
@@ -407,10 +412,10 @@ clusterRankCmp (ma, sa) (mb, sb) =
 -- cut dropped nothing.
 truncationNote
   :: Int                        -- ^ --top-n
-  -> [([Int], ClusterSummary)]  -- ^ all ranked clusters
+  -> [(OverlapTag, Int)]        -- ^ whole-population count per class.
   -> [([Int], ClusterSummary)]  -- ^ the shown prefix
   -> [String]
-truncationNote topN ranked shown
+truncationNote topN population shown
   | null dropped = []
   | otherwise =
       [ ""
@@ -418,14 +423,19 @@ truncationNote topN ranked shown
           ++ " fell outside --top-n=" ++ show topN ++ ")"
       ]
   where
-    countOf tag rows = length [ () | (_, s) <- rows, csTag s == tag ]
     dropped =
       [ (tag, n)
-      | tag <- [TagCopyPaste, TagMixed, TagCombinator]
-      , let n = countOf tag ranked - countOf tag shown
+      | (tag, total) <- population
+      , let n = total - countTag tag shown
       , n > 0
       ]
     phrase (tag, n) = show n ++ " " ++ overlapTagLabel tag
+
+-- | How many of these clusters carry a tag. The header counts and the
+-- truncation note must be the same measure over different populations,
+-- so both go through this.
+countTag :: OverlapTag -> [([Int], ClusterSummary)] -> Int
+countTag tag = length . filter ((== tag) . csTag . snd)
 
 renderCluster
   :: Index

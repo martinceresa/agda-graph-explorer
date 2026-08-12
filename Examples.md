@@ -21,7 +21,6 @@ agda-deps --format=json --json-mode=expanded --no-externals \
 ```
 
 Substitute your own include path and entry module for `src/Main.agda`.
-Defaults below were tuned on a ~21k-node reference Agda formalisation.
 
 ---
 
@@ -102,11 +101,11 @@ cabal run agda-optimization -- polyglot /tmp/opt/deps.json \
 Scores each def by the Shannon entropy of its consumers' community
 distribution; `★` = "promote as a typeclass" candidate.
 
-Default `--min-uses=5` — the gate that decides which rows appear. `[god?]` tag
-suppressed when Louvain Q < 0.1. Note `--threshold` (default `0.5`) is
-currently **inert**: it is echoed in the header and the JSON, but never
-compared against `D`, so it filters nothing. Read the `D` and `Tag` columns
-instead.
+Default `--min-uses=5` and `--threshold=0.5` — the two gates that decide which
+rows appear, counted separately in the header (`dropped (min-uses)` = too few
+consumers to judge, `dropped (threshold)` = judged and not diverse enough).
+`--threshold=0` reports every definition clearing `--min-uses`. `[god?]` tag
+suppressed when Louvain Q < 0.1.
 
 ### `fingerprint` — graph-level near-duplicate proofs
 
@@ -475,6 +474,13 @@ Read-side tools: `brief`, `locate`, `callers`, `callees`, `impact`, `path`,
 `unused`, `rebuild`, `status`. `brief name=X` is a one-call orientation bundle
 (location + type + callers/callees + body-twins); `search` / `callers` /
 `callees` accept `format:json`.
+
+`--tool-tier core` advertises only the measured-used subset in `tools/list`
+(default `full` = every tool; the `query` CLI reaches all of them either way).
+`--overlay-graph FILE` (repeatable) federates a prebuilt graph — e.g. an
+agda-stdlib one from `scripts/build-stdlib-graph.sh` — into every snapshot, so
+`search` / `type_of` / `find_lemma` see its definitions, tagged
+`[external: …]`.
 
 Add `--enable-interact` (needs `agda` on `$PATH`) for the Agda-validated
 write-side bridge — every mutator returns a unified diff and only writes under

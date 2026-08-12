@@ -36,8 +36,9 @@ One shared library and five executables:
   `graph.json` once into `AgdaGraph.Index` and answers point queries over
   stdio (`brief` / `locate` / `callers` / `callees` / `impact` / `path` /
   `roots` / `type_of` / `similar_types` / `similar_bodies` / `find_lemma` /
-  `search` / `unused`; `brief` is a one-call orientation bundle, and
-  `search`/`callers`/`callees` take `format:json` for a structured envelope),
+  `search` / `unused` / `rebuild` / `status`; `brief` is a one-call orientation
+  bundle, and `search`/`callers`/`callees` take `format:json` for a structured
+  envelope),
   regenerating the graph on the fly by re-running `agda-deps` as a
   subprocess. `--overlay-graph FILE` (repeatable) federates a prebuilt
   overlay graph (e.g. agda-stdlib) into every snapshot — its defs render an
@@ -651,20 +652,22 @@ plugin/                         Claude Code plugin: agda-explore MCP server +
   load — a property `scripts/config-smoke.sh` asserts per tool.
 
 - **`agda-optimization`'s ENTIRE global-flag group is lifted out of argv
-  before the positional scanner runs** (`extractValueFlag` /
-  `extractSwitchFlag` / `extractToggleFlag` in `run`): `--graph`, `--format`,
-  `--config`, `--out`, `--json`, `--explain`/`--no-explain`. This is
-  load-bearing, not tidiness: `scanGlobals` takes the one token after the
-  subcommand verbatim as the graph path and never peels it, so a global
-  landing there was silently unusable — and each lifted flag SHIFTS the next
-  one into that slot, which made `motif --graph g.json --config f.yml` fail
-  with `unknown flag: --config` even though `--config` was written last, and
-  `debt --graph g.json --no-explain` fail while `debt g.json --no-explain`
-  worked. Don't move one back into the scanner: peeling there cannot see the
-  slot. `scanGlobals` is now purely subcommand + path + residual and cannot
-  fail. A trailing bare `--config` / `--out` is diagnosed explicitly in
-  `run`, because the lifter drops it. `scripts/config-smoke.sh` pins every
-  global × every position, including beside `--graph`.
+  before the subcommand split** (`extractValueFlag` / `extractSwitchFlag` /
+  `extractToggleFlag` in `run`): `--graph`, `--format`, `--config`, `--out`,
+  `--json`, `--explain`/`--no-explain`. This is load-bearing, not tidiness:
+  the one token after the subcommand is taken verbatim as the graph path and
+  is never peeled, so a global landing there was silently unusable — and each
+  lifted flag SHIFTS the next one into that slot, which made
+  `motif --graph g.json --config f.yml` fail with `unknown flag: --config`
+  even though `--config` was written last, and `debt --graph g.json
+  --no-explain` fail while `debt g.json --no-explain` worked. Don't
+  reintroduce a peeling scanner: peeling cannot see the slot. Because every
+  global is gone by then, the split is a bare `(sub:scanArgs)` pattern match
+  in `run` that cannot fail — the old multi-phase `scanGlobals` and its
+  `ScanError`/`scanPending` deferral are gone with it. A trailing bare
+  `--config` / `--out` is diagnosed explicitly in `run`, because the lifter
+  drops it. `scripts/config-smoke.sh` pins every global × every position,
+  including beside `--graph`.
 
 - **`agda-explore`'s `doctor` / `query` are found anywhere in argv, not just
   at `argv[0]`** (`MainMcp.takeBareToken`), so the flag-first habit every
