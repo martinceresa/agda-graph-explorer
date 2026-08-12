@@ -141,7 +141,7 @@ flagSpecs =
       (\x o -> o { optExcludeHubPct = x })
   , IntFlag "top-n" "--top-n=N               rows to keep (default 50)"
       (\n o -> o { optTopN = n })
-  , IntFlag "max-fan-out" "--max-fan-out=N         skip seeds whose fan-out exceeds N"
+  , IntFlag "max-fan-out" "--max-fan-out=N         skip seeds whose fan-out exceeds N (default 32)"
       (\n o -> o { optMaxFanOut = n })
   , DblFlag "budget" "--budget=F              wall-clock seconds; 0 = unlimited (default)"
       (\x o -> o { optBudgetSecs = x })

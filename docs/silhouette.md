@@ -44,6 +44,14 @@ Per cluster:
 `[copy-paste]` clusters first: they are duplicated work, whereas
 `[combinator]` clusters are merely an abstraction you have not named yet.
 
+The report is ordered to match: `[copy-paste]`, then `[mixed]` (which contain
+copy-paste pairs), then `[combinator]`; within a class, larger clusters first.
+This ordering is what makes the actionable class *reachable* — combinator
+clusters are systematically the larger ones, so ranking by size alone buried
+every copy-paste row below any usable `--top-n`. If `--top-n` cuts a class
+entirely, a line under the table says how many of each fell outside it; the
+counts in the header are over the whole population, not the rows shown.
+
 ## Flags
 
 | Flag | Default | Effect |

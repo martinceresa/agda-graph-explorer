@@ -10,7 +10,7 @@ OPTIONS:
   --per-module            mine per-module (currently warns + falls back to global)
   --top-n=N               rows to keep (default 50)
   --exclude-hub-pct=F     drop top-pct% hub nodes by fan-in
-  --max-fan-out=N         skip seeds whose fan-out exceeds N
+  --max-fan-out=N         skip seeds whose fan-out exceeds N (default 32)
   --budget=F              wall-clock seconds; 0 = unlimited (default)
   --min-label-distinct=N  require >= N distinct (kind, state) labels (default 2)
 

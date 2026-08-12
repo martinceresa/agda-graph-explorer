@@ -47,7 +47,7 @@ module AgdaOptimization.Silhouette
 import           Control.DeepSeq      ( NFData )
 import           Control.Monad        ( forM_, when )
 import           Control.Parallel.Strategies ( parMap, rdeepseq )
-import           Data.List            ( sortBy, tails )
+import           Data.List            ( intercalate, sortBy, tails )
 import qualified Data.Map.Strict      as Map
 import           Data.Map.Strict      ( Map )
 import           Data.Ord             ( Down(..), comparing )
@@ -325,9 +325,9 @@ runProvenance ix gOpts opts@Options{..} sf = do
       -- 'ranked' re-sorts anyway).
       !summarised  =
         parMap rdeepseq (\c -> (c, summariseCluster opts candVec c)) rawClusters
-      -- Rank: combinator > copy-paste > mixed; secondary key is cluster
-      -- size desc; tertiary is average overlap (combinator: high first;
-      -- copy-paste: low first; mixed: high first as a sensible default).
+      -- Rank: copy-paste > mixed > combinator (see 'clusterRankCmp');
+      -- secondary key is cluster size desc; tertiary is average overlap
+      -- (copy-paste: low first; the others: high first).
       !ranked = sortBy clusterRankCmp summarised
       !topClusters = take (max 0 optTopN) ranked
       !nClus      = length ranked
@@ -364,24 +364,33 @@ runProvenance ix gOpts opts@Options{..} sf = do
       putStrLn ""
       if null topClusters
         then putStrLn "no structural-twin clusters at these parameters."
-        else
+        else do
           forM_ (zip [1 :: Int ..] topClusters) $ \(rank, (members, cs)) ->
             renderCluster ix candVec rank members cs
+          mapM_ putStrLn (truncationNote optTopN ranked topClusters)
 
--- | Sort key for the cluster output. Combinator-tagged clusters first
--- (most actionable), then copy-paste, then mixed. Within a tag, larger
--- clusters first; within size, higher avg body overlap first for
--- combinator/mixed and lower first for copy-paste (the actionable
+-- | Sort key for the cluster output. Copy-paste-tagged clusters first,
+-- then mixed (which contain copy-paste pairs), then combinator. Within a
+-- tag, larger clusters first; within size, higher avg body overlap first
+-- for combinator/mixed and lower first for copy-paste (the actionable
 -- direction in each case).
+--
+-- The class order is the report's whole point — @docs/silhouette.md@ says
+-- to act on copy-paste first, because those are duplicated work, whereas
+-- a combinator cluster is only an unnamed abstraction. It is also what
+-- makes the classes REACHABLE: combinator clusters are systematically the
+-- larger ones ("same statement, same proof" families), so ranking them
+-- first buried every copy-paste row below any usable @--top-n@ — on a
+-- 9.8k-node corpus you had to print 71% of all clusters to see one.
 clusterRankCmp
   :: ([Int], ClusterSummary)
   -> ([Int], ClusterSummary)
   -> Ordering
 clusterRankCmp (ma, sa) (mb, sb) =
   let tagPri t = case t of
-        TagCombinator -> (0 :: Int)
-        TagCopyPaste  -> 1
-        TagMixed      -> 2
+        TagCopyPaste  -> (0 :: Int)
+        TagMixed      -> 1
+        TagCombinator -> 2
       sizeKey c = Down (length c)
       overlapKey t v = case t of
         TagCopyPaste -> v          -- low overlap is more actionable
@@ -390,6 +399,33 @@ clusterRankCmp (ma, sa) (mb, sb) =
                            , sizeKey c
                            , overlapKey (csTag s) (csAvgBodyOverlap s) ))
        (ma, sa) (mb, sb)
+
+-- | The @--top-n@ cut, spelled out per class. The header reports the
+-- classification over the WHOLE population, so a class the cut removed
+-- entirely otherwise reads as "156 copy-paste clusters, in the report you
+-- are holding" when in fact none of them are in it. Says nothing when the
+-- cut dropped nothing.
+truncationNote
+  :: Int                        -- ^ --top-n
+  -> [([Int], ClusterSummary)]  -- ^ all ranked clusters
+  -> [([Int], ClusterSummary)]  -- ^ the shown prefix
+  -> [String]
+truncationNote topN ranked shown
+  | null dropped = []
+  | otherwise =
+      [ ""
+      , "(" ++ intercalate ", " (map phrase dropped)
+          ++ " fell outside --top-n=" ++ show topN ++ ")"
+      ]
+  where
+    countOf tag rows = length [ () | (_, s) <- rows, csTag s == tag ]
+    dropped =
+      [ (tag, n)
+      | tag <- [TagCopyPaste, TagMixed, TagCombinator]
+      , let n = countOf tag ranked - countOf tag shown
+      , n > 0
+      ]
+    phrase (tag, n) = show n ++ " " ++ overlapTagLabel tag
 
 renderCluster
   :: Index

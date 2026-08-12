@@ -312,13 +312,24 @@ defAt Index{..} i = idxDefs V.! i
 
 -- ** Traversal
 
--- | Forward transitive closure of a seed set (the set is excluded
--- from the result unless reachable from a seed via a non-empty path).
--- Iterative DFS; visits each node at most once.
+-- | Forward transitive closure of a seed set: everything the seeds
+-- transitively DEPEND ON (their callees / uses). This is the direction to
+-- walk for "what does this rest on" — trust footprints, dependency cones,
+-- blast-radius-of-a-change-below.
+--
+-- The set is excluded from the result unless reachable from a seed via a
+-- non-empty path. Iterative DFS; visits each node at most once.
 descendants :: Index -> IS.IntSet -> IS.IntSet
 descendants ix seeds = closureFrom False (idxForward ix) seeds
 
--- | Reverse transitive closure of a seed set.
+-- | Reverse transitive closure of a seed set: everything that transitively
+-- DEPENDS ON the seeds (their callers / dependents). This is the direction
+-- to walk for "who would break" — consumers, impact, exports unlocked.
+--
+-- Not interchangeable with 'descendants': intersecting the wrong one with
+-- an axiom set silently answers a question nobody asked, which is exactly
+-- how @ledger@ once reported every theorem's trust footprint as the axioms'
+-- own dependencies. Name the direction at the call site.
 ancestors :: Index -> IS.IntSet -> IS.IntSet
 ancestors ix seeds = closureFrom False (idxReverse ix) seeds
 

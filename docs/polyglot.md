@@ -48,23 +48,19 @@ is a local workhorse — generalising it buys nothing.
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--min-uses=N` | `5` | minimum consumer count to consider. The real gate. |
-| `--threshold=F` | `0.5` | entropy threshold — **currently inert**, see below. |
+| `--min-uses=N` | `5` | minimum consumer count to consider. |
+| `--threshold=F` | `0.5` | minimum diversity `D` a row must reach. |
 | `--top-n=N` | `50` | rows to keep. |
 
 ## Notes
 
 - The `[god?]` tag is suppressed when Louvain `Q < 0.1` — the clustering is too
   weak to make the claim.
-- `--min-uses` is the only knob that changes which rows appear. Use it, plus
-  `--top-n`, to scope the report.
-- **`--threshold` currently filters nothing.** It is echoed in the header and
-  the JSON payload (`diversity_threshold`), but never compared against `D`, so
-  `--threshold=99` returns the same rows as `--threshold=0`. Read `D` and the
-  `Tag` column yourself instead.
-- `agda-optimization polyglot --help` misreports both defaults as `2` and `1.5`;
-  the values above are what the code actually uses, as echoed in the report
-  header line.
+- The two gates are counted separately in the header (`dropped (min-uses)` and
+  `dropped (threshold)`) because they answer different questions: too few
+  consumers to judge, versus judged and not diverse enough.
+- `--threshold=0` disables the diversity gate and reports every definition that
+  clears `--min-uses`.
 
 See also: [`strata`](strata.md) (module cohesion),
 [`load-bearing`](load-bearing.md) (flow rather than spread).

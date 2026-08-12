@@ -33,6 +33,8 @@ module AgdaOptimization.FlagSpec
   , parseFlags
   , applyFlagConfig
   , renderFlagHelp
+    -- * Drift guard
+  , helpDefaultDrift
   ) where
 
 import           Data.Text                 ( Text )
@@ -317,3 +319,64 @@ applyFlagConfig section specs obj = go specs
 -- the subcommand. ('subUsage' re-adds the two-space indent.)
 renderFlagHelp :: [FlagSpec o] -> [String]
 renderFlagHelp = map flagHelp
+
+----------------------------------------------------------------------
+-- Drift guard
+----------------------------------------------------------------------
+
+-- | Flags whose help line advertises a numeric @(default V)@ that the
+-- subcommand's @defaultOptions@ does not actually carry.
+--
+-- The help text is a hand-written string and the default is a record
+-- field: two sources of truth for one fact, and they had drifted in five
+-- places before this check existed. Applying a flag's OWN claimed default
+-- must be a no-op, so we parse @--flag=V@ against the defaults and compare
+-- the rendered record. The setters are opaque functions, so 'show' is the
+-- only handle on "did that change anything" — every subcommand's
+-- @Options@ derives 'Show'.
+--
+-- Only 'IntFlag' / 'DblFlag' are checked: they are the constructors whose
+-- help states a bare numeric default. Enum and switch defaults state a
+-- word (@postulate@, @on@) with no machine-readable claim to compare
+-- against, and a non-numeric @(default …)@ is skipped rather than failed.
+--
+-- Returns one human-readable line per drifted flag; @[]@ means agreement.
+helpDefaultDrift :: Show o => String -> [FlagSpec o] -> o -> [String]
+helpDefaultDrift sub specs defs = concatMap check specs
+  where
+    check (IntFlag n h set) = compareClaim n h (\v -> set <$> readsClaim v)
+    check (DblFlag n h set) = compareClaim n h (\v -> set <$> readsClaim v)
+    check _                 = []
+
+    -- The claimed value, parsed at the setter's own numeric type.
+    readsClaim :: Read a => String -> Maybe a
+    readsClaim v = case reads v of
+      [(x, "")] -> Just x
+      _         -> Nothing
+
+    compareClaim n h mkSetter = case claimedDefault h of
+      Nothing -> []
+      Just v  -> case mkSetter v of
+        -- Not a number at this flag's type (e.g. "(default none)").
+        Nothing  -> []
+        Just set
+          | show (set defs) == show defs -> []
+          | otherwise ->
+              [ sub ++ " --" ++ n ++ ": help says (default " ++ v
+                  ++ ") but applying it changes defaultOptions — the help"
+                  ++ " line and the record disagree" ]
+
+-- | The @V@ of a @(default V)@ claim in a help line, if present.
+-- Whitespace-trimmed and unvalidated: 'helpDefaultDrift' decides whether
+-- it parses at the flag's type.
+claimedDefault :: String -> Maybe String
+claimedDefault = go
+  where
+    marker = "(default "
+    go s
+      | null s                     = Nothing
+      | marker `isPrefix` s        = Just (trim (takeWhile (/= ')')
+                                                 (drop (length marker) s)))
+      | otherwise                  = go (drop 1 s)
+    isPrefix p s = take (length p) s == p
+    trim = dropWhile (== ' ') . reverse . dropWhile (== ' ') . reverse

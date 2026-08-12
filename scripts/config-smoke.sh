@@ -6,12 +6,12 @@
 # Two contracts, both of which used to be broken in ways a user reads as
 # "the config file is ignored":
 #
-#   1. `--config FILE` / `--config=FILE` is honoured in EVERY argv position.
+#   1. EVERY global flag is honoured in EVERY argv position.
 #      agda-optimization's positional scanner reserves the token right after
-#      the subcommand for the graph path and never peels it, so a `--config`
-#      there was dropped — and lifting `--graph` out of argv first SHIFTED a
-#      later `--config` into that slot. Both spellings are now lifted out of
-#      argv before the scanner runs, which is what this pins.
+#      the subcommand for the graph path and never peels it, so a global
+#      there was dropped — and lifting one flag out of argv first SHIFTED
+#      the next into that slot. The whole GLOBAL OPTIONS group is now lifted
+#      out of argv before the scanner runs, which is what this pins.
 #
 #   2. An unknown key is REJECTED, not silently ignored — matching every CLI
 #      parser's treatment of an unknown flag. Checked per tool, since each has
@@ -86,6 +86,76 @@ run "$opt" motif "$graph" --config
   || fail "bare --config: expected exit 1 + a missing-FILE diagnostic, got $code / $err"
 
 note "config: --config honoured in every argv position OK"
+
+# --------------------------------------------------------------------
+# 1b. So is every OTHER global.
+#
+# `--help` lists them in one GLOBAL OPTIONS group, but only `--graph`,
+# `--format` and `--config` were lifted out of argv; `--json`, `--out` and
+# the `--explain` pair were left to the positional scanner, which cannot
+# see the post-subcommand path slot. So `debt --graph G --no-explain` died
+# with `unknown flag: --no-explain` (the flag is known — it was misplaced)
+# while `debt G --no-explain` worked. Each global is checked by its EFFECT,
+# in all three positions, including beside `--graph` (the shifting trap).
+# --------------------------------------------------------------------
+
+# effect <description> <predicate> <argv...>
+#   predicate: a shell snippet over "$out" that must succeed.
+effect() {
+  local desc="$1" pred="$2"; shift 2
+  run "$@"
+  if [ "$code" -ne 0 ]; then
+    fail "$desc: exit $code ($(printf '%s' "$err" | head -1))"
+  elif ! eval "$pred"; then
+    fail "$desc: flag parsed but had no effect"
+  fi
+}
+
+is_json()    { printf '%s' "$out" | head -c 1 | grep -q '{'; }
+has_legend() { printf '%s' "$out" | grep -q 'How to read this'; }
+no_legend()  { ! has_legend; }
+
+for where in before after beside; do
+  case "$where" in
+    before) pre=("$opt");            post=(debt "$graph") ;;
+    after)  pre=("$opt" debt "$graph"); post=() ;;
+    beside) pre=("$opt" debt --graph "$graph"); post=() ;;
+  esac
+  effect "--json $where"       is_json   "${pre[@]}" --json "${post[@]}"
+  effect "--no-explain $where" no_legend "${pre[@]}" --no-explain "${post[@]}"
+  effect "--explain $where"    has_legend "${pre[@]}" --explain "${post[@]}"
+done
+
+# --out FILE, in the same three positions.
+for where in before after beside; do
+  o="$tmp/out-$where.txt"
+  case "$where" in
+    before) run "$opt" --out "$o" debt "$graph" ;;
+    after)  run "$opt" debt "$graph" --out "$o" ;;
+    beside) run "$opt" debt --graph "$graph" --out "$o" ;;
+  esac
+  [ "$code" -eq 0 ] && [ -s "$o" ] \
+    || fail "--out $where: exit $code, file $( [ -s "$o" ] && echo written || echo empty)"
+done
+
+# Last occurrence wins across the subcommand boundary, and --format names
+# the format outright so it beats the --json alias in either order.
+run "$opt" --explain debt "$graph" --no-explain
+printf '%s' "$out" | grep -q 'How to read this' \
+  && fail "--explain then --no-explain: last occurrence did not win"
+run "$opt" --no-explain debt "$graph" --explain
+printf '%s' "$out" | grep -q 'How to read this' \
+  || fail "--no-explain then --explain: last occurrence did not win"
+run "$opt" debt "$graph" --json --format=human
+printf '%s' "$out" | head -c 1 | grep -q '{' \
+  && fail "--format=human did not beat --json"
+
+# A bare trailing `--out` names itself rather than being silently dropped.
+run "$opt" debt "$graph" --out
+[ "$code" -eq 1 ] && printf '%s' "$err" | grep -q -- "--out: missing FILE argument" \
+  || fail "bare --out: expected exit 1 + a missing-FILE diagnostic, got $code / $err"
+
+note "config: every global honoured in every argv position OK"
 
 # --------------------------------------------------------------------
 # 2. Unknown keys are rejected.

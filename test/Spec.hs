@@ -19,7 +19,9 @@ import qualified Data.ByteString.Lazy.Char8 as BLC
 import qualified Data.Text.Encoding  as TE
 import qualified Data.Yaml            as Y
 import           Data.IORef
-import           Data.List            ( elemIndex, intercalate, isInfixOf )
+import           Data.List            ( elemIndex, intercalate, isInfixOf, sort )
+import qualified Data.IntMap.Strict   as IntMap
+import qualified Data.IntSet          as IntSet
 import           Data.Maybe           ( listToMaybe, mapMaybe )
 import           Data.Text            ( Text )
 import qualified Data.Text            as T
@@ -72,11 +74,32 @@ import           AgdaGraph.Schema      ( ExpandedGraph(..), Definition(..), ReEx
                                        , State(..), Kind(..), Access(..)
                                        , loadExpandedGraph, explainDecodeError )
 import           AgdaGraph.Index       ( buildIndex, lookupId, unsafeDeps, defAt
-                                       , idxRealCount, moduleDependencyOrder )
+                                       , idxRealCount, moduleDependencyOrder
+                                       , idxDefs, idxExternalsSummary )
 import           AgdaUnused.Analysis   ( Finding(..), FindingKind(..), analyse )
 import           AgdaGraph.ConfigCore  ( unknownKeys, unknownKeyError, nearestKey
                                        , checkKnownKeys, extractValueFlag )
 import           AgdaOptimization.Legend ( legendKeys, renderLegend )
+import           AgdaOptimization.FlagSpec ( helpDefaultDrift )
+import qualified AgdaOptimization.Basket        as Basket
+import qualified AgdaOptimization.Chokepoint    as Chokepoint
+import qualified AgdaOptimization.ConceptBundle as ConceptBundle
+import qualified AgdaOptimization.Debt          as Debt
+import qualified AgdaOptimization.Echo          as Echo
+import qualified AgdaOptimization.Entwine       as Entwine
+import qualified AgdaOptimization.Fiedler       as Fiedler
+import qualified AgdaOptimization.Fingerprint   as Fingerprint
+import qualified AgdaOptimization.Gravity       as Gravity
+import qualified AgdaOptimization.HintBench     as HintBench
+import qualified AgdaOptimization.Horizon       as Horizon
+import qualified AgdaOptimization.Ledger        as Ledger
+import qualified AgdaOptimization.LoadBearing   as LoadBearing
+import qualified AgdaOptimization.Motif         as Motif
+import qualified AgdaOptimization.Polyglot      as Polyglot
+import qualified AgdaOptimization.Pyre          as Pyre
+import qualified AgdaOptimization.Silhouette    as Silhouette
+import qualified AgdaOptimization.Strata        as Strata
+import qualified AgdaOptimization.TermCluster   as TermCluster
 
 ----------------------------------------------------------------------
 -- Tiny harness.
@@ -128,6 +151,8 @@ main = do
   sequence_ (map ($ fails) aggregateTests)
   sequence_ (map ($ fails) moduleTopoTests)
   sequence_ (map ($ fails) configKeyTests)
+  sequence_ (map ($ fails) helpDefaultTests)
+  ledgerTrustTests fails
   premiseBenchTests fails
   legendTests fails
   replayTests fails
@@ -175,6 +200,98 @@ legendTests ref = do
            , k `notElem` subs, k /= "silhouette-fallback" ] ref
   -- An unrecognised caller prints nothing rather than a stub.
   checkEq "legend: an unknown key renders empty" "" (renderLegend "nope") ref
+
+----------------------------------------------------------------------
+-- ledger's trust closure walks the DEPENDENCY direction.
+--
+-- This is the whole analysis: "what does this theorem rest on". It shipped
+-- walking 'ancestors' (the theorem's dependents) and so reported, with full
+-- confidence, the axioms' own dependencies as the theorems' footprints —
+-- uniformly 0 on the corpus that surfaced it. The fixture pins the
+-- direction rather than the numbers: 'Holes.magic' is the only postulate,
+-- reached by exactly one definition, and its OWN dependency ('Nat.Nat') is
+-- what the reversed walk used to name. A re-flip fails here.
+
+ledgerTrustTests :: IORef Int -> IO ()
+ledgerTrustTests ref = do
+  e <- loadExpandedGraph "test/deps.json"
+  case e of
+    Left err ->
+      check ("ledger: test/deps.json decodes (" ++ err ++ ")") False ref
+    Right g -> do
+      let ix               = buildIndex g
+          opts             = Ledger.defaultOptions
+          (foundS, axiomS) = Ledger.partitionAxioms opts
+                               (idxExternalsSummary ix) (idxDefs ix)
+          thmIds           = Ledger.collectPublicTheorems opts
+                               (idxExternalsSummary ix) (idxDefs ix)
+          trusts           = map (Ledger.computeTrust ix axiomS foundS) thmIds
+          footprintOf qn   =
+            [ sort [ defName (defAt ix a)
+                   | a <- IntSet.toList (Ledger.ttAxioms t) ]
+            | t <- trusts, defName (defAt ix (Ledger.ttId t)) == qn ]
+
+      checkEq "ledger: the fixture's axiom set is {Holes.magic}"
+        ["Holes.magic"]
+        (sort [ defName (defAt ix i) | i <- IntSet.toList axiomS ]) ref
+
+      -- The user of the axiom carries it; the axiom's own dependency does
+      -- not. Reversing the walk swaps exactly these two.
+      checkEq "ledger: a theorem's footprint holds the axiom it USES"
+        [["Holes.magic"]] (footprintOf "Holes.useMagic") ref
+      checkEq "ledger: the axiom's own dependency has an empty footprint"
+        [[]] (footprintOf "Nat.Nat") ref
+
+      checkEq "ledger: leverage counts the one user of the one axiom"
+        [("Holes.magic", 1)]
+        [ (defName (defAt ix i), n)
+        | (i, n) <- IntMap.toList (Ledger.buildLeverage trusts) ] ref
+
+----------------------------------------------------------------------
+-- Help-text default claims. A help line reading "(default 2)" beside a
+-- record field holding 5 is a lie the compiler cannot catch, and five of
+-- them had accumulated. 'helpDefaultDrift' re-derives the claim: applying
+-- a flag's own advertised default must leave 'defaultOptions' unchanged.
+--
+-- Numeric (Int/Dbl) flags only — an enum/switch default states a word, not
+-- a comparable value. The 'subcommands' list is retyped here rather than
+-- imported because pulling AgdaOptimization.CLI in would drag the whole
+-- dispatch layer (and its IO) into this offline suite; 'legendTests'
+-- already fails if a subcommand exists that nothing here knows about.
+
+helpDefaultTests :: [Check]
+helpDefaultTests =
+  [ checkEq ("help defaults: " ++ sub ++ " agrees with defaultOptions")
+      [] drift
+  | (sub, drift) <- helpDefaultDrifts
+  ]
+
+-- | One entry per subcommand: the drift lines its flag table produces.
+-- Each entry monomorphises 'helpDefaultDrift' at that subcommand's own
+-- @Options@ type, which is why this is a list of results rather than a
+-- list of (specs, defaults) pairs.
+helpDefaultDrifts :: [(String, [String])]
+helpDefaultDrifts =
+  [ ("motif",          helpDefaultDrift "motif" Motif.flagSpecs Motif.defaultOptions)
+  , ("load-bearing",   helpDefaultDrift "load-bearing" LoadBearing.flagSpecs LoadBearing.defaultOptions)
+  , ("polyglot",       helpDefaultDrift "polyglot" Polyglot.flagSpecs Polyglot.defaultOptions)
+  , ("fingerprint",    helpDefaultDrift "fingerprint" Fingerprint.flagSpecs Fingerprint.defaultOptions)
+  , ("debt",           helpDefaultDrift "debt" Debt.flagSpecs Debt.defaultOptions)
+  , ("basket",         helpDefaultDrift "basket" Basket.flagSpecs Basket.defaultOptions)
+  , ("ledger",         helpDefaultDrift "ledger" Ledger.flagSpecs Ledger.defaultOptions)
+  , ("echo",           helpDefaultDrift "echo" Echo.flagSpecs Echo.defaultOptions)
+  , ("gravity",        helpDefaultDrift "gravity" Gravity.flagSpecs Gravity.defaultOptions)
+  , ("pyre",           helpDefaultDrift "pyre" Pyre.flagSpecs Pyre.defaultOptions)
+  , ("chokepoint",     helpDefaultDrift "chokepoint" Chokepoint.flagSpecs Chokepoint.defaultOptions)
+  , ("silhouette",     helpDefaultDrift "silhouette" Silhouette.flagSpecs Silhouette.defaultOptions)
+  , ("entwine",        helpDefaultDrift "entwine" Entwine.flagSpecs Entwine.defaultOptions)
+  , ("fiedler",        helpDefaultDrift "fiedler" Fiedler.flagSpecs Fiedler.defaultOptions)
+  , ("horizon",        helpDefaultDrift "horizon" Horizon.flagSpecs Horizon.defaultOptions)
+  , ("strata",         helpDefaultDrift "strata" Strata.flagSpecs Strata.defaultOptions)
+  , ("term-cluster",   helpDefaultDrift "term-cluster" TermCluster.flagSpecs TermCluster.defaultOptions)
+  , ("concept-bundle", helpDefaultDrift "concept-bundle" ConceptBundle.flagSpecs ConceptBundle.defaultOptions)
+  , ("hint-bench",     helpDefaultDrift "hint-bench" HintBench.flagSpecs HintBench.defaultOptions)
+  ]
 
 -- | Pull the subcommand names out of the golden's SUBCOMMANDS block: the
 -- indented lines between that heading and the next unindented one.

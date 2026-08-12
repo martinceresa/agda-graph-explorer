@@ -159,7 +159,7 @@ flagSpecs =
       (\x o -> o { optMinSpan = x })
   , IntFlag "top-n" "--top-n=N                       rows to keep (default 50)"
       (\x o -> o { optTopN = x })
-  , IntFlag "k-max" "--k-max=N                       max itemset size; 2-4 (default 4)"
+  , IntFlag "k-max" "--k-max=N                       max itemset size; 2-4 (default 3)"
       (\x o -> o { optKMax = x })
   , DblFlag "exclude-top-frequency" "--exclude-top-frequency=F       drop bundles with top-pct% items; 0 = disabled (default 5.0)"
       (\x o -> o { optExcludeTopFreq = x })

@@ -52,7 +52,7 @@ High `Span` first, then `Lift`.
 | `--min-span=N` | `3` | min distinct modules a bundle must span. |
 | `--min-support=N` | `3` | absolute support count. |
 | `--min-lift=F` | `2.0` | lift threshold. |
-| `--k-max=N` | `3` | max itemset size (2–4). (`--help` misreports this as `4`; the header line echoes the real value.) |
+| `--k-max=N` | `3` | max itemset size (2–4). |
 | `--exclude-top-frequency=F` | `5.0` | drop bundles with top-pct% items; `0` disables. |
 | `--forced-suppress` / `--no-forced-suppress` | on | drop family-polluted itemsets (same machinery as [`basket`](basket.md)). |
 | `--forced-fraction=F` | `0.5` | bundle-fraction gate for that suppressor. |

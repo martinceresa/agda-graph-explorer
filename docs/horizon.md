@@ -63,6 +63,20 @@ The `periphery` rows, then the fanned-out modules in the histogram.
 
 - Switch to `terminal-leaves` / `terminals` for projects without postulate-axiom
   or public-theorem conventions.
+- **The analysis refuses to produce a vacuous ranking.** `ε⁺` is only defined
+  for a node that reaches a leaf, and the declared sort key is `(ε⁺ + ε⁻)`, so
+  a leaf set that almost no root reaches yields a table whose headline column
+  is `-` on every row and whose ordering is arbitrary. Horizon measures *root
+  coverage* — the fraction of roots with a defined `ε⁺` — and when it falls
+  below 1%: on the default `--leaves` it falls back to `terminal-leaves` with
+  a stderr note; on an explicit `--leaves` it **errors**, listing the
+  `--leaves`/`--roots` combinations that would rank on this graph and their
+  coverage. A graph built with `agda-deps --no-externals` triggers this: it
+  strips the `Agda.Builtin.*` / `Agda.Primitive.*` axiom layer that
+  `postulates-axioms` measures distance to.
+- `--format=json` carries `stats.root_coverage`, and `options.leaves` is the
+  mode *actually used* (post-fallback), so a JSON consumer can make the same
+  judgement.
 
 See also: [`load-bearing`](load-bearing.md) (flow), [`pyre`](pyre.md) (depth as
 a cost predictor), [`strata`](strata.md).

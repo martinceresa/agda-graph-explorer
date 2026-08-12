@@ -148,7 +148,7 @@ flagSpecs :: [FlagSpec Options]
 flagSpecs =
   [ DblFlag "min-support" "--min-support=F             min support (default 0.05)"
       (\x o -> o { optMinSupport = x })
-  , DblFlag "min-confidence" "--min-confidence=F          min confidence (default 0.5)"
+  , DblFlag "min-confidence" "--min-confidence=F          min confidence (default 0.6)"
       (\x o -> o { optMinConfidence = x })
   , DblFlag "min-lift" "--min-lift=F                min lift (default 1.5)"
       (\x o -> o { optMinLift = x })

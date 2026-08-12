@@ -56,7 +56,7 @@ frequent it is. Then read `## Near-miss bundles`.
 | Flag | Default | Effect |
 |---|---|---|
 | `--min-support=F` | `0.05` | min support. |
-| `--min-confidence=F` | `0.6` | min confidence. (`--help` misreports this as `0.5`; the header line echoes the real value.) |
+| `--min-confidence=F` | `0.6` | min confidence. |
 | `--min-lift=F` | `1.5` | the "not a coincidence" floor. |
 | `--exclude-top-frequency=F` | `5.0` | drop rules containing top-pct% items; `0` disables. |
 | `--forced-suppress` / `--no-forced-suppress` | on | drop per-clause-unfold families (`VoteBlock-{0,1,2}`). |

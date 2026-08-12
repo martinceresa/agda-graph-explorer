@@ -160,7 +160,7 @@ flagSpecs =
       (\x o -> o { optMinGStat = x })
   , IntFlag "top-n" "--top-n=N                      rows to keep (default 100)"
       (\x o -> o { optTopN = x })
-  , SwitchFlag "transitive" "--transitive                   use ancestors as basket instead of direct callers"
+  , SwitchFlag "transitive" "--transitive                   use the transitive callee closure as basket, not direct callees"
       SwitchPreGuard (\o -> o { optTransitive = True })
       (Just "transitive") (\v o -> o { optTransitive = v })
   , TextFlag "exclude-name-regex" "--exclude-name-regex=PATTERN   POSIX-ERE on unqualified name"

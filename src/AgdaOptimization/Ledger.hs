@@ -41,6 +41,12 @@ module AgdaOptimization.Ledger
   , parseOptions
   , applyConfig
   , run
+    -- * Exposed for the offline suite
+  , TheoremTrust(..)
+  , computeTrust
+  , partitionAxioms
+  , collectPublicTheorems
+  , buildLeverage
   ) where
 
 import           Control.DeepSeq      ( NFData(..) )
@@ -60,7 +66,7 @@ import           System.IO            ( hPutStrLn, stderr )
 import qualified Data.Aeson           as A
 import           Data.Aeson           ( (.=) )
 
-import           AgdaGraph.Index      ( Index(..), ancestors, defAt )
+import           AgdaGraph.Index      ( Index(..), defAt, descendants )
 import           AgdaGraph.Schema     ( Access(..), Definition(..)
                                       , ExternalsSummary(..), Kind(..)
                                       , State(..) )
@@ -224,7 +230,7 @@ run ix gOpts opts = do
       -- available, else a prelude-strip heuristic).
       !theoremIds = collectPublicTheorems opts mes defs
 
-      -- (3) Per-theorem trust budget. ancestors() is an independent
+      -- (3) Per-theorem trust budget. descendants() is an independent
       -- BFS per node; spark it via 'parMap rdeepseq'.
       !theorems =
         parMap rdeepseq
@@ -263,6 +269,19 @@ run ix gOpts opts = do
       -- (6) Axiom leverage: invert per-theorem T_axiom into a map
       -- of "this axiom is used by N theorems". Strict insert.
       !leverage = buildLeverage theorems
+
+  -- Tripwire: axioms detected but reached by nobody. The header count and
+  -- an empty leverage table then contradict each other, and every footprint
+  -- reads a confident 0 — so say which of the two scopes is wrong instead of
+  -- rendering the contradiction silently.
+  when (nAxioms > 0 && IM.null leverage) $
+    hPutStrLn stderr $
+      "ledger: warning: " ++ show nAxioms ++ " paper-level axiom"
+        ++ (if nAxioms == 1 then "" else "s")
+        ++ " detected, but no considered theorem depends on any of them"
+        ++ " (every trust footprint is empty).\n"
+        ++ "        Check --theorem-prefix / --axiom-module-prefix scope:"
+        ++ " the two sets may name disjoint parts of the graph."
 
   case gOutFormat gOpts of
     OutJson ->
@@ -402,15 +421,18 @@ isModulePrefix prefix m
 -- The hot loop (sparked via parMap rdeepseq in 'run')
 -- ---------------------------------------------------------------------
 
--- | Per-theorem trust budget. ancestors() gives the reverse-transitive
--- closure ("everything this theorem depends on"); we then intersect
--- with the two postulate sets. The 'IntSet' representation makes the
--- intersection a coordinated walk of two strict tries — O(|s1| + |s2|).
+-- | Per-theorem trust budget. 'descendants' gives the forward closure
+-- over uses-edges — everything this theorem transitively /rests on/ —
+-- which we intersect with the two postulate sets. ('ancestors' is the
+-- other direction: the theorem's own dependents. Intersecting THOSE
+-- with the axiom set answers no question anyone asked.) The 'IntSet'
+-- representation makes the intersection a coordinated walk of two
+-- strict tries — O(|s1| + |s2|).
 computeTrust :: Index -> IS.IntSet -> IS.IntSet -> Int -> TheoremTrust
 computeTrust ix axiomSet foundSet i =
-  let !anc       = ancestors ix (IS.singleton i)
-      !axHere    = IS.intersection anc axiomSet
-      !foundHere = IS.intersection anc foundSet
+  let !deps      = descendants ix (IS.singleton i)
+      !axHere    = IS.intersection deps axiomSet
+      !foundHere = IS.intersection deps foundSet
   in TheoremTrust
        { ttId         = i
        , ttAxioms     = axHere

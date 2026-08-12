@@ -70,7 +70,9 @@ import           Data.Ord                  ( Down(..), comparing )
 import           Data.Text                 ( Text )
 import qualified Data.Text                 as T
 import qualified Data.Vector               as V
+import           System.Exit               ( exitFailure )
 import           System.IO                 ( hPutStrLn, stderr )
+import           Text.Printf               ( printf )
 
 import qualified Data.Aeson                as A
 import           Data.Aeson                ( (.=) )
@@ -320,54 +322,128 @@ sccMapToNodeMap !cond !sccMap =
 -- Driver
 ------------------------------------------------------------------------
 
+-- | Root-coverage floor below which the @ε⁺@ ranking is vacuous and the
+-- report must not be printed as if it were one.
+--
+-- The declared sort key is @(ε⁺ + ε⁻)@, so a root with no @ε⁺@ renders a
+-- @-@ in the headline column; when nearly every root is in that state the
+-- ranking is arbitrary and @radius@ collapses to 0. A healthy corpus sits
+-- near 1.0 (the axiom layer is reachable from essentially every theorem);
+-- the degenerate corpus that surfaced this measured 0.0004. The gap is
+-- three orders of magnitude wide, so the exact cut is not delicate.
+minRootCoverage :: Double
+minRootCoverage = 0.01
+
+-- | Fraction of roots with a defined @ε⁺@ — i.e. that reach any leaf.
+-- Reads the SCC-level map directly (a root's SCC either has a value or
+-- does not), so it costs nothing beyond the DP already run.
+rootCoverage :: Condensation -> IM.IntMap Int -> IS.IntSet -> Double
+rootCoverage !cond !epPlusSCC !rootSet
+  | IS.null rootSet = 0
+  | otherwise =
+      let !covered = IS.foldl'
+            (\ !acc r -> case IM.lookup r (cdSccOf cond) of
+                Just s | IM.member s epPlusSCC -> acc + 1
+                _                              -> acc)
+            (0 :: Int) rootSet
+      in fromIntegral covered / fromIntegral (IS.size rootSet)
+
 -- | Entry point. Reads only the 'Index'; emits either a human-readable
 -- table + optional histogram, or a self-describing JSON object.
 --
--- /Leaf-set fallback./ If the user is on the default
--- @--leaves=postulates-axioms@ but the resolved leaf set is empty
--- (typical when @agda-deps --no-externals@ stripped every foundational
--- postulate upstream), we transparently fall back to
--- @--leaves=terminal-leaves@ and emit a stderr note. Explicit
--- @--leaves=postulates-axioms@ keeps the empty-set behaviour — that's
--- the user's deliberate choice.
+-- /Leaf-set degeneracy./ The analysis is only meaningful when roots can
+-- actually reach leaves. That is checked AFTER the forward DP, on
+-- 'rootCoverage', because an empty leaf set is not the only way to get a
+-- vacuous report: a leaf set of two nodes that almost no root reaches
+-- produces exactly the same all-@-@ column while looking populated in the
+-- header. On a degenerate resolve we either fall back to
+-- @--leaves=terminal-leaves@ with a note (the user was on the default), or
+-- refuse and enumerate the combinations that would work (the user chose
+-- this leaf set explicitly, so silently analysing a different one would be
+-- worse than stopping) — the shape 'AgdaOptimization.Chokepoint' already
+-- uses for the same degeneracy.
 run :: Index -> GlobalOpts -> Options -> IO ()
 run !ix !gOpts !opts0 = do
-  let !leafSet0      = collectLeaves ix (optLeaves opts0)
-      !defaultEmpty  =     optLeaves opts0 == LvPostulatesAxioms
-                        && not (optLeavesExplicit opts0)
-                        && IS.null leafSet0
+  let !cond          = buildCondensation ix
+      !rootSet0      = collectRoots ix (optRoots opts0)
+      !leafSet0      = collectLeaves ix (optLeaves opts0)
+      !epPlusSCC0    = forwardEccSCC cond (seedsToSccs cond leafSet0)
+      !coverage0     = rootCoverage cond epPlusSCC0 rootSet0
+      !degenerate    = coverage0 < minRootCoverage
       !extSumPresent = externalsSummaryHasRows (idxExternalsSummary ix)
 
-  when defaultEmpty $ do
-    if extSumPresent
+  -- An explicit --leaves that cannot rank refuses rather than printing a
+  -- table whose headline column is empty on every row.
+  when (degenerate && optLeavesExplicit opts0) $ do
+    hPutStrLn stderr $
+      "[horizon] error: --leaves=" ++ leavesLabel (optLeaves opts0)
+        ++ " resolves to " ++ show (IS.size leafSet0) ++ " leaf node(s) reachable"
+        ++ " from " ++ showPct coverage0 ++ " of the "
+        ++ show (IS.size rootSet0) ++ " --roots=" ++ rootsLabel (optRoots opts0)
+        ++ " roots;\n             ε⁺ would be undefined on essentially every"
+        ++ " row, making the (ε⁺ + ε⁻) ranking arbitrary."
+    let working = [ (lm, rm, c)
+                  | lm <- [LvPostulatesAxioms, LvTerminalLeaves]
+                  , rm <- [RtPublicTheorems, RtTerminals]
+                  , let c = rootCoverage cond
+                              (forwardEccSCC cond
+                                 (seedsToSccs cond (collectLeaves ix lm)))
+                              (collectRoots ix rm)
+                  , c >= minRootCoverage
+                  ]
+    if null working
       then hPutStrLn stderr $
-              "[horizon] note: --leaves=postulates-axioms resolved to empty"
-           ++ " (idxExternalsSummary present — likely --no-externals upstream stripped"
-           ++ " every foundational postulate;\n"
-           ++ "          its names aren't in the in-memory node table so we can't"
-           ++ " resurrect them as leaves);\n"
-           ++ "          falling back to --leaves=terminal-leaves."
-           ++ " Pass --leaves=postulates-axioms explicitly to error instead."
-      else hPutStrLn stderr $
-              "[horizon] note: --leaves=postulates-axioms resolved to empty (likely"
-           ++ " --no-externals upstream);\n"
-           ++ "          falling back to --leaves=terminal-leaves."
-           ++ " Pass --leaves=postulates-axioms explicitly to error instead."
+              "             No --leaves/--roots combination ranks on this graph."
+           ++ " This is typical of a graph\n"
+           ++ "             built with `agda-deps --no-externals`, which strips the"
+           ++ " Agda.Builtin.*/Primitive\n"
+           ++ "             axiom layer horizon measures distance TO. Re-run on the"
+           ++ " full graph."
+      else do
+        hPutStrLn stderr
+          "             Combinations that WOULD rank (root coverage in parens):"
+        mapM_ (\(lm, rm, c) -> hPutStrLn stderr $
+                 "               --leaves=" ++ leavesLabel lm
+                   ++ " --roots=" ++ rootsLabel rm
+                   ++ "  (" ++ showPct c ++ ")") working
+    exitFailure
+
+  -- On the default, fall back the way the empty-set path always did.
+  let !fellBack = degenerate && not (optLeavesExplicit opts0)
+
+  when fellBack $
+    hPutStrLn stderr $
+         "[horizon] note: --leaves=" ++ leavesLabel (optLeaves opts0)
+      ++ " resolved to " ++ show (IS.size leafSet0) ++ " leaf node(s) reachable"
+      ++ " from only " ++ showPct coverage0 ++ " of roots"
+      ++ (if extSumPresent
+            then "\n          (externals_summary present — likely --no-externals"
+                 ++ " upstream stripped the foundational postulates; their names"
+                 ++ "\n          aren't in the in-memory node table so we can't"
+                 ++ " resurrect them as leaves)"
+            else "\n          (likely --no-externals upstream)")
+      ++ ";\n          falling back to --leaves=terminal-leaves."
+      ++ " Pass --leaves=" ++ leavesLabel (optLeaves opts0)
+      ++ " explicitly to error instead."
 
   let !opts
-        | defaultEmpty = opts0 { optLeaves = LvTerminalLeaves }
-        | otherwise    = opts0
+        | fellBack  = opts0 { optLeaves = LvTerminalLeaves }
+        | otherwise = opts0
       !leafSet
-        | defaultEmpty = collectLeaves ix LvTerminalLeaves
-        | otherwise    = leafSet0
-      !rootSet = collectRoots  ix (optRoots opts)
-      !cond    = buildCondensation ix
+        | fellBack  = collectLeaves ix LvTerminalLeaves
+        | otherwise = leafSet0
+      !rootSet = rootSet0
       !leafSccs = seedsToSccs cond leafSet
       !rootSccs = seedsToSccs cond rootSet
-      !epPlusSCC  = forwardEccSCC  cond leafSccs
+      !epPlusSCC
+        | fellBack  = forwardEccSCC cond leafSccs
+        | otherwise = epPlusSCC0
       !epMinusSCC = backwardEccSCC cond rootSccs
       !epPlus     = sccMapToNodeMap cond epPlusSCC
       !epMinus    = sccMapToNodeMap cond epMinusSCC
+      !coverage
+        | fellBack  = rootCoverage cond epPlusSCC rootSet
+        | otherwise = coverage0
 
   -- Diagnostics. An empty leaf set or root set is a real degradation:
   -- the corresponding eccentricities will all be sentinel -1. Surface
@@ -441,7 +517,7 @@ run !ix !gOpts !opts0 = do
     OutJson ->
       emitJsonReport (gOutPath gOpts) $
         horizonJson ix opts cond
-                    leafSet rootSet
+                    leafSet rootSet coverage
                     epPlus epMinus
                     diameter radius
                     periphery center
@@ -575,6 +651,11 @@ peakOfBuckets =
 -- Display tags
 ------------------------------------------------------------------------
 
+-- | A coverage fraction as a percentage, with enough precision to stay
+-- non-zero on the degenerate corpora this is reported for.
+showPct :: Double -> String
+showPct x = printf "%.2f%%" (100 * x)
+
 leavesLabel :: LeavesMode -> String
 leavesLabel = \case
   LvPostulatesAxioms -> "postulates-axioms"
@@ -605,6 +686,7 @@ horizonJson
   -> Condensation
   -> IS.IntSet            -- ^ leaf node ids.
   -> IS.IntSet            -- ^ root node ids.
+  -> Double               -- ^ root coverage of ε⁺.
   -> IM.IntMap Int        -- ^ ε⁺ per node.
   -> IM.IntMap Int        -- ^ ε⁻ per node.
   -> Int                  -- ^ diameter.
@@ -614,7 +696,7 @@ horizonJson
   -> IS.IntSet            -- ^ excluded by regex.
   -> [Int]                -- ^ ranked top-N node ids.
   -> A.Value
-horizonJson ix opts cond leafSet rootSet epPlus epMinus
+horizonJson ix opts cond leafSet rootSet coverage epPlus epMinus
             diameter radius periphery center excluded rows =
   A.object $
     [ "subcommand" .= ("horizon" :: Text)
@@ -624,6 +706,10 @@ horizonJson ix opts cond leafSet rootSet epPlus epMinus
         , "n_scc"             .= cdCount cond
         , "n_leaves"          .= IS.size leafSet
         , "n_roots"           .= IS.size rootSet
+          -- Fraction of roots with a defined ε⁺. The ranking is only
+          -- meaningful when this is high; the "leaves" field under
+          -- "options" is the mode actually used, post-fallback.
+        , "root_coverage"     .= coverage
         , "diameter"          .= diameter
         , "radius"            .= radius
         , "n_periphery"       .= IS.size periphery

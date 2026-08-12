@@ -54,7 +54,7 @@ repetition deserves a combinator or a generic lemma.
 | `--max-size=N` | `3` | maximum motif size in nodes. |
 | `--min-label-distinct=N` | `2` | require ≥N distinct `(kind, state)` labels. |
 | `--exclude-hub-pct=F` | off | drop the top pct% hub nodes by fan-in. |
-| `--max-fan-out=N` | `32` | skip seeds whose fan-out exceeds N. (`--help` states no default; the code uses `32`.) |
+| `--max-fan-out=N` | `32` | skip seeds whose fan-out exceeds N. |
 | `--budget=F` | `0` (unlimited) | wall-clock seconds. |
 | `--per-module` | off | currently warns and falls back to global mining. |
 | `--top-n=N` | `50` | rows to keep. |

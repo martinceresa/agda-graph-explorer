@@ -87,9 +87,9 @@ lowQThreshold = 0.1
 -- 'AgdaOptimization.CLI.subFlags'.
 flagSpecs :: [FlagSpec Options]
 flagSpecs =
-  [ IntFlag "min-uses" "--min-uses=N    minimum consumer count to consider (default 2)"
+  [ IntFlag "min-uses" "--min-uses=N    minimum consumer count to consider (default 5)"
       (\n o -> o { optMinUses = n })
-  , DblFlag "threshold" "--threshold=F   entropy threshold (default 1.5)"
+  , DblFlag "threshold" "--threshold=F   min diversity D a row must reach (default 0.5)"
       (\x o -> o { optDiversityThreshold = x })
   , IntFlag "top-n" "--top-n=N       rows to keep (default 50)"
       (\n o -> o { optTopN = n })
@@ -125,8 +125,9 @@ run ix gOpts opts@Options{..} = do
       -- the precise definition.
       reDiscount = reExportDiscount ix
 
-      -- Per-node analysis: only nodes with enough consumers.
-      (scored, totalConsidered, droppedByMin) =
+      -- Per-node analysis: only nodes with enough consumers, and among
+      -- those only the ones diverse enough to clear --threshold.
+      (scored, totalConsidered, droppedByMin, droppedByThreshold) =
         scoreAll ix opts louvainNodeComm reDiscount
 
       qCount = countCommunities louvainNodeComm
@@ -155,8 +156,8 @@ run ix gOpts opts@Options{..} = do
   case gOutFormat gOpts of
     OutJson ->
       emitJsonReport (gOutPath gOpts) $
-        polyglotJson ix opts totalConsidered droppedByMin qCount
-                     louvainModularity lowQ topRows godSet recs
+        polyglotJson ix opts totalConsidered droppedByMin droppedByThreshold
+                     qCount louvainModularity lowQ topRows godSet recs
     OutHuman -> withHumanReport gOpts "polyglot" $ do
       -- Header & stats
       putStrLn $ "# Polyglot — top " ++ show optTopN
@@ -164,6 +165,7 @@ run ix gOpts opts@Options{..} = do
               ++ ", threshold=" ++ printf "%.4f" optDiversityThreshold ++ ")"
       putStrLn $ "  nodes considered     : " ++ show totalConsidered
       putStrLn $ "  dropped (min-uses)   : " ++ show droppedByMin
+      putStrLn $ "  dropped (threshold)  : " ++ show droppedByThreshold
       putStrLn $ "  communities found    : " ++ show qCount
       putStrLn $ "  modularity Q         : " ++ printf "%.4f" louvainModularity
       putStrLn ""
@@ -496,38 +498,47 @@ data Score = Score
 instance NFData Score where
   rnf (Score a b c d e) = a `seq` b `seq` c `seq` d `seq` rnf e
 
--- | Filter nodes by 'optMinUses' and compute scores for the survivors.
--- Per-node work (the 'ancestors' BFS + the entropy compute) is sparked
--- across nodes via 'parListChunk'; the final reduction (counting +
--- list assembly) is sequential and order-preserving.
+-- | Filter nodes by 'optMinUses' then by 'optDiversityThreshold', and
+-- compute scores for the survivors. Per-node work (the 'ancestors' BFS +
+-- the entropy compute) is sparked across nodes via 'parListChunk'; the
+-- final reduction (counting + list assembly) is sequential and
+-- order-preserving.
+--
+-- The two cuts are counted separately because they answer different
+-- questions — too few consumers to judge, versus judged and not diverse.
 scoreAll
   :: Index
   -> Options
-  -> IntMap Int           -- ^ node -> community
-  -> IntSet               -- ^ "discount this consumer" set (per spec)
-  -> ([Score], Int, Int)  -- ^ (scored, totalConsidered, droppedByMinUses)
+  -> IntMap Int                -- ^ node -> community
+  -> IntSet                    -- ^ "discount this consumer" set (per spec)
+  -> ([Score], Int, Int, Int)
+     -- ^ (scored, totalConsidered, droppedByMinUses, droppedByThreshold)
 scoreAll ix Options{..} nodeComm discountSet =
   let n = idxNodeCount ix
-      -- Per-node: Nothing if filtered by min-uses; Just !Score otherwise.
-      perNode :: Int -> Maybe Score
+      -- Per-node verdict: which cut (if either) removed it.
+      perNode :: Int -> Either Bool Score
       perNode !i =
         let consSet = ancestors ix (IS.singleton i)
             count   = IS.size consSet
         in if count < optMinUses
-             then Nothing
-             else Just $! computeScore nodeComm discountSet i consSet
+             then Left True   -- dropped by min-uses
+             else let !s = computeScore nodeComm discountSet i consSet
+                  in if sDiversity s < optDiversityThreshold
+                       then Left False  -- dropped by threshold
+                       else Right s
       -- Sparked list of results in ascending i order.
-      sparked :: [Maybe Score]
+      sparked :: [Either Bool Score]
       sparked = withStrategy (parListChunk 64 rdeepseq)
                              (map perNode [0 .. n - 1])
       -- Sequential reduction. Cons-prepend to preserve the original
       -- descending-i ordering of the returned [Score].
-      go !rows !nConsidered !nDropped []         =
-        (rows, nConsidered, nDropped)
-      go !rows !nConsidered !nDropped (mx : xs') = case mx of
-        Nothing -> go rows         (nConsidered + 1) (nDropped + 1) xs'
-        Just s  -> go (s : rows)   (nConsidered + 1) nDropped       xs'
-  in go [] 0 0 sparked
+      go !rows !nConsidered !nMin !nThr []         =
+        (rows, nConsidered, nMin, nThr)
+      go !rows !nConsidered !nMin !nThr (mx : xs') = case mx of
+        Left True  -> go rows       (nConsidered + 1) (nMin + 1) nThr       xs'
+        Left False -> go rows       (nConsidered + 1) nMin       (nThr + 1) xs'
+        Right s    -> go (s : rows) (nConsidered + 1) nMin       nThr       xs'
+  in go [] 0 0 0 sparked
 
 -- | Compute the Score record for one node from its consumer set.
 computeScore
@@ -677,6 +688,7 @@ polyglotJson
   -> Options
   -> Int                -- ^ Total considered (= nNodes).
   -> Int                -- ^ Dropped by min-uses.
+  -> Int                -- ^ Dropped by --threshold.
   -> Int                -- ^ Communities found.
   -> Double             -- ^ Modularity Q.
   -> Bool               -- ^ Low-Q warning.
@@ -684,14 +696,15 @@ polyglotJson
   -> IntSet             -- ^ God-suspect set.
   -> Recommendations
   -> A.Value
-polyglotJson ix opts totalConsidered droppedByMin qCount qVal lowQ
-             topRows godSet recs =
+polyglotJson ix opts totalConsidered droppedByMin droppedByThreshold
+             qCount qVal lowQ topRows godSet recs =
   A.object
     [ "subcommand" .= ("polyglot" :: Text)
     , "options"    .= polyglotOptionsJson opts
     , "stats"      .= A.object
         [ "nodes_considered"   .= totalConsidered
         , "dropped_by_min_uses" .= droppedByMin
+        , "dropped_by_threshold" .= droppedByThreshold
         , "communities"        .= qCount
         , "modularity_q"       .= qVal
         , "q_warning"          .= lowQ

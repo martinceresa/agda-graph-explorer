@@ -39,7 +39,8 @@ import           System.Exit             ( exitFailure, exitSuccess )
 import           System.IO               ( hPutStrLn, stderr )
 
 import           AgdaGraph.Version       ( numericVersion, versionLine )
-import           AgdaGraph.ConfigCore    ( extractValueFlag )
+import           AgdaGraph.ConfigCore    ( extractValueFlag, extractSwitchFlag
+                                        , extractToggleFlag )
 import           AgdaGraph.Completion    ( CompletionSpec(..), renderCompletion )
 import           AgdaGraph.Schema        ( loadExpandedGraph )
 import           AgdaGraph.Index         ( Index, buildIndex, idxSyntheticCount
@@ -114,9 +115,10 @@ usage = unlines $
   ++
   [ ""
   , "GLOBAL OPTIONS:"
+  , "  (all usable before or after the subcommand)"
   , "  --graph FILE        input graph (alias of the positional <graph.json>;"
-  , "                      usable in any position, and wins over a positional."
-  , "                      Config fallback: `graph:` under `global:`)."
+  , "                      wins over a positional. Config fallback: `graph:`"
+  , "                      under `global:`)."
   , "  --format human|json output format (default: human)."
   , "  --json              alias of --format=json."
   , "  --out FILE          write the report to FILE (default: stdout)."
@@ -381,24 +383,28 @@ run = do
       putStr (renderCompletion shell completionSpec)
       exitSuccess
     [] -> pure ()
-  -- Lift the position-independent globals out of argv before the intricate
-  -- positional scanner runs: `--graph` (input, an alias of the positional
-  -- graph path), `--format` (output, an alias of `--json`) and `--config`.
-  --
-  -- `--config` is lifted rather than scanned because the scanner reserves the
-  -- one token after the subcommand for the graph path and never peels it
-  -- (see 'scanGlobals'), so a scanned `--config` was unusable in that slot —
-  -- and `--graph`'s own lifting SHIFTS a later flag into it, which made
-  -- `motif --graph g.json --config f.yml` fail with `unknown flag: --config`
-  -- even though the flag was written last. Lifting removes the slot from the
-  -- question entirely: every spelling and position now behaves the same.
-  let (mGraph,  argv1) = extractValueFlag "--graph" argv0
-      (mFmtRaw, argv2) = extractValueFlag "--format" argv1
-      (mCfgPathArg, argv) = extractValueFlag "--config" argv2
-  -- 'extractValueFlag' drops a trailing bare `--config` (no FILE); keep the
-  -- scanner's diagnostic for it rather than silently running config-less.
+  -- Lift EVERY global out of argv before the positional scanner runs. The
+  -- scanner reserves the one token after the subcommand for the graph path
+  -- and never peels it (see 'scanGlobals'), so any global landing in that
+  -- slot was silently unusable — and each lifted flag SHIFTS the next one
+  -- into it, which is why `motif --graph g.json --config f.yml` used to die
+  -- with `unknown flag: --config` even though `--config` was written last.
+  -- Lifting the whole group removes the slot from the question: every
+  -- global now works in every position, which is what `--help` has always
+  -- claimed by listing them together.
+  let (mGraph,      argv1) = extractValueFlag  "--graph"  argv0
+      (mFmtRaw,     argv2) = extractValueFlag  "--format" argv1
+      (mCfgPathArg, argv3) = extractValueFlag  "--config" argv2
+      (mOutPath,    argv4) = extractValueFlag  "--out"    argv3
+      (sawJson,     argv5) = extractSwitchFlag "--json"   argv4
+      (mExplain,    argv)  = extractToggleFlag "--explain" "--no-explain" argv5
+  -- 'extractValueFlag' drops a trailing bare `--config` / `--out` (no FILE);
+  -- diagnose rather than silently running without it.
   when (mCfgPathArg == Nothing && "--config" `elem` argv0) $ do
     hPutStrLn stderr "agda-optimization: --config: missing FILE argument"
+    exitFailure
+  when (mOutPath == Nothing && "--out" `elem` argv0) $ do
+    hPutStrLn stderr "agda-optimization: --out: missing FILE argument"
     exitFailure
   fmtOverride <- case mFmtRaw of
     Nothing      -> pure Nothing
@@ -419,149 +425,81 @@ run = do
     ("--version":_)             -> printVersion False >> exitSuccess
     ("--numeric-version":_)     -> printVersion True  >> exitSuccess
     _ -> case scanGlobals argv of
-      -- A malformed global (bare @--out@/@--config@) before the
-      -- subcommand reports without a subcommand prefix; after the path
-      -- it carries the subcommand.
-      Left e -> do
-        hPutStrLn stderr (renderScanError e)
-        exitFailure
-      Right Scan{ scanSub = Nothing } -> do
+      Scan{ scanSub = Nothing } -> do
         hPutStrLn stderr "agda-optimization: missing subcommand."
         hPutStrLn stderr "Try 'agda-optimization --help' for the list of subcommands."
         exitFailure
-      Right s0@Scan{ scanSub = Just sub } ->
-        -- Fold in the lifted-out globals: `--graph` sets 'scanGraph' (wins
-        -- over any positional in 'dispatch'); `--format` overrides `--json`;
-        -- `--config` is the explicit path handed to 'discoverConfigPath'.
+      s0@Scan{ scanSub = Just sub } ->
+        -- Fold in the lifted-out globals. `--graph` sets 'scanGraph' (wins
+        -- over any positional in 'dispatch'); `--config` is the explicit
+        -- path handed to 'discoverConfigPath'; `--format` still beats
+        -- `--json`, in either position, since it names the format outright.
         dispatch sub s0 { scanGraph     = mGraph
                         , scanConfig    = mCfgPathArg
-                        , scanOutFormat = fmtOverride <|> scanOutFormat s0 }
+                        , scanOutPath   = mOutPath
+                        , scanExplain   = mExplain
+                        , scanOutFormat =
+                            fmtOverride
+                              <|> (if sawJson then Just OutJson else Nothing) }
 
--- | A malformed-global error from the scanner. 'seScope' is the
--- subcommand to mention in the message — @Nothing@ before the
--- subcommand is known (prefixed @agda-optimization:@), @Just sub@ once
--- the trailing scan is running (prefixed @agda-optimization \<sub\>:@).
-data ScanError = ScanError
-  { seScope :: !(Maybe String)
-  , seMsg   :: !String
-  }
-
--- | Render a 'ScanError' to its stderr line. A scoped error reads
--- @agda-optimization \<sub\>: …@; an unscoped one reads
--- @agda-optimization: …@.
-renderScanError :: ScanError -> String
-renderScanError e = case seScope e of
-  Just sub -> "agda-optimization " ++ sub ++ ": " ++ seMsg e
-  Nothing  -> "agda-optimization: " ++ seMsg e
-
--- | Accumulator for the single-pass global-flag scanner. Each global
--- field records whether the corresponding flag was seen on the CLI
--- (@Nothing@ = not set, so the default applies); 'scanSub' is the first
--- non-global, non-flag token; everything else becomes residual args
--- handed to the subcommand's own @parseOptions@.
+-- | The split argv, plus the globals 'run' lifted out before scanning.
+-- Each global field records whether the corresponding flag was seen
+-- (@Nothing@ = not set, so the default applies), which lets the final
+-- 'GlobalOpts' be @scanned '<|>' defaults@ with no
+-- value-equality-against-default heuristic.
 --
--- Tracking "was it set?" explicitly lets the final 'GlobalOpts' be
--- @scanned '<|>' defaults@ with no value-equality-against-default
--- heuristic.
---
--- 'scanRawTail' is the un-peeled list of args after the subcommand.
--- 'dispatch' makes the unknown-subcommand / @--help@ / missing-path
--- decisions against it (not against the peeled 'scanResidual'), so
--- trailing global peeling can never swallow a @--help@.
---
--- 'scanPending' holds a /deferred/ trailing-position malformed-global
--- error: a bad trailing @--out@ must not preempt subcommand validation
--- or @--help@, so 'dispatch' surfaces 'scanPending' last (see there).
+-- 'scanRawTail' is the raw list of args after the subcommand. 'dispatch'
+-- makes the unknown-subcommand / @--help@ / missing-path decisions
+-- against it rather than 'scanResidual'.
 data Scan = Scan
   { scanOutFormat :: !(Maybe OutFormat) -- ^ @Just OutJson@ once @--json@ seen.
-  , scanOutPath   :: !(Maybe FilePath)  -- ^ last @--out@ / @--out=@ value.
-  , scanConfig    :: !(Maybe FilePath)  -- ^ @--config@ / @--config=@ value (lifted
-                                        --   out of argv before the scanner runs,
-                                        --   like 'scanGraph').
-  , scanGraph     :: !(Maybe FilePath)  -- ^ @--graph@ / @--graph=@ value (lifted
-                                        --   out of argv before the scanner runs;
-                                        --   wins over any positional graph path).
+  , scanOutPath   :: !(Maybe FilePath)  -- ^ @--out@ / @--out=@ value, last wins.
+  , scanConfig    :: !(Maybe FilePath)  -- ^ @--config@ / @--config=@ value.
+  , scanGraph     :: !(Maybe FilePath)  -- ^ @--graph@ / @--graph=@ value; wins
+                                        --   over any positional graph path.
   , scanSub       :: !(Maybe String)    -- ^ the subcommand token, once found.
-  , scanRawTail   :: ![String]          -- ^ raw args after the subcommand, un-peeled.
+  , scanRawTail   :: ![String]          -- ^ raw args after the subcommand.
   , scanResidual  :: ![String]          -- ^ args for the subcommand parser (head = path).
-  , scanExplain   :: !(Maybe Bool)     -- ^ @--explain@ / @--no-explain@, last wins.
-  , scanPending   :: !(Maybe ScanError) -- ^ deferred trailing-global error.
+  , scanExplain   :: !(Maybe Bool)      -- ^ @--explain@ / @--no-explain@, last wins.
   }
 
--- | Single pass over the full argv that extracts the global flags
--- (@--json@ / @--out FILE@ / @--out=FILE@) from any /peelable/ position,
--- tolerating the interleaved subcommand token, and returns the assembled
--- 'Scan'.
+-- | Single pass over the argv left after 'run' has lifted every global
+-- out, splitting it into the subcommand token and the subcommand's own
+-- args.
 --
--- @--graph@, @--format@ and @--config@ never reach here: 'run' lifts them
--- out of argv first ('extractValueFlag'), which is what makes them work in
--- every position including the un-peelable slot below.
+-- No global reaches here any more — @--graph@, @--format@, @--config@,
+-- @--out@, @--json@ and the @--explain@ pair are all lifted in 'run'
+-- ('extractValueFlag' / 'extractSwitchFlag' / 'extractToggleFlag'), which
+-- is what makes them work in every position INCLUDING the un-peelable
+-- path slot below. Don't move one back into this scanner: peeling here
+-- cannot see the slot, and lifting one flag shifts the next into it.
 --
 -- Positional contract:
 --
---   * Before the subcommand, leading globals are peeled; the first
---     non-global token becomes the subcommand. A bare @--out@ here is an
---     immediate error (no subcommand scope).
---   * The token immediately after the subcommand is taken as-is (the
---     graph path) and is NOT peeled — so e.g. @motif --json g.json@
---     leaves @--json@ in residual position rather than honouring it.
---   * After that first post-subcommand token, globals are peeled again
---     and the rest accumulates into the residual args. A bare @--out@
---     here is recorded as a /deferred/ error in 'scanPending' (scope =
---     the subcommand) so that 'dispatch' can still run
---     subcommand-validation and @--help@ first.
---
--- A later @--out@ wins over an earlier one (right-biased), across the
--- subcommand boundary.
-scanGlobals :: [String] -> Either ScanError Scan
-scanGlobals = goLead Scan
-  { scanOutFormat = Nothing
-  , scanOutPath   = Nothing
-  , scanConfig    = Nothing
-  , scanGraph     = Nothing
-  , scanSub       = Nothing
-  , scanRawTail   = []
-  , scanResidual  = []
-  , scanExplain   = Nothing
-  , scanPending   = Nothing
-  }
+--   * The first token is the subcommand.
+--   * The token immediately after it is taken as-is (the graph path).
+--   * Everything after that accumulates into the residual args handed to
+--     the subcommand's own parser.
+scanGlobals :: [String] -> Scan
+scanGlobals argv = case argv of
+  []       -> empty
+  (a:rest) -> case rest of
+    []          -> empty { scanSub = Just a, scanRawTail = rest }
+    (path:more) -> empty { scanSub      = Just a
+                         , scanRawTail  = rest
+                         , scanResidual = path : more
+                         }
   where
-    -- Phase 1: before the subcommand — peel leading globals. A bare
-    -- value-flag is an immediate, unscoped error.
-    goLead !s []                  = Right s
-    goLead !s ("--json":rest)     = goLead s { scanOutFormat = Just OutJson } rest
-    goLead !s ("--explain":rest)    = goLead s { scanExplain = Just True } rest
-    goLead !s ("--no-explain":rest) = goLead s { scanExplain = Just False } rest
-    goLead _  ("--out":[])        = Left (ScanError Nothing "--out: missing FILE argument")
-    goLead !s ("--out":v:rest)    = goLead s { scanOutPath = Just v } rest
-    goLead !s (a:rest)
-      | take 6 a == "--out="      = goLead s { scanOutPath = Just (drop 6 a) } rest
-      -- First non-global token is the subcommand. We snapshot the raw
-      -- tail here (for dispatch's guards) and the token right after it
-      -- (the path) is taken verbatim; trailing globals resume after.
-      | otherwise                 = goPath s { scanSub = Just a, scanRawTail = rest } rest
-
-    -- Phase 2: the single post-subcommand token (the path) is residual,
-    -- never peeled.
-    goPath !s []           = Right s
-    goPath !s (path:rest)  = goTail s { scanResidual = [path] } rest
-
-    -- Phase 3: after the path — peel trailing globals (last wins). A bare
-    -- value-flag stops the scan and records a deferred, subcommand-scoped
-    -- error.
-    goTail !s []                  = done s
-    goTail !s ("--json":rest)     = goTail s { scanOutFormat = Just OutJson } rest
-    goTail !s ("--explain":rest)    = goTail s { scanExplain = Just True } rest
-    goTail !s ("--no-explain":rest) = goTail s { scanExplain = Just False } rest
-    goTail !s ("--out":[])        = done s { scanPending = pend s "--out: missing FILE argument" }
-    goTail !s ("--out":v:rest)    = goTail s { scanOutPath = Just v } rest
-    goTail !s (a:rest)
-      | take 6 a == "--out="      = goTail s { scanOutPath = Just (drop 6 a) } rest
-      | otherwise                 = goTail s { scanResidual = a : scanResidual s } rest
-
-    -- Finalise: residuals were accumulated reversed.
-    done !s = Right s { scanResidual = reverse (scanResidual s) }
-    pend !s = Just . ScanError (scanSub s)
+    empty = Scan
+      { scanOutFormat = Nothing
+      , scanOutPath   = Nothing
+      , scanConfig    = Nothing
+      , scanGraph     = Nothing
+      , scanSub       = Nothing
+      , scanRawTail   = []
+      , scanResidual  = []
+      , scanExplain   = Nothing
+      }
 
 -- | Print the version. With @numericOnly = True@, just the bare
 -- semver (@X.Y.Z@); otherwise @agda-optimization X.Y.Z@. Format and
@@ -576,8 +514,8 @@ printVersion numericOnly
 -- below decide unknown-subcommand / @--help@ / missing-path against the
 -- /raw/ post-subcommand tail ('scanRawTail') — so a trailing global the
 -- single-pass scanner already peeled cannot reorder these. Only once
--- those pass do we surface any deferred trailing-global error and run
--- the analysis with the scanned 'GlobalOpts' / config path / residual.
+-- those pass do we run the analysis with the scanned 'GlobalOpts' /
+-- config path / residual.
 dispatch :: String -> Scan -> IO ()
 dispatch sub s
   | sub `elem` ["-h", "--help"] = putStrLn usage >> exitSuccess
@@ -589,11 +527,6 @@ dispatch sub s
       putStrLn (subUsage sub)
       exitSuccess
   | otherwise = do
-      -- Surface a deferred trailing malformed-global error now — after
-      -- the subcommand-validation + @--help@ guards.
-      case scanPending s of
-        Just e  -> hPutStrLn stderr (renderScanError e) >> exitFailure
-        Nothing -> return ()
       -- Discover + load the YAML config according to the documented
       -- priority order, then merge: global section before CLI's
       -- global flags (so CLI wins). This runs BEFORE the input graph is

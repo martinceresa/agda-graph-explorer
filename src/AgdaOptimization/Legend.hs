@@ -570,7 +570,11 @@ legends =
                                            \little, and the clusters below rest on \
                                            \thin evidence.")
               , ("combinator / copy-paste / mixed", "how the structural-twin clusters \
-                                                    \were classified.")
+                                                    \were classified. Counts are over \
+                                                    \the WHOLE population, not the \
+                                                    \rows below; a line under the \
+                                                    \table names any class --top-n \
+                                                    \cut entirely.")
               ])
           , ("Per cluster",
               [ ("body overlap", "weighted Jaccard of the members' body fingerprints.")
@@ -732,7 +736,9 @@ legends =
                         \in the header (\949\8315 = 0); leaf = it IS one of the leaves \
                         \(\949\8314 = 0).")
               , ("-", "unreachable in that direction (reaches no leaf, or no root \
-                      \reaches it). These sort to the bottom.")
+                      \reaches it). These sort to the bottom. A whole column of them \
+                      \cannot happen: horizon falls back (or refuses) when too few \
+                      \roots reach a leaf for the ranking to mean anything.")
               , stateCol
               ])
           , ("Sections",

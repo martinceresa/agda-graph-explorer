@@ -650,16 +650,21 @@ plugin/                         Claude Code plugin: agda-explore MCP server +
   built from the same accessor, so the skeleton can only advertise keys that
   load — a property `scripts/config-smoke.sh` asserts per tool.
 
-- **`agda-optimization`'s `--graph` / `--format` / `--config` are lifted out
-  of argv before the positional scanner runs** (`extractValueFlag` in `run`).
-  This is load-bearing, not tidiness: `scanGlobals` takes the one token after
-  the subcommand verbatim as the graph path and never peels it, so a scanned
-  `--config` was silently unusable there — and `--graph`'s own lifting SHIFTS
-  a later flag into that slot, which made `motif --graph g.json --config f.yml`
-  fail with `unknown flag: --config` even though `--config` was written last.
-  Don't move one of the three back into the scanner. A trailing bare
-  `--config` is diagnosed explicitly in `run`, because `extractValueFlag`
-  drops it.
+- **`agda-optimization`'s ENTIRE global-flag group is lifted out of argv
+  before the positional scanner runs** (`extractValueFlag` /
+  `extractSwitchFlag` / `extractToggleFlag` in `run`): `--graph`, `--format`,
+  `--config`, `--out`, `--json`, `--explain`/`--no-explain`. This is
+  load-bearing, not tidiness: `scanGlobals` takes the one token after the
+  subcommand verbatim as the graph path and never peels it, so a global
+  landing there was silently unusable — and each lifted flag SHIFTS the next
+  one into that slot, which made `motif --graph g.json --config f.yml` fail
+  with `unknown flag: --config` even though `--config` was written last, and
+  `debt --graph g.json --no-explain` fail while `debt g.json --no-explain`
+  worked. Don't move one back into the scanner: peeling there cannot see the
+  slot. `scanGlobals` is now purely subcommand + path + residual and cannot
+  fail. A trailing bare `--config` / `--out` is diagnosed explicitly in
+  `run`, because the lifter drops it. `scripts/config-smoke.sh` pins every
+  global × every position, including beside `--graph`.
 
 - **`agda-explore`'s `doctor` / `query` are found anywhere in argv, not just
   at `argv[0]`** (`MainMcp.takeBareToken`), so the flag-first habit every

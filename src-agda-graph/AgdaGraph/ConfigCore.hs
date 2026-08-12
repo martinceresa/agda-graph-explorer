@@ -22,6 +22,8 @@ module AgdaGraph.ConfigCore
   , loadYamlConfig
   , extractConfigFlag
   , extractValueFlag
+  , extractSwitchFlag
+  , extractToggleFlag
   , isAgdaSourceFile
   , splitEqFlags
     -- * Unknown-key rejection
@@ -125,6 +127,38 @@ extractValueFlag name = go Nothing []
       | a == name = case rest of
           (v:rest') -> go (Just v) acc rest'
           []        -> (found, reverse acc)
+      | otherwise = go found (a : acc) rest
+
+-- | Lift a bare (no-value) switch out of argv, returning whether it was
+-- seen and the remaining args with every occurrence removed. The switch
+-- counterpart of 'extractValueFlag', for the same reason: a global switch
+-- that must work in any position cannot be left to a positional parser.
+extractSwitchFlag :: String -> [String] -> (Bool, [String])
+extractSwitchFlag name = go False []
+  where
+    go found acc [] = (found, reverse acc)
+    go found acc (a:rest)
+      | a == name = go True acc rest
+      | otherwise = go found (a : acc) rest
+
+-- | Lift a toggle PAIR (@--foo@ / @--no-foo@) out of argv, returning the
+-- last occurrence of either spelling and the remaining args with every
+-- occurrence removed.
+--
+-- One scan, not two 'extractSwitchFlag' calls: the two spellings share a
+-- single last-wins precedence, and lifting them independently would lose
+-- the relative order that decides which one won.
+extractToggleFlag
+  :: String                 -- ^ the positive spelling (sets 'True')
+  -> String                 -- ^ the negative spelling (sets 'False')
+  -> [String]
+  -> (Maybe Bool, [String])
+extractToggleFlag pos neg = go Nothing []
+  where
+    go found acc [] = (found, reverse acc)
+    go found acc (a:rest)
+      | a == pos  = go (Just True)  acc rest
+      | a == neg  = go (Just False) acc rest
       | otherwise = go found (a : acc) rest
 
 -- | Return the first path in the list that exists as a regular file.
