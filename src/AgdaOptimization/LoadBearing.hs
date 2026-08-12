@@ -64,7 +64,7 @@ import           AgdaOptimization.FlagSpec ( FlagSpec(..), EnumErr(..)
 import           AgdaOptimization.Common ( computeExcludedSet, isTagged )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , renderTable, emitJsonReport
-                                         , withHumanOutput )
+                                         , withHumanReport )
 
 ------------------------------------------------------------------------
 -- Public surface (signature MUST stay stable — wired by callers).
@@ -330,7 +330,7 @@ runAnalysis !ix !cond !gOpts !opts !seeds !modeUsed !excluded = do
       emitJsonReport (gOutPath gOpts) $
         loadBearingJson ix cond opts modeUsed sCount d_project excluded
                         perResult depthRank spanBet pertOf topN adviceVs
-    OutHuman -> withHumanOutput (gOutPath gOpts) $ do
+    OutHuman -> withHumanReport gOpts "load-bearing" $ do
       putStrLn $ "# LoadBearing — top " ++ show (optTopN opts)
               ++ " (results: " ++ resultsLabel modeUsed
               ++ ", weight: " ++ weightLabel (optWeight opts) ++ ")"

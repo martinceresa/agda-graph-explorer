@@ -136,11 +136,11 @@ globalSection cfg = case KM.lookup "global" (cfgRoot cfg) of
 ----------------------------------------------------------------------
 
 -- | The keys the @global:@ section accepts. @graph@ is read by
--- 'globalGraph', the other three by 'applyGlobal' — keep this list in step
+-- 'globalGraph', the other four by 'applyGlobal' — keep this list in step
 -- with both (it is the only place the section's vocabulary is enumerated,
 -- since the section is hand-walked rather than 'FlagSpec'-driven).
 globalConfigKeys :: [Text]
-globalConfigKeys = [ "graph", "format", "json", "out" ]
+globalConfigKeys = [ "graph", "format", "json", "out", "explain" ]
 
 -- | Reject any top-level section, or any key inside a section, that no
 -- reader looks up. @sections@ pairs every recognised section name with the
@@ -232,6 +232,8 @@ globalGraph (Just obj) = lookupKey "global" obj "graph"
 --   * @json: true|false@   — alias of @format@ (kept for compatibility).
 --     Canonical @format@ wins when both are present.
 --   * @out: PATH@          — sets 'gOutPath'.
+--   * @explain: true|false@ — sets 'gExplain' (the trailing legend on a
+--     human report; @--explain@ / @--no-explain@ override it).
 --
 -- The section's @graph:@ key is read separately by 'globalGraph' (an input,
 -- not a 'GlobalOpts' field); an unrecognised key is rejected up front by
@@ -253,7 +255,12 @@ applyGlobal (Just obj) g0 = do
     pure $ case mOut of
       Just p  -> g1 { gOutPath = Just p }
       Nothing -> g1
-  pure g2
+  g3 <- do
+    mExplain <- lookupKey section obj "explain" :: Either String (Maybe Bool)
+    pure $ case mExplain of
+      Just b  -> g2 { gExplain = b }
+      Nothing -> g2
+  pure g3
   where
     parseFormat :: String -> Either String OutFormat
     parseFormat "json"  = Right OutJson

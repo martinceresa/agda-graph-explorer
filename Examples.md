@@ -50,9 +50,19 @@ positional `ROOTS…` accept multiple directories.
 All subcommands take the same expanded JSON. Every one accepts `--json`
 (JSON report), `--out FILE` (default stdout), and `--config=PATH`.
 
+Every human-format report ends with a `## How to read this` legend explaining
+that analysis' sections, columns and what to act on — so the examples below
+show the flags, and the report itself tells you what its numbers mean. Add
+`--no-explain` to suppress it.
+
+One page per subcommand — what it does, every column, why it makes sense to
+use, and the full flag table — lives in [docs/](docs/README.md).
+
 ---
 
 ### `motif` — frequent labeled subgraph motifs
+
+→ Full reference: [`docs/motif.md`](docs/motif.md)
 
 ```bash
 cabal run agda-optimization -- motif /tmp/opt/deps.json \
@@ -67,6 +77,8 @@ Default `--min-label-distinct=2` — the noise filter; without it trivial
 
 ### `load-bearing` — span-betweenness + perturbation Δ
 
+→ Full reference: [`docs/load-bearing.md`](docs/load-bearing.md)
+
 ```bash
 cabal run agda-optimization -- load-bearing /tmp/opt/deps.json \
   --results=exported --top-n=20
@@ -80,18 +92,25 @@ results, each weighed equally (`--weight=loc` to weight by line count).
 
 ### `polyglot` — cross-context generalization candidates
 
+→ Full reference: [`docs/polyglot.md`](docs/polyglot.md)
+
 ```bash
 cabal run agda-optimization -- polyglot /tmp/opt/deps.json \
-  --min-uses=5 --threshold=0.5
+  --min-uses=5 --top-n=20
 ```
 
 Scores each def by the Shannon entropy of its consumers' community
 distribution; `★` = "promote as a typeclass" candidate.
 
-Default `--threshold=0.5` — the empirical knee from "2-3 contexts" to
-"across the project". `[god?]` tag suppressed when Louvain Q < 0.1.
+Default `--min-uses=5` — the gate that decides which rows appear. `[god?]` tag
+suppressed when Louvain Q < 0.1. Note `--threshold` (default `0.5`) is
+currently **inert**: it is echoed in the header and the JSON, but never
+compared against `D`, so it filters nothing. Read the `D` and `Tag` columns
+instead.
 
 ### `fingerprint` — graph-level near-duplicate proofs
+
+→ Full reference: [`docs/fingerprint.md`](docs/fingerprint.md)
 
 ```bash
 cabal run agda-optimization -- fingerprint /tmp/opt/deps.json \
@@ -106,6 +125,8 @@ callers" (outgoing conflates "proofs sharing helpers" into a mega-cluster).
 
 ### `debt` — proof-debt ledger
 
+→ Full reference: [`docs/debt.md`](docs/debt.md)
+
 ```bash
 cabal run agda-optimization -- debt /tmp/opt/deps.json --top-n=20
 ```
@@ -117,6 +138,8 @@ Default `--include-foundational=false` — foundational `Agda.Builtin.*` /
 `Agda.Primitive.*` postulates excluded so stdlib primitives don't dominate.
 
 ### `basket` — co-usage association rules (Apriori)
+
+→ Full reference: [`docs/basket.md`](docs/basket.md)
 
 ```bash
 cabal run agda-optimization -- basket /tmp/opt/deps.json \
@@ -133,6 +156,8 @@ families (`VoteBlock-{0,1,2}`); disable with `--no-forced-suppress`.
 
 ### `ledger` — per-theorem trust budget
 
+→ Full reference: [`docs/ledger.md`](docs/ledger.md)
+
 ```bash
 cabal run agda-optimization -- ledger /tmp/opt/deps.json \
   --top-n=30 \
@@ -148,6 +173,8 @@ field-encoded axioms. `--theorem-prefix=PREFIX` is essential with stdlib.
 
 ### `echo` — reverse-direction `fingerprint`
 
+→ Full reference: [`docs/echo.md`](docs/echo.md)
+
 ```bash
 cabal run agda-optimization -- echo /tmp/opt/deps.json \
   --max-cluster-spread=0.3 --top-n=20
@@ -161,6 +188,8 @@ reverse-clusters at a project-wide consumer); `0` disables the filter.
 
 ### `gravity` — PageRank / PPR / HITS centrality
 
+→ Full reference: [`docs/gravity.md`](docs/gravity.md)
+
 ```bash
 cabal run agda-optimization -- gravity /tmp/opt/deps.json \
   --top-theorems=64 --top-n=30
@@ -173,6 +202,8 @@ Default `--top-theorems=64` — the sweet spot (fewer makes entropy noisy,
 more dilutes per-theorem PPR mass). `--damping=0.85`, `--iters=50`.
 
 ### `pyre` — graph-only typecheck-cost prediction
+
+→ Full reference: [`docs/pyre.md`](docs/pyre.md)
 
 ```bash
 cabal run agda-optimization -- pyre /tmp/opt/deps.json --top-n=20
@@ -195,6 +226,8 @@ aggregate cost (`lever = reachers × selfCost`).
 
 ### `chokepoint` — node-capacitated max-flow + articulation points
 
+→ Full reference: [`docs/chokepoint.md`](docs/chokepoint.md)
+
 ```bash
 cabal run agda-optimization -- chokepoint /tmp/opt/deps.json \
   --sources=exported --top-n=20
@@ -207,6 +240,8 @@ Default `--sources=exported, --sinks=postulates-axioms` — falls back to
 `terminal-leaves` (stderr note) if the postulate-axiom set is empty.
 
 ### `silhouette` — signature-vs-body topology twins
+
+→ Full reference: [`docs/silhouette.md`](docs/silhouette.md)
 
 ```bash
 cabal run agda-optimization -- silhouette /tmp/opt/deps.json \
@@ -222,6 +257,8 @@ on legacy JSON without it).
 
 ### `entwine` — pairwise MI / IQR over caller baskets
 
+→ Full reference: [`docs/entwine.md`](docs/entwine.md)
+
 ```bash
 cabal run agda-optimization -- entwine /tmp/opt/deps.json \
   --min-co-callers=3 --min-iqr=0.5 --top-n=30
@@ -234,6 +271,8 @@ Default `--min-g-stat=6.635` — the standard 99%-confidence cutoff (≈ p <
 0.01); IQR + co-callers floors filter small-basket false positives.
 
 ### `fiedler` — spectral bisection (needs SciPy)
+
+→ Full reference: [`docs/fiedler.md`](docs/fiedler.md)
 
 ```bash
 cabal run agda-optimization -- fiedler /tmp/opt/deps.json \
@@ -248,6 +287,8 @@ SciPy**: missing → clean stderr diagnostic + exit 3.
 
 ### `horizon` — eccentricity / proof geometry
 
+→ Full reference: [`docs/horizon.md`](docs/horizon.md)
+
 ```bash
 cabal run agda-optimization -- horizon /tmp/opt/deps.json --top-n=20
 ```
@@ -259,6 +300,8 @@ Default `--leaves=postulates-axioms, --roots=public-theorems` — switch to
 `terminal-leaves` / `terminals` for projects without those conventions.
 
 ### `strata` — per-module classical SE metrics
+
+→ Full reference: [`docs/strata.md`](docs/strata.md)
 
 ```bash
 cabal run agda-optimization -- strata /tmp/opt/deps.json \
@@ -272,6 +315,8 @@ Default `--min-size=3` — smaller modules lack the internal structure for
 cohesion metrics. `--exclude-module-regex=PATTERN` scopes the report.
 
 ### `term-cluster` — AST-level subterm fingerprint clusters
+
+→ Full reference: [`docs/term-cluster.md`](docs/term-cluster.md)
 
 ```bash
 # 1. Producer (notice the extra producer flags).
@@ -299,6 +344,8 @@ declared modules.
 
 ### `concept-bundle` — signature-vocabulary itemsets
 
+→ Full reference: [`docs/concept-bundle.md`](docs/concept-bundle.md)
+
 ```bash
 cabal run agda-optimization -- concept-bundle /tmp/opt/deps.json \
   --min-support=5 --min-lift=2.0 --min-span=3 --k-max=2 --top-n=25
@@ -313,6 +360,8 @@ modules). The forced-by-elaborator suppressor (same machinery as `basket`,
 default on) drops family-polluted itemsets; `--no-forced-suppress` disables.
 
 ### `hint-bench` — offline lemma-ranker eval (leave-one-out)
+
+→ Full reference: [`docs/hint-bench.md`](docs/hint-bench.md)
 
 ```bash
 cabal run agda-optimization -- hint-bench /tmp/opt/deps.json \
@@ -336,24 +385,28 @@ provenance or signatures yields an empty corpus and exits clean.
 
 Which subcommand answers which question?
 
+Each row links to that subcommand's full reference page in [docs/](docs/README.md).
+
 | Question | Subcommand |
 |---|---|
-| Where should I refactor first to maximise blast radius? | `load-bearing` |
-| What's used widely across disparate contexts? | `polyglot` |
-| What proofs are structural near-duplicates? | `fingerprint` (graph) or `term-cluster` (AST) |
-| What's my trust budget — which axioms support what? | `ledger` |
-| What's my proof debt — which holes / stubs block exports? | `debt` |
-| Which co-usage patterns suggest a missing combinator? | `basket`, `entwine` |
-| Which signature-vocabulary clusters suggest a missing record? | `concept-bundle` |
-| Where does the typecheck spend its time? | `pyre` (`--profile` to calibrate) |
-| Which one def, if optimised, cuts the most aggregate cost? | `pyre --levers` |
-| Where are the bottlenecks from theorems to axioms? | `chokepoint`, `fiedler` |
-| Which functions share a signature but diverge in body? | `silhouette` |
-| Which two functions ANSWER the same callers? | `echo` |
-| What's the proof geometry — diameter, radius, periphery? | `horizon` |
-| Which modules have poor cohesion? | `strata`, `polyglot` |
-| What are the centrality hotspots? | `gravity` |
-| Cross-file CSE candidates at the AST level? | `term-cluster` |
+| Where should I refactor first to maximise blast radius? | [`load-bearing`](docs/load-bearing.md) |
+| What recurring shapes does the project open-code by hand? | [`motif`](docs/motif.md) |
+| Did my lemma-ranker change actually help? | [`hint-bench`](docs/hint-bench.md) |
+| What's used widely across disparate contexts? | [`polyglot`](docs/polyglot.md) |
+| What proofs are structural near-duplicates? | [`fingerprint`](docs/fingerprint.md) (graph) or [`term-cluster`](docs/term-cluster.md) (AST) |
+| What's my trust budget — which axioms support what? | [`ledger`](docs/ledger.md) |
+| What's my proof debt — which holes / stubs block exports? | [`debt`](docs/debt.md) |
+| Which co-usage patterns suggest a missing combinator? | [`basket`](docs/basket.md), [`entwine`](docs/entwine.md) |
+| Which signature-vocabulary clusters suggest a missing record? | [`concept-bundle`](docs/concept-bundle.md) |
+| Where does the typecheck spend its time? | [`pyre`](docs/pyre.md) (`--profile` to calibrate) |
+| Which one def, if optimised, cuts the most aggregate cost? | [`pyre --levers`](docs/pyre.md) |
+| Where are the bottlenecks from theorems to axioms? | [`chokepoint`](docs/chokepoint.md), [`fiedler`](docs/fiedler.md) |
+| Which functions share a signature but diverge in body? | [`silhouette`](docs/silhouette.md) |
+| Which two functions ANSWER the same callers? | [`echo`](docs/echo.md) |
+| What's the proof geometry — diameter, radius, periphery? | [`horizon`](docs/horizon.md) |
+| Which modules have poor cohesion? | [`strata`](docs/strata.md), [`polyglot`](docs/polyglot.md) |
+| What are the centrality hotspots? | [`gravity`](docs/gravity.md) |
+| Cross-file CSE candidates at the AST level? | [`term-cluster`](docs/term-cluster.md) |
 
 For full pipelines combining several:
 

@@ -83,7 +83,7 @@ import           AgdaOptimization.FlagSpec ( FlagSpec(..), SwitchVal(..)
                                            , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , renderTable, emitJsonReport
-                                         , showD3, withHumanOutput )
+                                         , showD3, withHumanReport )
 
 ----------------------------------------------------------------------
 -- Options.
@@ -339,7 +339,7 @@ run ix gOpts opts = do
   case gOutFormat gOpts of
     OutJson -> emitJsonReport (gOutPath gOpts) $
       bundleJson ix opts stats keptBundles
-    OutHuman -> withHumanOutput (gOutPath gOpts) $ do
+    OutHuman -> withHumanReport gOpts "concept-bundle" $ do
       putStrLn (headerLine opts fallback)
       putStrLn (statsLine stats)
       if null keptBundles

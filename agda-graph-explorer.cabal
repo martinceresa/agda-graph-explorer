@@ -239,6 +239,7 @@ test-suite interaction-spec
                        AgdaUnused.Analysis
                        AgdaUnused.Json
                        AgdaUnused.Source
+                       AgdaOptimization.Legend
   build-depends:       base >= 4.10 && < 4.23,
                        agda-graph,
                        aeson >= 2.0 && < 3,
@@ -261,6 +262,7 @@ executable agda-optimization
                        AgdaOptimization.FlagSpec
                        AgdaOptimization.Config
                        AgdaOptimization.Report
+                       AgdaOptimization.Legend
                        AgdaOptimization.Motif
                        AgdaOptimization.LoadBearing
                        AgdaOptimization.Polyglot

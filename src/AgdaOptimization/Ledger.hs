@@ -70,7 +70,7 @@ import           AgdaOptimization.FlagSpec ( FlagSpec(..), SwitchVal(..), EnumEr
                                            , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , renderTable, emitJsonReport
-                                         , withHumanOutput )
+                                         , withHumanReport )
 
 -- ---------------------------------------------------------------------
 -- Options
@@ -269,7 +269,7 @@ run ix gOpts opts = do
       emitJsonReport (gOutPath gOpts) $
         ledgerJson ix opts theorems sortedThms cohorts leverage
                    nTheorems nAxioms nFound
-    OutHuman -> withHumanOutput (gOutPath gOpts) $ do
+    OutHuman -> withHumanReport gOpts "ledger" $ do
       putStrLn renderHeader
       putStrLn ""
       mapM_ putStrLn (renderFilterHeader opts mes)

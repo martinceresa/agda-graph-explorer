@@ -55,7 +55,7 @@ import           AgdaOptimization.FlagSpec ( FlagSpec(..), SwitchVal(..)
                                            , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , renderTable, emitJsonReport
-                                         , withHumanOutput )
+                                         , withHumanReport )
 
 -- | User-facing options. Fields are documented inline; defaults below.
 data Options = Options
@@ -243,7 +243,7 @@ run ix gOpts opts = do
         debtJson ix opts expSrc nExp holeSet postSetKept postSetAll
                  fullyProvable schedule prereqEdges failedMods
                  invSource
-    OutHuman -> withHumanOutput (gOutPath gOpts) $ do
+    OutHuman -> withHumanReport gOpts "debt" $ do
       putStrLn $ renderHeader opts (IS.size postSetKept)
       putStrLn ""
       putStrLn $ renderKPIs nExp (IS.size holeSet)

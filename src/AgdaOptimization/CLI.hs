@@ -120,6 +120,9 @@ usage = unlines $
   , "  --format human|json output format (default: human)."
   , "  --json              alias of --format=json."
   , "  --out FILE          write the report to FILE (default: stdout)."
+  , "  --explain           append a 'How to read this' legend explaining the"
+  , "                      report's tables and columns (human format, default on)."
+  , "  --no-explain        suppress that legend."
   , "  --config FILE       load defaults from a YAML config file."
   , "  -h, --help          print this help and exit."
   , "  -V, --version       print the agda-optimization version and exit."
@@ -158,9 +161,9 @@ subUsage sub = unlines $
   , "OPTIONS:"
   ] ++ map ("  " ++) (subFlags sub) ++
   [ ""
-  , "Plus the global flags --graph FILE, --json, --out FILE, and --config"
-  , "FILE (parsed before subcommand flags). The graph may also come from"
-  , "'graph:' under 'global:' in the config, in which case <graph.json>"
+  , "Plus the global flags --graph FILE, --json, --out FILE, --no-explain"
+  , "and --config FILE (parsed before subcommand flags). The graph may also"
+  , "come from 'graph:' under 'global:' in the config, in which case <graph.json>"
   , "can be omitted. YAML defaults under the '" ++ sub ++ ":' section"
   , "override defaults; CLI flags override config."
   , "See README.md for per-flag semantics."
@@ -260,6 +263,8 @@ defaultsYaml = unlines $
   , "  # format: json"
   , "  # write the report to FILE (default: stdout)"
   , "  # out: report.txt"
+  , "  # append a 'How to read this' legend to a human report (default: true)"
+  , "  # explain: false"
   ]
   ++ concatMap section subcommands
   where
@@ -355,6 +360,7 @@ completionSpec = CompletionSpec
   { csProg    = "agda-optimization"
   , csGlobals =
       [ "--graph", "--format", "--json", "--out", "--config"
+      , "--explain", "--no-explain"
       , "--help", "--version", "--numeric-version", "--show-defaults" ]
   , csSubcommands =
       [ (name, map (("--" ++) . fst) (subFlagPairs name)) | (name, _) <- subcommands ]
@@ -478,6 +484,7 @@ data Scan = Scan
   , scanSub       :: !(Maybe String)    -- ^ the subcommand token, once found.
   , scanRawTail   :: ![String]          -- ^ raw args after the subcommand, un-peeled.
   , scanResidual  :: ![String]          -- ^ args for the subcommand parser (head = path).
+  , scanExplain   :: !(Maybe Bool)     -- ^ @--explain@ / @--no-explain@, last wins.
   , scanPending   :: !(Maybe ScanError) -- ^ deferred trailing-global error.
   }
 
@@ -515,6 +522,7 @@ scanGlobals = goLead Scan
   , scanSub       = Nothing
   , scanRawTail   = []
   , scanResidual  = []
+  , scanExplain   = Nothing
   , scanPending   = Nothing
   }
   where
@@ -522,6 +530,8 @@ scanGlobals = goLead Scan
     -- value-flag is an immediate, unscoped error.
     goLead !s []                  = Right s
     goLead !s ("--json":rest)     = goLead s { scanOutFormat = Just OutJson } rest
+    goLead !s ("--explain":rest)    = goLead s { scanExplain = Just True } rest
+    goLead !s ("--no-explain":rest) = goLead s { scanExplain = Just False } rest
     goLead _  ("--out":[])        = Left (ScanError Nothing "--out: missing FILE argument")
     goLead !s ("--out":v:rest)    = goLead s { scanOutPath = Just v } rest
     goLead !s (a:rest)
@@ -541,6 +551,8 @@ scanGlobals = goLead Scan
     -- error.
     goTail !s []                  = done s
     goTail !s ("--json":rest)     = goTail s { scanOutFormat = Just OutJson } rest
+    goTail !s ("--explain":rest)    = goTail s { scanExplain = Just True } rest
+    goTail !s ("--no-explain":rest) = goTail s { scanExplain = Just False } rest
     goTail !s ("--out":[])        = done s { scanPending = pend s "--out: missing FILE argument" }
     goTail !s ("--out":v:rest)    = goTail s { scanOutPath = Just v } rest
     goTail !s (a:rest)
@@ -668,6 +680,7 @@ overlayCli :: Scan -> GlobalOpts -> GlobalOpts
 overlayCli !s !base = GlobalOpts
   { gOutFormat = fromMaybe (gOutFormat base) (scanOutFormat s)
   , gOutPath   = scanOutPath s <|> gOutPath base
+  , gExplain   = fromMaybe (gExplain base) (scanExplain s)
   }
 
 -- | Load the expanded graph and build the index. Emits a single

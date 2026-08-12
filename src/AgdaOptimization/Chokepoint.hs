@@ -83,7 +83,7 @@ import           AgdaOptimization.FlagSpec ( FlagSpec(..), EnumErr(..)
 import           AgdaOptimization.Common ( computeExcludedSet, isFoundationalModule, terminals )
 import           AgdaOptimization.Report   ( GlobalOpts(..), OutFormat(..)
                                            , emitJsonReport, renderTable
-                                           , showD3, withHumanOutput )
+                                           , showD3, withHumanReport )
 
 ------------------------------------------------------------------------
 -- Public surface
@@ -721,7 +721,7 @@ run !ix !gOpts !opts = do
       emitJsonReport (gOutPath gOpts) $
         chokepointJson ix opts usedMode cond srcSet sinkSet excluded mf
                        cutSCCs artSCCs topN
-    OutHuman -> withHumanOutput (gOutPath gOpts) $ do
+    OutHuman -> withHumanReport gOpts "chokepoint" $ do
       putStrLn $ "# Chokepoint — top " ++ show (optTopN opts)
               ++ " (sources=" ++ srcModeTag (optSources opts)
               ++ ", sinks="   ++ sinkModeTag usedMode ++ ")"

@@ -2,3 +2,11 @@
 -- Agda, so there is no Agda source-repository-package pin here (that
 -- lives in the agda-deps repo). Everything resolves from Hackage.
 packages: .
+
+-- GHC 9.14 is required, not merely preferred: 9.12.4's RTS corrupts the heap
+-- under >= 2 capabilities (`internal error: evacuate: strange closure type`,
+-- then SIGSEGV), and every batch executable here is built
+-- `-threaded -with-rtsopts=-N`. Nondeterministic, so an unpinned 9.12 build
+-- looks fine on test/deps.json and dies on a real graph. Keep this in step
+-- with the ghc-version in .github/workflows/*.yml.
+with-compiler: ghc-9.14.1

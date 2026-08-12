@@ -71,7 +71,7 @@ import           AgdaGraph.WL         ( Fingerprint, weightedJaccard )
 import           AgdaGraph.Similarity ( SigBodyFingerprints(..)
                                       , buildSigBodyFingerprints, fingerprintSize )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
-                                         , emitJsonReport, withHumanOutput )
+                                         , emitJsonReport, withHumanReport )
 
 --------------------------------------------------------------------------------
 -- Options
@@ -344,7 +344,7 @@ runProvenance ix gOpts opts@Options{..} sf = do
       emitJsonReport (gOutPath gOpts) $
         silhouetteJson ix opts candVec nCand sigEdgeCount bodyEdgeCount
                        nClus nCombinator nCopyPaste nMixed topClusters
-    OutHuman -> withHumanOutput (gOutPath gOpts) $ do
+    OutHuman -> withHumanReport gOpts "silhouette" $ do
       putStrLn $ "# Silhouette — type-signature topology"
               ++ " (wl-k=" ++ show optWlK
               ++ ", min-size=" ++ show optMinSize
@@ -456,7 +456,7 @@ runFallback ix gOpts opts@Options{..} sf = do
       emitJsonReport (gOutPath gOpts) $
         silhouetteJson ix opts candVec nCand 0 edgeCount
                        nClus nClus 0 0 topClusters
-    OutHuman -> withHumanOutput (gOutPath gOpts) $ do
+    OutHuman -> withHumanReport gOpts "silhouette-fallback" $ do
       putStrLn $ "# Silhouette — type-signature topology (fallback, no provenance)"
               ++ " (wl-k=" ++ show optWlK
               ++ ", min-size=" ++ show optMinSize

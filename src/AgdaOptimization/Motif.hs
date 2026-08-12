@@ -66,7 +66,7 @@ import           AgdaOptimization.FlagSpec ( FlagSpec(..), SwitchVal(..)
                                            , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , renderTable, emitJsonReport
-                                         , withHumanOutput )
+                                         , withHumanReport )
 
 -- | Options for the motif analysis.
 data Options = Options
@@ -298,7 +298,7 @@ run ix gOpts opts0 = do
       OutJson ->
         emitJsonReport (gOutPath gOpts) $
           motifJson ix opts hostMods excluded buckets ranked tripped shown
-      OutHuman -> withHumanOutput (gOutPath gOpts) $ do
+      OutHuman -> withHumanReport gOpts "motif" $ do
         putStrLn (headerLine opts)
         when (not (null shown)) $
           putStr $ renderTable header (zipWith (renderRow ix) [1..] shown)

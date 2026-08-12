@@ -72,7 +72,8 @@ import           AgdaOptimization.FlagSpec   ( FlagSpec(..)
 import           AgdaOptimization.Common     ( lastSegment )
 import           AgdaOptimization.Report     ( GlobalOpts(..), OutFormat(..)
                                              , renderTable, emitJsonReport
-                                             , showD3, withHumanOutput )
+                                             , showD3, withHumanOutput
+                                             , withHumanReport )
 
 import qualified Paths_agda_graph_explorer   as Paths
 
@@ -516,7 +517,7 @@ renderReport ix gOpts opts undirEdges ho = do
     OutJson ->
       emitJsonReport (gOutPath gOpts) $
         reportJson ix opts ho lambda2 bridges hotspots clusters
-    OutHuman -> withHumanOutput (gOutPath gOpts) $ do
+    OutHuman -> withHumanReport gOpts "fiedler" $ do
       putStrLn (headerLine opts)
       putStrLn (statsLine ho lambda2)
       putStrLn ""

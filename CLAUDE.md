@@ -118,6 +118,10 @@ This repo links **no Agda** — `cabal.project` has no
 minutes. `test/deps.json` and `.agda-explore/deps.json` are committed
 expanded-JSON fixtures.
 
+`cabal.project` does pin the **compiler** (`with-compiler: ghc-9.14.1`, in step
+with CI): GHC 9.12.4's RTS corrupts the heap under >= 2 capabilities, and every
+batch executable is built `-threaded -with-rtsopts=-N`. See the comment there.
+
 ## The wire contract
 
 The single coupling to `agda-deps` is the **v2 `graph.json` schema** (expanded
@@ -194,7 +198,19 @@ src/
                                 overlay + help, one source per subcommand.
     Config.hs                   YAML loader for .agda-optimization.yml
                                 (global: + one kebab-case section per cmd).
-    Report.hs                   GlobalOpts, OutFormat, emitJsonReport.
+    Report.hs                   GlobalOpts, OutFormat, emitJsonReport, and
+                                withHumanReport (the --out redirect + the
+                                trailing legend) — the one call every
+                                analysis' OutHuman branch goes through.
+    Legend.hs                   PURE per-subcommand "## How to read this"
+                                block appended to every HUMAN report (JSON is
+                                self-describing already): what the analysis
+                                answers, each section, every column, and which
+                                row to act on. Glosses are unwrapped strings
+                                wrapped at render time, so adding a column
+                                needs no re-flowing. test/Spec.hs reads the
+                                subcommand list out of the --help golden and
+                                asserts every one has an entry.
     Motif.hs ... Strata.hs      the analyses (see overview above).
     TermCluster.hs              AST subterm fingerprint clusters
                                 (reads definitionSubtermHashes).
@@ -533,9 +549,19 @@ scripts/
                                 agda-explore's doctor/query accepting leading
                                 global flags (CI; `just config-smoke`).
   run_all_opts.sh               run EVERY agda-optimization subcommand over one
-                                graph into an out-dir (one .txt + .json + an
-                                .err on diagnostics each), tolerating a failing
-                                analysis. Run from the top level: it passes no
+                                graph into an out-dir (one .txt + .json each),
+                                tolerating a failing analysis. stderr is routed
+                                by OUTCOME, not by text (the tool prints
+                                progress and diagnostics with the same shape):
+                                <name>.log is whatever a run had to say,
+                                <name>.err ONLY a failure record (exit code,
+                                signal name, reproduce line, the tool's last
+                                words) — so a .err always means a real failure
+                                and a .log never does. A signal death is
+                                labelled as such, since a crash leaves no
+                                diagnostic and its truncated progress tail
+                                otherwise reads like one.
+                                Run from the top level: it passes no
                                 analysis flags and never cd's, so each run takes
                                 its defaults from ./.agda-optimization.yml; the
                                 subcommand list is parsed from the binary's own
@@ -597,6 +623,18 @@ plugin/                         Claude Code plugin: agda-explore MCP server +
   field), so its config is loaded *before* the graph is resolved; precedence is
   `--graph` > positional > config, and the positional is only claimed from the
   residual when it doesn't look like a flag (`takePositional`).
+
+- **A human report explains itself; a JSON one doesn't need to.** Every
+  analysis' `OutHuman` branch calls `AgdaOptimization.Report.withHumanReport`,
+  which runs the render inside the `--out` redirect and then appends that
+  subcommand's `AgdaOptimization.Legend` block. Don't call `withHumanOutput`
+  directly for a report — the legend would land outside the file redirect, or
+  be forgotten. The degenerate paths that print one line ("empty graph", "no
+  term hashes", a `fiedler` helper failure) deliberately keep the bare
+  `withHumanOutput`: there is no table there to explain. `silhouette` passes
+  `silhouette-fallback` on its no-provenance path, because those columns mean
+  something different. `--explain` is a GLOBAL flag (`gExplain`, `global:
+  explain:`), not a per-subcommand `FlagSpec` — one switch, nineteen reports.
 
 - **An unknown config key is an error, and the known set is a second source
   of truth — keep it in step.** A key no reader looks up silently does

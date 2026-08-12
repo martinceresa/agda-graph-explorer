@@ -31,6 +31,9 @@ GLOBAL OPTIONS:
   --format human|json output format (default: human).
   --json              alias of --format=json.
   --out FILE          write the report to FILE (default: stdout).
+  --explain           append a 'How to read this' legend explaining the
+                      report's tables and columns (human format, default on).
+  --no-explain        suppress that legend.
   --config FILE       load defaults from a YAML config file.
   -h, --help          print this help and exit.
   -V, --version       print the agda-optimization version and exit.

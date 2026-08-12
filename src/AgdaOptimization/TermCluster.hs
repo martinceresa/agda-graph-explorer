@@ -85,7 +85,7 @@ import           AgdaOptimization.FlagSpec ( FlagSpec(..), EnumErr(..)
                                            , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Report   ( GlobalOpts(..), OutFormat(..)
                                            , renderTable, emitJsonReport
-                                           , withHumanOutput )
+                                           , withHumanOutput, withHumanReport )
 
 -- ---------------------------------------------------------------------------
 -- Options
@@ -266,7 +266,7 @@ run ix gOpts opts@Options{..} = case idxSubtermHashes ix of
       OutJson  -> emitJsonReport (gOutPath gOpts)
                     (reportJson ix opts totalHashes distinctHashes
                                 hasDepths (IS.size excluded) shown)
-      OutHuman -> withHumanOutput (gOutPath gOpts) $
+      OutHuman -> withHumanReport gOpts "term-cluster" $
         emitHuman ix opts totalHashes distinctHashes
                   hasDepths (IS.size excluded) (length ranked) shown
 

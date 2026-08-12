@@ -95,7 +95,8 @@ import           AgdaOptimization.FlagSpec    ( FlagSpec(..), EnumErr(..)
 import           AgdaOptimization.Common      ( isTagged, terminals )
 import           AgdaOptimization.Report      ( GlobalOpts(..), OutFormat(..)
                                               , renderTable, emitJsonReport
-                                              , withHumanOutput )
+                                              , withHumanOutput
+                                              , withHumanReport )
 
 ------------------------------------------------------------------------
 -- Public surface
@@ -307,7 +308,7 @@ run !ix !gOpts !opts@Options{..} = do
           emitJsonReport (gOutPath gOpts) $
             gravityJson ix opts modeUsed n kTh rprIters rprDelta
                         fallbackActive collapseRatio topRows
-        OutHuman -> withHumanOutput (gOutPath gOpts) $
+        OutHuman -> withHumanReport gOpts "gravity" $
           renderHuman ix opts modeUsed n kTh rprIters rprDelta
                       fallbackActive collapseRatio topRows
 

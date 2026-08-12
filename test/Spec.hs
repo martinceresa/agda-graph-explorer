@@ -76,6 +76,7 @@ import           AgdaGraph.Index       ( buildIndex, lookupId, unsafeDeps, defAt
 import           AgdaUnused.Analysis   ( Finding(..), FindingKind(..), analyse )
 import           AgdaGraph.ConfigCore  ( unknownKeys, unknownKeyError, nearestKey
                                        , checkKnownKeys, extractValueFlag )
+import           AgdaOptimization.Legend ( legendKeys, renderLegend )
 
 ----------------------------------------------------------------------
 -- Tiny harness.
@@ -128,12 +129,63 @@ main = do
   sequence_ (map ($ fails) moduleTopoTests)
   sequence_ (map ($ fails) configKeyTests)
   premiseBenchTests fails
+  legendTests fails
   replayTests fails
   schemaErrorTests fails
   n <- readIORef fails
   if n == 0
     then putStrLn "all interaction-bridge tests passed" >> exitSuccess
     else hPutStrLn stderr (show n ++ " test(s) failed") >> exitFailure
+
+----------------------------------------------------------------------
+-- Report legends. Every agda-optimization subcommand must carry a
+-- "## How to read this" block, since a report file is read by someone
+-- who did not run it.
+--
+-- The subcommand list is read from the committed --help golden rather
+-- than retyped here: CI already asserts that golden against the binary
+-- (scripts/help-golden.sh), so adding a subcommand without a legend
+-- fails HERE instead of shipping an unexplained table. Reading the
+-- binary's own AgdaOptimization.CLI would instead drag all nineteen
+-- analyses into this offline suite.
+
+legendTests :: IORef Int -> IO ()
+legendTests ref = do
+  raw <- BL.readFile "test/help/agda-optimization.txt"
+  let subs = helpSubcommands (T.unpack (TE.decodeUtf8 (BL.toStrict raw)))
+  check "legend: the --help golden still parses into subcommands"
+    (length subs >= 19) ref
+  mapM_ (\sub -> check ("legend: " ++ sub ++ " has one")
+                       (sub `elem` legendKeys) ref) subs
+  -- Every key renders a complete block: heading, glossary, closing advice.
+  mapM_ (\k -> do
+           let out = renderLegend k
+           check ("legend: " ++ k ++ " renders the heading")
+             ("\n## How to read this\n" `isInfixOf` out) ref
+           check ("legend: " ++ k ++ " renders an Act on: line")
+             ("\nAct on: " `isInfixOf` out) ref
+           check ("legend: " ++ k ++ " wraps within 80 columns")
+             (all ((<= 80) . length) (lines out)) ref)
+        legendKeys
+  -- A stale key (a subcommand renamed out from under the table) would
+  -- otherwise sit here unreachable. 'silhouette-fallback' is the one
+  -- deliberate non-subcommand key: silhouette's no-provenance path.
+  checkEq "legend: no key without a subcommand (bar the documented variant)"
+    [] [ k | k <- legendKeys
+           , k `notElem` subs, k /= "silhouette-fallback" ] ref
+  -- An unrecognised caller prints nothing rather than a stub.
+  checkEq "legend: an unknown key renders empty" "" (renderLegend "nope") ref
+
+-- | Pull the subcommand names out of the golden's SUBCOMMANDS block: the
+-- indented lines between that heading and the next unindented one.
+helpSubcommands :: String -> [String]
+helpSubcommands txt =
+  case dropWhile (/= "SUBCOMMANDS:") (lines txt) of
+    []       -> []
+    (_ : ls) -> mapMaybe firstWord (takeWhile indented ls)
+  where
+    indented l    = take 2 l == "  "
+    firstWord     = listToMaybe . words
 
 ----------------------------------------------------------------------
 -- Graph-load / decode error messages (§2.1). Pins the actionable

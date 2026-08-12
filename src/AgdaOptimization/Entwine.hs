@@ -93,7 +93,7 @@ import           AgdaOptimization.FlagSpec ( FlagSpec(..), SwitchVal(..)
 import           AgdaOptimization.Common ( chunksOf, computeExcludedSet, lastSegment )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , renderTable, emitJsonReport
-                                         , showD3, withHumanOutput )
+                                         , showD3, withHumanReport )
 
 ----------------------------------------------------------------------
 -- Options.
@@ -332,7 +332,7 @@ run ix gOpts opts = do
     OutJson ->
       emitJsonReport (gOutPath gOpts) $
         entwineJson ix opts stats kept
-    OutHuman -> withHumanOutput (gOutPath gOpts) $ do
+    OutHuman -> withHumanReport gOpts "entwine" $ do
       putStrLn (headerLine opts)
       putStrLn (statsLine stats)
       if null kept

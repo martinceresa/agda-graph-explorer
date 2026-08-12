@@ -15,8 +15,9 @@ Hackage in minutes.
 | **`agda-explore`**         | Interactive MCP server: a daemon that answers point queries over the graph for coding agents, regenerating it on the fly via `agda-deps`. |
 | **`agda-auto`**            | Batch hole-filler: runs `agda-explore`'s Mimer + graph-hint ladder over every open hole in a file (or a project), prints a diff or applies it, and annotates holes it can't close. Needs `agda` on `$PATH`. |
 
-Runnable recipes: [Examples.md](Examples.md). YAML config:
-[Configuration.md](Configuration.md). Wire schema:
+Runnable recipes: [Examples.md](Examples.md). Per-subcommand analysis reference
+(what each one does, how to read its report): [docs/](docs/README.md). YAML
+config: [Configuration.md](Configuration.md). Wire schema:
 [The wire contract](#the-wire-contract). Roadmap / deferred / shipped work:
 [TODO.md](TODO.md), [Backlog.md](Backlog.md), [Deferred.md](Deferred.md),
 [Changelog.md](Changelog.md).
@@ -132,6 +133,12 @@ cabal run agda-optimization -- <subcommand> --help           # subcommand flags
 `term-cluster`, `concept-bundle`) plus `hint-bench` (an offline leave-one-out
 lemma-ranker eval). `--json` emits machine-readable output. `fiedler` is the
 only one that shells out — to `scripts/fiedler_helper.py` (needs SciPy).
+
+Every human-format report ends with a **`## How to read this`** legend: what
+that analysis answers, what each section is, what every column means, and which
+row is worth acting on — so a `--out FILE` report explains itself to whoever
+opens it. `--no-explain` (or `explain: false` under `global:`) drops it; `--json`
+is unaffected.
 
 `agda-unused` and `agda-optimization` are multicore (`-with-rtsopts=-N`);
 output is byte-identical between `+RTS -N1` and `-NK`.
@@ -251,6 +258,9 @@ views), see the `agda-deps` repo.
 ## Relevant links
 
 - Producer / Agda backend: <https://github.com/input-output-hk/agda-dependencies>
+- Similar project -- Glean <https://github.com/facebookincubator/Glean>
+  Ideas are a bit different but may be related.
+  Semantic grepable source code projects.
 
 ## AI Disclaimer
 

@@ -86,7 +86,7 @@ import           AgdaOptimization.Common ( computeExcludedSet, externalsSummaryH
                                          , notFoundational, terminals )
 import           AgdaOptimization.Report   ( GlobalOpts(..), OutFormat(..)
                                            , renderTable, emitJsonReport
-                                           , withHumanOutput )
+                                           , withHumanReport )
 
 ------------------------------------------------------------------------
 -- Options
@@ -446,7 +446,7 @@ run !ix !gOpts !opts0 = do
                     diameter radius
                     periphery center
                     excluded topRows
-    OutHuman -> withHumanOutput (gOutPath gOpts) $ do
+    OutHuman -> withHumanReport gOpts "horizon" $ do
       putStrLn $ "# Horizon — top " ++ show (optTopN opts)
               ++ " (leaves: " ++ leavesLabel (optLeaves opts)
               ++ ", roots: "  ++ rootsLabel  (optRoots  opts) ++ ")"

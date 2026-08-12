@@ -75,7 +75,7 @@ import           AgdaOptimization.FlagSpec ( FlagSpec(..)
                                            , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Report   ( GlobalOpts(..), OutFormat(..)
                                            , renderTable, emitJsonReport
-                                           , withHumanOutput )
+                                           , withHumanReport )
 
 -- ---------------------------------------------------------------------------
 -- Options
@@ -172,7 +172,7 @@ run ix gOpts opts@Options{..} = do
     OutJson ->
       emitJsonReport (gOutPath gOpts) $
         strataJson opts nModulesTotal nModulesScored nModulesSkipped topRows
-    OutHuman -> withHumanOutput (gOutPath gOpts) $ do
+    OutHuman -> withHumanReport gOpts "strata" $ do
       putStrLn $ "# Strata - top " ++ show optTopN
               ++ " (min-size=" ++ show optMinSize ++ ")"
       putStrLn $ "  modules total           : " ++ show nModulesTotal

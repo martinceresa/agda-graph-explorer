@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Self-describing `agda-optimization` reports (2026-08-11)
+
+- Every human-format report now ends with a **`## How to read this`** legend: what that analysis answers, what each section is, what every column means, and which row is worth acting on. A `--out FILE` report is usually read by someone who did not run it, and column names like `spanBet`, `IQR`, `recDeps` or `ε⁺+ε⁻` carried their meaning only in the source. All 19 subcommands are covered, plus `silhouette`'s no-provenance fallback (whose columns mean something different).
+- New pure `AgdaOptimization.Legend` holds the text; `AgdaOptimization.Report.withHumanReport` is the single call every analysis' `OutHuman` branch goes through, so the legend lands inside the `--out` redirect and cannot be forgotten. Glosses are unwrapped strings wrapped at render time — adding a column needs no re-flowing. Degenerate one-line paths ("empty graph", "no term hashes", a `fiedler` helper failure) print no legend: there is no table there to explain.
+- Global **`--explain` / `--no-explain`** (default on) and `explain:` under `global:` in `.agda-optimization.yml`. One switch for all 19 reports rather than a per-subcommand flag; `--json` is unaffected (that payload is self-describing already).
+- The offline suite reads the subcommand list out of the committed `--help` golden and asserts every name has a legend that renders a heading, an `Act on:` line, and no line past 80 columns — so a new analysis can't ship an unexplained table.
+
 ### Zero-config bootstrap: one shared graph, every tool configured (2026-08-11)
 
 - **`scripts/zero-config.py`** (stdlib-only) writes a config for every tool in one shot — the five `.agda-<tool>.yml` files plus a producer-side `.agda-deps.yml` — each seeded from that binary's own `--show-defaults` payload (so emitted defaults can't drift) and pointed at **one shared graph**, `.agda-deps/deps.json` (`--graph-dir DIR` moves it; the file name is the producer's). Include dirs come from the project's `*.agda-lib`, the entry from the root modules nobody imports (`--include` / `--entry` override; several roots become multi-entry, and past `MAX_AUTO_ENTRIES` it asks instead of guessing). Overlays are line-level edits over the payload text, so comments, key order and byte-identical re-runs all survive.

@@ -129,6 +129,7 @@ keys are that subcommand's `--help` flags without the `--` (e.g.
 | `graph`  | `--graph` / positional         | Input expanded `graph.json`.                                   |
 | `format` | `--format`                     | `human` or `json` (`json: bool` is a legacy alias).            |
 | `out`    | `--out`                        | Write the report to this path instead of stdout.               |
+| `explain`| `--explain` / `--no-explain`   | Append the `## How to read this` legend to a human report (default `true`). |
 
 With `graph:` set, every subcommand runs with no path — `agda-optimization
 motif`. Precedence for the input graph is `--graph FILE` > a positional

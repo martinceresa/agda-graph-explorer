@@ -52,7 +52,7 @@ import           AgdaOptimization.FlagSpec ( FlagSpec(..)
                                            , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , renderTable, emitJsonReport
-                                         , withHumanOutput )
+                                         , withHumanReport )
 
 -- ---------------------------------------------------------------------------
 -- Options
@@ -157,7 +157,7 @@ run ix gOpts opts@Options{..} = do
       emitJsonReport (gOutPath gOpts) $
         polyglotJson ix opts totalConsidered droppedByMin qCount
                      louvainModularity lowQ topRows godSet recs
-    OutHuman -> withHumanOutput (gOutPath gOpts) $ do
+    OutHuman -> withHumanReport gOpts "polyglot" $ do
       -- Header & stats
       putStrLn $ "# Polyglot — top " ++ show optTopN
               ++ " (min-uses=" ++ show optMinUses

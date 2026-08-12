@@ -69,7 +69,7 @@ import           AgdaOptimization.FlagSpec ( FlagSpec(..), SwitchVal(..)
                                            , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , renderTable, emitJsonReport
-                                         , showD3, withHumanOutput )
+                                         , showD3, withHumanReport )
 
 ----------------------------------------------------------------------
 -- Options.
@@ -384,7 +384,7 @@ run ix gOpts opts = do
       OutJson ->
         emitJsonReport (gOutPath gOpts) $
           basketJson ix opts stats pCorrThreshold txs keptRules
-      OutHuman -> withHumanOutput (gOutPath gOpts) $ do
+      OutHuman -> withHumanReport gOpts "basket" $ do
         -- Render. Near-misses first (highest-signal-per-byte output), then
         -- the capped rules table.
         putStrLn (headerLine opts)

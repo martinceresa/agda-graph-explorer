@@ -115,7 +115,7 @@ import           AgdaOptimization.FlagSpec   ( FlagSpec(..), SwitchVal(..)
 import           AgdaOptimization.Common     ( computeExcludedSet, showD )
 import           AgdaOptimization.Report     ( GlobalOpts(..), OutFormat(..)
                                              , emitJsonReport, renderTable
-                                             , withHumanOutput )
+                                             , withHumanReport )
 
 ------------------------------------------------------------------------
 -- Public surface
@@ -800,7 +800,7 @@ run !ix !gOpts !opts = do
       emitJsonReport (gOutPath gOpts) $
         pyreJson ix cond effOpts excluded scoreMap sccOfNode dMax topN
                  calibratedApplied mReport mLevers
-    OutHuman -> withHumanOutput (gOutPath gOpts) $ do
+    OutHuman -> withHumanReport gOpts "pyre" $ do
       putStrLn $ "# Pyre — predicted typecheck cost (top " ++ show (optTopN opts) ++ ")"
       putStrLn $ "|V| = " ++ show (idxNodeCount ix)
               ++ ", |SCC| = " ++ show (cdCount cond)

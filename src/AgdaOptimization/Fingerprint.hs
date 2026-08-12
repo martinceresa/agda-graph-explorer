@@ -77,7 +77,7 @@ import           AgdaGraph.WL         ( ColorVec, Fingerprint, fingerprintAt
                                       , fingerprintSize, initialColors, refine
                                       , weightedJaccard' )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
-                                         , emitJsonReport, withHumanOutput )
+                                         , emitJsonReport, withHumanReport )
 
 -- | Which side of the dependency graph drives the WL refinement and
 -- the per-candidate rooted subtree.
@@ -461,7 +461,7 @@ run ix gOpts opts@Options{..} = do
         fingerprintJson ix opts candVec edges
                         nCand nPairs nSkipped nScored nClus largest
                         sortedClusters
-    OutHuman -> withHumanOutput (gOutPath gOpts) $ do
+    OutHuman -> withHumanReport gOpts "fingerprint" $ do
       -- Direction and top-n always surface; wl-depth only when non-default.
       let !dirExtra   = ", direction=" ++ directionLabel optDirection
           !depthExtra =

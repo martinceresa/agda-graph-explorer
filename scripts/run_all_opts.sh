@@ -2,10 +2,11 @@
 # name: run-all-opts
 # description: Run EVERY agda-optimization subcommand over one expanded
 #   graph.json in a single go, writing <name>.txt + <name>.json per subcommand
-#   into an out-dir. The script passes no analysis flags of its own, so each
-#   subcommand takes its defaults from ./.agda-optimization.yml (if present)
-#   and the built-in defaults otherwise. Optionally builds the graph first
-#   with agda-deps.
+#   into an out-dir (plus <name>.log for what the run had to say, and
+#   <name>.err only when it actually failed). The script passes no analysis
+#   flags of its own, so each subcommand takes its defaults from
+#   ./.agda-optimization.yml (if present) and the built-in defaults otherwise.
+#   Optionally builds the graph first with agda-deps.
 # metadata: type: project
 #
 # Run it FROM THE REPO TOP LEVEL. Two reasons: agda-optimization discovers
@@ -15,14 +16,22 @@
 # cannot drift from the tool.
 #
 # Usage:
-#   scripts/run_all_opts.sh                                # test/deps.json → opt-report/
-#   scripts/run_all_opts.sh <graph.json> [out-dir]
-#   scripts/run_all_opts.sh <agda-src-dir> <entry.(l)agda(.md)> [out-dir] [agda-deps flags...]
+#   scripts/run_all_opts.sh [-N<j>]
+#   scripts/run_all_opts.sh [-N<j>] <graph.json> [out-dir]
+#   scripts/run_all_opts.sh [-N<j>] <agda-src-dir> <entry.(l)agda(.md)> [out-dir] [agda-deps flags...]
+#
+# Options — LEADING position only, before the positional arguments (build mode
+# hands every trailing flag to agda-deps, so a trailing -N would be ambiguous):
+#   -N<j>, -N <j>   run each analysis on j capabilities (+RTS -N<j> -RTS) instead
+#                   of the binary's built-in -N = every core. Analyses only; the
+#                   agda-deps build in build mode is left alone. Needs the binary
+#                   built with -rtsopts, as agda-graph-explorer.cabal does.
 #
 # Examples:
 #   scripts/run_all_opts.sh                                # the committed fixture
 #   scripts/run_all_opts.sh .agda-explore/deps.json /tmp/opts
-#   scripts/run_all_opts.sh ~/proj/agda-src ~/proj/Main.agda ~/proj/Opts
+#   scripts/run_all_opts.sh -N1 .agda-explore/deps.json /tmp/opts
+#   scripts/run_all_opts.sh -N4 ~/proj/agda-src ~/proj/Main.agda ~/proj/Opts
 #
 # Binaries: agda-optimization from $AGDA_OPT_BIN > $PATH > `cabal run`.
 # Build mode additionally needs agda-deps ($AGDA_DEPS_BIN > $PATH).
@@ -35,6 +44,13 @@
 # moduleFiles and agda-optimization keys off them — so the script absolutizes
 # them for you. `set -e` is deliberately OFF: a single heuristic that errors
 # (e.g. fiedler without SciPy) must not kill the batch.
+#
+# WHY -N<j>: the analyses are this batch's only parallel work, and two RTS-level
+# faults ride on it for a big graph. On GHC 9.12.4 a heap-corruption bug (exit
+# 139, or an abort printing "evacuate: strange closure type") needs >= 2
+# capabilities — GHC 9.14.1 fixes it. A rarer livelock (one thread spinning at
+# 100%, the rest idle) survives that fix. Neither is reachable at -N1, which is
+# therefore the deterministic fallback, at roughly 5x the wall clock.
 
 set -uo pipefail
 
@@ -62,7 +78,30 @@ else
 fi
 
 # --- arguments --------------------------------------------------------------
-case "${1:-}" in -h|--help) usage; exit 0 ;; esac
+# Leading options are peeled off first; the loop stops at the first token that
+# is not one of ours, so the positional scanner below and build mode's
+# agda-deps passthrough both see exactly what they saw before.
+#
+# RTS is the argv tail appended to every analysis run — empty by default, so a
+# binary built without -rtsopts keeps working as long as -N is not asked for.
+# It is expanded as ${RTS[@]+"${RTS[@]}"}: under `set -u`, bash before 4.4
+# treats "${RTS[@]}" on an empty array as an unbound variable.
+RTS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    -N)  [ $# -ge 2 ] || { echo "-N requires a capability count, e.g. -N4" >&2; exit 2; }
+         RTS_N="$2"; shift 2 ;;
+    -N*) RTS_N="${1#-N}"; shift ;;
+    --)  shift; break ;;
+    *)   break ;;
+  esac
+  case "$RTS_N" in
+    ''|*[!0-9]*) echo "-N takes a positive integer (got: '$RTS_N')" >&2; exit 2 ;;
+  esac
+  [ "$RTS_N" -ge 1 ] || { echo "-N must be >= 1 (got: $RTS_N)" >&2; exit 2; }
+  RTS=(+RTS "-N$RTS_N" -RTS)
+done
 
 GRAPH=""; AGDA_SRC=""; ENTRY=""
 if [ $# -eq 0 ]; then
@@ -123,6 +162,8 @@ else
   echo ">> config: none in $PWD — analyses run on built-in defaults"
   echo "           (start one with: agda-optimization --show-defaults > .agda-optimization.yml)"
 fi
+# Only when asked for, so the default run's output is unchanged.
+[ "${#RTS[@]}" -gt 0 ] && echo ">> rts:    ${RTS[*]} — every analysis"
 
 # --- subcommands ------------------------------------------------------------
 # Read from the binary, so a new analysis is picked up without touching this
@@ -137,43 +178,135 @@ while IFS= read -r s; do [ -n "$s" ] && SUBS+=("$s"); done < <(
   exit 2; }
 echo ">> running ${#SUBS[@]} subcommands into $OUT/"
 
-# run <subcommand> — writes <name>.txt + <name>.json, keeps stderr notes in
-# <name>.err, never aborts the batch. No analysis flags: defaults + YAML only.
+# --- stderr routing ---------------------------------------------------------
+# The tool talks on stderr for BOTH progress ("[motif] seeds=1024/9819, …") and
+# diagnostics, and the two cannot be told apart by shape — fiedler prints its
+# missing-SciPy diagnostic under the same "[fiedler] " prefix it uses for its
+# progress line. So the run's OUTCOME does the routing, never the text:
+#
+#   <name>.log  every stderr line the run produced — notes, warnings, sizing
+#               stats, progress. Its presence means "this analysis had
+#               something to say", NEVER "something went wrong".
+#   <name>.err  written only when the run actually failed: a script-authored
+#               failure record (exit code, signal name, reproduce line) plus
+#               the tool's own last words. Its presence always means a real
+#               failure.
+#
+# A tool that exits on purpose prints its diagnostic and then exits, so the tail
+# of the log IS that diagnostic and the record quotes it. A tool killed by a
+# signal prints nothing, so there is none to find — and the record says exactly
+# that, rather than leaving a reader to mistake the last progress line for a
+# cause (which is what a truncated "[motif] seeds=2944/9819" looks like).
 FAILED=()
+FAIL_SUMMARY=""   # one-line cause for the console
+FAIL_DIAG=""      # the tool's own words; empty when it died by a signal
+
+# record_failure <name> <exit-code> human|json <log-to-quote> — write
+# <name>.err, set FAIL_*. The log to quote is the failing pass's OWN stderr, so
+# a json-pass failure is not reported with the human pass's breadcrumbs.
+# 128+n is read as death by signal n; agda-optimization only ever exits 1/2/3
+# on purpose, so that reading is unambiguous here.
+record_failure() {
+  local name="$1" rc="$2" pass="$3" src="$4" sig="" ext="txt" rts=""
+  [ "$pass" = json ] && ext="json"
+  # The reproduce line has to carry -N<j> too, or it does not reproduce.
+  [ "${#RTS[@]}" -gt 0 ] && rts=" ${RTS[*]}"
+  FAIL_DIAG=""
+  [ "$rc" -ge 128 ] && sig="$(kill -l "$((rc - 128))" 2>/dev/null)"
+  if [ -n "$sig" ]; then
+    FAIL_SUMMARY="exit $rc, killed by SIG$sig — crashed, no diagnostic"
+  else
+    FAIL_SUMMARY="exit $rc"
+    FAIL_DIAG="$(grep -v '^[[:space:]]*$' "$src" 2>/dev/null | tail -n 5)"
+  fi
+  {
+    printf '%s FAILED — %s\n' "$name" "$FAIL_SUMMARY"
+    printf 'pass:      --format=%s\n' "$pass"
+    printf 'reproduce: %s %s %s --format=%s --out %s%s\n' \
+      "${OPT[*]}" "$name" "$GRAPH" "$pass" "$OUT/$name.$ext" "$rts"
+    if [ -s "$OUT/$name.log" ]; then
+      printf 'progress:  %s.log — full stderr, up to the point it stopped\n' "$name"
+    else
+      printf 'progress:  none — the run printed nothing before it stopped\n'
+    fi
+    if [ -n "$sig" ]; then
+      printf 'hint:      a signal death is the runtime, not the analysis reporting\n'
+      printf '           a problem. Re-run the batch with -N1 to rule out the\n'
+      printf '           parallel RTS; check dmesg for an OOM kill.\n'
+    fi
+    [ -n "$FAIL_DIAG" ] &&
+      printf -- '--- last words (tail of %s.log) ---\n%s\n' "$name" "$FAIL_DIAG"
+  } >> "$OUT/$name.err"
+}
+
+# Echo the tool's own diagnostic under the status line, indented so it reads as
+# quoted output rather than as this script speaking.
+show_diag() {
+  [ -n "$FAIL_DIAG" ] && printf '%s\n' "$FAIL_DIAG" | sed 's/^/     | /'
+  return 0
+}
+
+# tidy_log <logfile> — the "applied config from …" breadcrumb fires on every
+# run. Drop it only when the header already named that config, so it does not
+# make every log look noteworthy — but a config the header could not see (found
+# by the tool's *.agda-lib ancestor walk) stays visible rather than silent.
+# Removes the file when nothing is left, so "a .log exists" means "it spoke".
+tidy_log() {
+  local f="$1"
+  if [ -n "$CFG" ] && [ -f "$f" ]; then
+    grep -v 'applied config from' "$f" > "$f.tmp"
+    mv -f "$f.tmp" "$f"
+  fi
+  [ -s "$f" ] || rm -f "$f"
+}
+
+# run <subcommand> — writes <name>.txt + <name>.json + the .log/.err above,
+# never aborts the batch. No analysis flags: defaults + YAML only.
 run() {
   local name="$1" t0=$SECONDS rc=0 note=""
   printf '>> %-16s' "$name"
-  "${OPT[@]}" "$name" "$GRAPH" --format=human --out "$OUT/$name.txt" 2> "$OUT/$name.err"
+  # Clean slate: anything left in the out-dir afterwards was produced by THIS
+  # run, so a stale artifact from an earlier run can never lie about it.
+  rm -f "$OUT/$name.txt" "$OUT/$name.json" "$OUT/$name.log" "$OUT/$name.err"
+
+  # The analysis runs inside a subshell so that a SIGSEGV/SIGKILL death is
+  # announced by THAT shell ("Segmentation fault (core dumped)") into /dev/null,
+  # instead of being spliced into this script's own status line. The trailing
+  # `exit` is load-bearing: without it the analysis is the subshell's last
+  # command, bash execs it in place, and the outer shell reaps the signal after
+  # all. The subshell's status is the analysis's, so nothing else changes.
+  ( "${OPT[@]}" "$name" "$GRAPH" --format=human --out "$OUT/$name.txt" \
+      ${RTS[@]+"${RTS[@]}"} 2> "$OUT/$name.log"; exit $? ) 2>/dev/null
   rc=$?
   if [ "$rc" -ne 0 ]; then
     FAILED+=("$name")
     [ -s "$OUT/$name.txt" ] || rm -f "$OUT/$name.txt"   # no misleading empty report
-    printf 'FAILED (exit %s) — see %s\n' "$rc" "$name.err"
+    tidy_log "$OUT/$name.log"
+    record_failure "$name" "$rc" human "$OUT/$name.log"
+    printf 'FAILED (%s) — see %s\n' "$FAIL_SUMMARY" "$name.err"
+    show_diag
     return
   fi
+
   # Same analysis again, structured. Its stderr just repeats the human pass's
-  # breadcrumbs, so keep it only when this pass actually fails.
-  "${OPT[@]}" "$name" "$GRAPH" --format=json --out "$OUT/$name.json" 2> "$OUT/$name.json.err"
+  # breadcrumbs, so it is folded into the log only when this pass fails.
+  ( "${OPT[@]}" "$name" "$GRAPH" --format=json --out "$OUT/$name.json" \
+      ${RTS[@]+"${RTS[@]}"} 2> "$OUT/$name.json.log"; exit $? ) 2>/dev/null
   rc=$?
   if [ "$rc" -ne 0 ]; then
     FAILED+=("$name(json)")
-    note=", json FAILED"
-    { echo "--- --format=json pass failed (exit $rc):"; cat "$OUT/$name.json.err"; } \
-      >> "$OUT/$name.err"
+    tidy_log "$OUT/$name.json.log"
+    record_failure "$name" "$rc" json "$OUT/$name.json.log"
+    [ -f "$OUT/$name.json.log" ] && cat "$OUT/$name.json.log" >> "$OUT/$name.log"
+    note=", json FAILED → $name.err"
   fi
-  rm -f "$OUT/$name.json.err"
-  # The "applied config from …" breadcrumb fires on every human run. Strip it
-  # only when the header already named that config, so it must not make every
-  # .err look noteworthy — but a config the header could not see (found by the
-  # tool's *.agda-lib ancestor walk) stays visible rather than silent.
-  if [ -n "$CFG" ]; then
-    grep -v 'applied config from' "$OUT/$name.err" > "$OUT/$name.err.tmp"
-    mv -f "$OUT/$name.err.tmp" "$OUT/$name.err"
-  fi
-  if [ -s "$OUT/$name.err" ]; then note="$note, notes → $name.err"
-  else rm -f "$OUT/$name.err"; fi
+  rm -f "$OUT/$name.json.log"
+  tidy_log "$OUT/$name.log"
+  [ -s "$OUT/$name.log" ] && note="$note, has notes → $name.log"
   printf 'ok (%s lines, %ss%s)\n' \
     "$(wc -l < "$OUT/$name.txt" | tr -d ' ')" "$((SECONDS - t0))" "$note"
+  [ "$rc" -eq 0 ] || show_diag
+  return 0
 }
 
 for sub in "${SUBS[@]}"; do run "$sub"; done
@@ -184,6 +317,8 @@ if [ "${#FAILED[@]}" -eq 0 ]; then
   exit 0
 fi
 echo ">> done: $(( ${#SUBS[@]} - ${#FAILED[@]} ))/${#SUBS[@]} ok, ${#FAILED[@]} failed: ${FAILED[*]}"
-echo "   reports in $OUT/ — each failure's diagnostic is in <name>.err"
-echo "   (fiedler exits 2 without scripts/fiedler_helper.py, 3 without SciPy)"
+echo "   reports in $OUT/ — <name>.err is a failure record (cause + reproduce"
+echo "   line); <name>.log is only what a run had to say, never a failure."
+echo "   (fiedler never fails: with no scripts/fiedler_helper.py or no SciPy it"
+echo "    writes an empty report and says why in fiedler.log)"
 exit 1

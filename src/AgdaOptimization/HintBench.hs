@@ -49,7 +49,8 @@ import           AgdaOptimization.FlagSpec ( FlagSpec(..), SwitchVal(..), EnumEr
                                            , parseFlags, applyFlagConfig )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
                                          , renderTable, showD3
-                                         , emitJsonReport, withHumanOutput )
+                                         , emitJsonReport, withHumanOutput
+                                         , withHumanReport )
 
 -- ---------------------------------------------------------------------------
 -- Options
@@ -135,7 +136,7 @@ run ix gOpts opts@Options{..} = do
       case gOutFormat gOpts of
         OutJson  -> emitJsonReport (gOutPath gOpts)
                       (hintBenchJson opts (length rows) Nothing reports)
-        OutHuman -> withHumanOutput (gOutPath gOpts)
+        OutHuman -> withHumanReport gOpts "hint-bench"
                       (emitHuman opts (length rows) reports)
 
 -- | The real (non-synthetic) defs, in id order — the ranker's corpus.
@@ -195,10 +196,10 @@ emitHuman Options{..} nRows reports = do
                  ++ [ showD3 v | (_, v) <- brpRecallAt r ]
                  ++ [ showD3 v | (_, v) <- brpAnyHitAt r ]
                  ++ [ showD3 (brpMRR r), showD3 (brpMeanCand r) ]
+  -- The R@k / A@k / MRR gloss that used to sit here now lives in
+  -- 'AgdaOptimization.Legend' with the rest of the column glossary, so
+  -- the metrics are described in exactly one place.
   putStr (renderTable header (map row reports))
-  putStrLn ""
-  putStrLn "  R@k = mean recall@k of the real premises; A@k = fraction of rows"
-  putStrLn "  with >=1 real premise in the top k; MRR = mean reciprocal rank."
 
 -- | The empty-corpus report: state the reason and stop, exit 0.
 emitEmpty :: GlobalOpts -> Options -> Maybe Text -> IO ()

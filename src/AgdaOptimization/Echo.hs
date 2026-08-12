@@ -71,7 +71,7 @@ import           AgdaGraph.WL         ( ColorVec, Fingerprint, fingerprintAt
                                       , fingerprintSize, initialColors, refine
                                       , weightedJaccard' )
 import           AgdaOptimization.Report ( GlobalOpts(..), OutFormat(..)
-                                         , emitJsonReport, withHumanOutput )
+                                         , emitJsonReport, withHumanReport )
 
 --------------------------------------------------------------------------------
 -- Options
@@ -353,7 +353,7 @@ run ix gOpts opts@Options{..} = do
       emitJsonReport (gOutPath gOpts) $
         echoJson ix opts candVec fwdIds revEdges
                  nCand nFwdClus nRevClus nDelta nRejectedSpread topped
-    OutHuman -> withHumanOutput (gOutPath gOpts) $ do
+    OutHuman -> withHumanReport gOpts "echo" $ do
       putStrLn $ "# Echo — reverse-direction fingerprint "
               ++ "(k=" ++ show optWlK
               ++ ", jaccard>=" ++ printf "%.2f" optJaccardThreshold
