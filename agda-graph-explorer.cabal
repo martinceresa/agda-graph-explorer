@@ -136,6 +136,7 @@ executable agda-explore
                        AgdaInteract.AutoReport
                        AgdaInteract.Annotate
                        AgdaInteract.Tools
+                       AgdaInteract.Verdict
                        AgdaRepair.Diagnostic
                        AgdaRepair.Strategy
                        AgdaRepair.Edit
@@ -190,6 +191,7 @@ executable agda-auto
                        AgdaInteract.AutoReport
                        AgdaInteract.Annotate
                        AgdaInteract.Tools
+                       AgdaInteract.Verdict
                        AgdaRepair.Diagnostic
                        AgdaRepair.Strategy
                        AgdaRepair.Edit
@@ -223,6 +225,7 @@ test-suite interaction-spec
   main-is:             Spec.hs
   other-modules:       AgdaInteract.Guard
                        AgdaInteract.Literate
+                       AgdaInteract.Verdict
                        AgdaInteract.GoalId
                        AgdaInteract.Registry
                        AgdaInteract.Session

@@ -135,6 +135,19 @@ data Definition = Definition
     -- list for every def in the escaping module, so as decoded from the wire
     -- this holds only the declaration-level escapes, while an 'Index' def's
     -- 'defUnsafe' also carries its module's option escapes.
+  , defUnsolvedMetas :: {-# UNPACK #-} !Int
+    -- ^ How many __silent__ unsolved metavariables this def mentions directly
+    -- (the optional per-def @"unsolvedMetas"@; @0@ — and absent on the wire —
+    -- when there are none, so older JSON decodes to @0@).
+    --
+    -- Silent means /not/ an interaction point: a missing record field, a failed
+    -- instance search, an un-inferable @_@. An honest @?@ hole is __not__
+    -- counted — it only sets 'defState' to 'Hole'. So the pair discriminates
+    -- what 'defState' alone cannot: @Hole@ with @0@ here is an open goal
+    -- someone is working on, while @Hole@ with a nonzero count is missing
+    -- evidence nobody asked for — an unnamed axiom. Only reachable at all when
+    -- the producer ran with @--allow-unsolved-metas@ \/ @--lenient-imports@
+    -- (otherwise such a module fails and lands in 'egFailedModules').
   , defX      :: {-# UNPACK #-} !Double
   , defY      :: {-# UNPACK #-} !Double
   , defOrigin :: !(Maybe Text)
@@ -158,6 +171,7 @@ instance FromJSON Definition where
       <*> o .:? "access" .!= Public
       <*> o .:? "type"
       <*> o .:? "unsafe" .!= []
+      <*> o .:? "unsolvedMetas" .!= 0
       <*> o .:? "x"      .!= 0.0
       <*> o .:? "y"      .!= 0.0
       <*> pure Nothing
@@ -183,6 +197,17 @@ instance FromJSON ReExport where
   parseJSON = withObject "ReExport" $ \o ->
     ReExport <$> o .: "from" <*> o .: "to" <*> o .: "names"
              <*> o .:? "renames" .!= mempty
+
+-- | Decode-only wrapper for one @unsolvedModules@ value
+-- (@{metas: […], constraints: […]}@) — see 'egUnsolvedModules', which holds
+-- the unwrapped pair.
+newtype UnsolvedModule = UnsolvedModule { unUnsolvedModule :: ([Int], [Int]) }
+
+instance FromJSON UnsolvedModule where
+  parseJSON = withObject "UnsolvedModule" $ \o -> do
+    ms <- o .:? "metas"       .!= []
+    cs <- o .:? "constraints" .!= []
+    pure (UnsolvedModule (ms, cs))
 
 -- | How an edge was discovered during the producer's walk. Optional on
 -- the wire: older producers omit the @definitionEdgesProvenance@ field
@@ -302,6 +327,19 @@ data ExpandedGraph = ExpandedGraph
     -- escapes): 'AgdaGraph.Index.buildIndex' folds these module-wide escapes
     -- into every enclosed def's 'defUnsafe', so the @agda-explore@ soundness
     -- audit (@search@ / @roots@ @unsafe=@) and transitive taint see them.
+  , egUnsolvedModules  :: !(M.Map Text ([Int], [Int]))
+    -- ^ Per top-level module, @(silent unsolved-meta lines, unsolved-constraint
+    -- lines)@ — the optional @unsolvedModules@ object, @{module → {metas: […],
+    -- constraints: […]}}@; only modules with at least one entry appear, so an
+    -- older producer (or a clean corpus) decodes to 'mempty'.
+    --
+    -- The rollup of 'defUnsolvedMetas', and the reason
+    -- @egFailedModules == []@ must not be read as "compiles": under
+    -- @--allow-unsolved-metas@ these modules /succeeded/ with un-produced
+    -- evidence, so the producer's @--keep-going@ failure catch never fired for
+    -- them. Meta lines are exact (from the meta store); constraint lines are
+    -- best-effort (from highlighting spans, so two constraints on one line
+    -- collapse) — count metas, treat constraints as locations.
   , egEdgeProvenance   :: ![Provenance]
     -- ^ Parallel to 'egDefinitionEdges' — index @i@ in this list
     -- tags the @i@-th edge. Empty when the producer didn't emit the
@@ -363,6 +401,7 @@ instance FromJSON ExpandedGraph where
             rxs    <- o .:? "reexports"        .!= []
             extSum <- o .:? "externals_summary"
             mesc   <- o .:? "moduleOptionEscapes" .!= M.empty
+            unsol  <- fmap (fmap unUnsolvedModule) (o .:? "unsolvedModules" .!= M.empty)
             prov   <- o .:? "definitionEdgesProvenance" .!= []
             sths   <- o .:? "definitionSubtermHashes"   .!= []
             stds   <- o .:? "definitionSubtermDepths"   .!= []
@@ -410,6 +449,7 @@ instance FromJSON ExpandedGraph where
                 , egReExports        = rxs
                 , egExternalsSummary = extSum
                 , egModuleOptionEscapes = mesc
+                , egUnsolvedModules  = unsol
                 , egEdgeProvenance   = prov
                 , egSubtermHashes    = sths
                 , egSubtermDepths    = stds
@@ -463,8 +503,9 @@ instance A.ToJSON Definition where
     , "x"      A..= defX d
     , "y"      A..= defY d
     ]
-    -- Omitted when empty, matching the producer (keeps safe defs terse).
+    -- Omitted when empty/zero, matching the producer (keeps clean defs terse).
     ++ [ "unsafe" A..= defUnsafe d | not (null (defUnsafe d)) ]
+    ++ [ "unsolvedMetas" A..= defUnsolvedMetas d | defUnsolvedMetas d > 0 ]
 
 instance A.ToJSON ReExport where
   toJSON r = A.object $
@@ -503,6 +544,12 @@ instance A.ToJSON ExpandedGraph where
     -- daemon materialises to @cfgGraphPath@ mirrors the producer exactly).
     ++ [ "moduleOptionEscapes" A..= egModuleOptionEscapes g
        | not (M.null (egModuleOptionEscapes g)) ]
+    ++ [ "unsolvedModules" A..= M.map unsolvedModuleJson (egUnsolvedModules g)
+       | not (M.null (egUnsolvedModules g)) ]
+
+-- | One 'egUnsolvedModules' value back in the producer's object shape.
+unsolvedModuleJson :: ([Int], [Int]) -> A.Value
+unsolvedModuleJson (ms, cs) = A.object [ "metas" A..= ms, "constraints" A..= cs ]
 
 -- | True iff @subtermHashes@ and @subtermDepths@ have a per-def length
 -- mismatch somewhere. Used purely as a sanity check on the producer's

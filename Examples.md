@@ -37,9 +37,10 @@ it exits nonzero only on an operational error (bad config, unreadable graph, or
 a run matching no scanned files).
 
 Default `--kinds=using,duplicate` — the lowest-noise combination. The other
-kinds (`blanket`, `defined`, `dead`, `public`) need more triage; enable all
-with `--kinds=all`. `--format=json` (alias `--json-out`) emits a JSON array (one object per finding);
-`--group-by=dir|file|kind` and `--count-only` aggregate the findings;
+kinds (`blanket`, `dead`, `internal-only`, `public`, and `defined` = `dead` +
+`internal-only`) need more triage; enable all with `--kinds=all`.
+`--format=json` (alias `--json-out`) emits a JSON array (one object per
+finding); `--group-by=dir|file|kind` and `--count-only` aggregate the findings;
 positional `ROOTS…` accept multiple directories.
 
 ---
@@ -444,6 +445,8 @@ cabal run agda-goals -- -i src/ --format=json --top-n=20 src/ | jq
 
 One process per RTS capability; cap the pool with `+RTS -NK -RTS`. Output is
 reassembled in input order, so it is byte-identical between `-N1` and `-NK`.
+`--top-n=N` bounds the human report (default 25); `--verbose` echoes the IOTCM
+command and `agda`'s raw output to stderr when a run misbehaves.
 Config: [`.agda-goals.yml`](Configuration.md#agda-goalsyml).
 
 ---
@@ -473,7 +476,10 @@ Read-side tools: `brief`, `locate`, `callers`, `callees`, `impact`, `path`,
 `roots`, `type_of`, `similar_types`, `similar_bodies`, `find_lemma`, `search`,
 `unused`, `rebuild`, `status`. `brief name=X` is a one-call orientation bundle
 (location + type + callers/callees + body-twins); `search` / `callers` /
-`callees` accept `format:json`.
+`callees` accept `format:json`. `search mode=text` ripgreps the source bytes
+for what the graph doesn't index (pragmas, comments, regex), and
+`search`/`roots` take `unsafe=any` for an `agda --safe`-style audit of
+soundness escapes.
 
 `--tool-tier core` advertises only the measured-used subset in `tools/list`
 (default `full` = every tool; the `query` CLI reaches all of them either way).

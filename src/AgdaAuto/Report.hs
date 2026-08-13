@@ -38,7 +38,7 @@ import           System.Exit         ( ExitCode(..) )
 import           AgdaGraph.Interaction.Protocol ( GoalRange(..), RangePos(..) )
 import           AgdaInteract.AutoReport
                    ( AutoAllOutcome(..), GoalOutcome(..), GoalReport(..), HintProv(..)
-                   , codeList )
+                   , codeList, aoHasUnsolved, unsolvedBlock, unsolvedCount )
 import qualified AgdaRepair.Strategy as RS
 
 showT :: Show a => a -> Text
@@ -50,9 +50,15 @@ isUnsolved g = case grOutcome g of GUnsolved{} -> True; _ -> False
 isSkipped  g = case grOutcome g of GSkipped    -> True; _ -> False
 
 -- | @0@ when nothing is left open, else @1@. See the module header.
+--
+-- "No goals" is success only when the module actually type-checks: with no
+-- hole left, an unsolved meta is un-produced evidence, so the file needs a
+-- human edit that @agda-auto@ cannot make (Mimer has no interaction point to
+-- act on). @--fixpoint@ therefore cannot converge past it — by design, since
+-- re-sweeping would change nothing.
 outcomeExit :: AutoAllOutcome -> ExitCode
 outcomeExit o
-  | aoNoGoals o          = ExitSuccess
+  | aoNoGoals o          = if aoHasUnsolved o then ExitFailure 1 else ExitSuccess
   | isJust (aoAbort o)   = ExitFailure 1
   | all isSolved goals   = ExitSuccess
   | otherwise            = ExitFailure 1
@@ -61,6 +67,9 @@ outcomeExit o
 -- | The per-hole table + summary header. No diff body — the caller appends it.
 renderHumanReport :: AutoAllOutcome -> Text
 renderHumanReport o
+  | aoNoGoals o, aoHasUnsolved o =
+      T.pack (aoFile o) <> ": no open goals, but does NOT type-check — "
+        <> unsolvedCount o <> "." <> unsolvedBlock o
   | aoNoGoals o = T.pack (aoFile o) <> ": no open goals."
   | otherwise   = T.intercalate "\n" (header : map goalLine (aoGoals o))
   where
@@ -154,6 +163,11 @@ outcomeJson wrote diff o = object
   , "aborted"  .= aoAbort o
   , "diff"     .= diff
   , "holes"    .= map holeJson goals
+    -- Additive, and empty for every file that type-checks: the un-produced
+    -- evidence a "0 holes" report would otherwise read as success. Rendered
+    -- lines (name, type, position), because these have no goal id to key on.
+  , "unsolvedMetas"       .= aoMetas o
+  , "unsolvedConstraints" .= aoCons o
   ]
   where
     goals = aoGoals o

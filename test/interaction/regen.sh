@@ -37,4 +37,20 @@ load "$L" | agda --interaction-json 2>/dev/null | clean > "$OUT/load-literate.js
 # future agda that starts consuming hole bodies (which would add a GiveAction).
 { load "$HH"; printf 'IOTCM "%s" None Direct (Cmd_autoOne AsIs 0 noRange "-t 5")\n' "$HH"; } \
   | agda --interaction-json 2>/dev/null | clean > "$OUT/auto-hole-content.jsonl"
+
+# The unsolved-meta trio (load + Cmd_constraints each). These pin where the
+# wire reports un-produced evidence, which is NOT the errors/warnings lists:
+#   unsolved-meta   a missing record field — zero errors, zero warnings, zero
+#                   visible goals, the meta in `invisibleGoals`. The false-✓
+#                   repro; batch agda rejects this file.
+#   stuck-instance  two candidate instances — an [UnsolvedConstraints] error
+#                   AND a structured Cmd_constraints entry with the candidates.
+#   hole-blocked    an ORDINARY `?` hole also yields an invisible meta, so the
+#                   ✗ rule cannot be "any invisible meta"; this one stays ✓.
+constraints() { printf 'IOTCM "%s" None Direct (Cmd_constraints)\n' "$1"; }
+for probe in Unsolved:unsolved-meta Stuck:stuck-instance HoleBlocked:hole-blocked; do
+  f="$PWD/src/${probe%%:*}.agda"
+  { load "$f"; constraints "$f"; } \
+    | agda --interaction-json 2>/dev/null | clean > "$OUT/${probe##*:}.jsonl"
+done
 echo "regenerated fixtures under $OUT/"

@@ -11,7 +11,7 @@ The server reuses the `agda-deps` toolset; it does not link Agda itself.
 
 ## Prerequisites
 
-Build this repo's binaries (GHC 9.14.x + cabal 3.16; older GHC ≥ 9.6 should work):
+Build this repo's binaries (GHC 9.14.x + cabal 3.16; `cabal.project` pins `ghc-9.14.1`, which earlier GHCs cannot substitute for — see the repo README):
 
 ```bash
 cabal build agda-explore agda-unused
@@ -98,12 +98,12 @@ export AGDA_EXPLORE_GRAPH=/abs/path/to/deps.json
 | `callees`        | What does `X` depend on? (same filters as `callers`) |
 | `impact`         | What breaks if I change `X`'s type? (blast radius) |
 | `path`           | *Why* does `A` depend on `B`? (shortest chain, per-hop provenance; `k`, `module_prefix`) |
-| `roots`          | Which assumptions does `X` rest on? (transitive postulates / primitives, with witness chains; `kind` / `state` / `module_prefix` / `by_module` / `chains=false`) |
+| `roots`          | Which assumptions does `X` rest on? (transitive postulates / primitives, with witness chains; `kind` / `state` / `module_prefix` / `by_module` / `chains=false`). `unsafe=any` makes it a transitive soundness audit. |
 | `type_of`        | What's the type of `X`? (elaborated; `source=true` for as-written) |
 | `similar_types`  | What else has a type like `X`'s? |
 | `similar_bodies` | What else is implemented like `X`? |
 | `find_lemma`     | Goal-directed lemma search: `anchor=<def>` (WL fingerprint) or `goal="<type>"` (name/shape match — combinator shape + def name + conclusion; needs signatures). Filter with `kind` / `module_prefix`. |
-| `search`         | Find by name substring, or list by `kind` / `state` / `module_prefix` (`top_level_only`). |
+| `search`         | Find by name substring, or list by `kind` / `state` / `module_prefix` (`top_level_only`). `unsafe=any` audits soundness escapes; `mode=text` ripgreps the source bytes for what the graph doesn't index (pragmas, comments, regex). |
 | `unused`         | Unused imports / dead code (`scope` / `exclude`; FP caveats). |
 | `rebuild`        | Force-regenerate the graph now. |
 | `status`         | Server fingerprint + binary path/mtime, config, freshness, graph stats (flags a stale-format graph or a newer build on disk). |

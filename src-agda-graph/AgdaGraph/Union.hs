@@ -79,11 +79,18 @@ unionExpandedGraphs gs@(g0 : _) =
     , egExternalsSummary = egExternalsSummary g0
     , egModuleOptionEscapes = M.unionsWith mergeEscapes
                                 (map egModuleOptionEscapes gs)
+      -- Per-module rollups, so a module carrying unsolved metas in ANY entry's
+      -- graph stays flagged in the union (line lists merged, ascending).
+    , egUnsolvedModules  = M.unionsWith mergeUnsolved (map egUnsolvedModules gs)
     , egEdgeProvenance   = mergedProvenance
     , egSubtermHashes    = mergedHashes
     , egSubtermDepths    = mergedDepths
     }
   where
+    -- Both line lists stay ascending + deduplicated, as the wire documents
+    -- them (nubOrd alone would keep concatenation order).
+    mergeUnsolved (ms, cs) (ms', cs') = (mergeLines ms ms', mergeLines cs cs')
+    mergeLines xs ys = nubOrd (sort (xs ++ ys))
     -- (1) Per-definition: collect each graph's defs alongside its parallel
     -- subterm arrays (already padded so positionally aligned), then fold by
     -- name into an accumulator keyed by 'defName'.

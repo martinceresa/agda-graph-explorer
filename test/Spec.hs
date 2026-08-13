@@ -22,7 +22,7 @@ import           Data.IORef
 import           Data.List            ( elemIndex, intercalate, isInfixOf, sort )
 import qualified Data.IntMap.Strict   as IntMap
 import qualified Data.IntSet          as IntSet
-import           Data.Maybe           ( listToMaybe, mapMaybe )
+import           Data.Maybe           ( listToMaybe, mapMaybe, isNothing )
 import           Data.Text            ( Text )
 import qualified Data.Text            as T
 import           System.Exit          ( ExitCode(..), exitFailure, exitSuccess )
@@ -47,8 +47,12 @@ import           AgdaInteract.Guard
 import           AgdaInteract.Literate
 import           AgdaInteract.GoalId
 import           AgdaInteract.Registry ( contentStamp, shouldKeepGoalIds )
-import           AgdaInteract.Session  ( clampRemainingMicros, agdaMissingHint )
+import           AgdaInteract.Session  ( clampRemainingMicros, agdaMissingHint
+                                       , SendOutcome(..) )
 import           AgdaInteract.Edit
+import           AgdaInteract.Verdict  ( CheckOutcome(..), interpretCheck
+                                       , Unacceptable(..), checkAcceptable
+                                       , checkVerdict, renderDiagnostics )
 import           AgdaInteract.Batch    ( Step(..), wildcardCheck, allGiveSteps
                                        , checkInspectArgs, checkScratchOp
                                        , inspectOps, scratchOps )
@@ -73,7 +77,7 @@ import qualified Data.Map.Strict       as Map
 import           AgdaGraph.Schema      ( ExpandedGraph(..), Definition(..), ReExport(..)
                                        , State(..), Kind(..), Access(..)
                                        , loadExpandedGraph, explainDecodeError )
-import           AgdaGraph.Index       ( buildIndex, lookupId, unsafeDeps, defAt
+import           AgdaGraph.Index       ( buildIndex, lookupId, unsafeDeps, unsolvedDeps, defAt
                                        , idxRealCount, moduleDependencyOrder
                                        , idxDefs, idxExternalsSummary )
 import           AgdaUnused.Analysis   ( Finding(..), FindingKind(..), analyse )
@@ -140,6 +144,7 @@ main = do
   sequence_ (map ($ fails) schemaFieldTests)
   sequence_ (map ($ fails) taintTests)
   sequence_ (map ($ fails) moduleOptionEscapeTests)
+  sequence_ (map ($ fails) unsolvedEvidenceTests)
   sequence_ (map ($ fails) lemmaRankTests)
   sequence_ (map ($ fails) phase1RankTests)
   sequence_ (map ($ fails) phase2SelectTests)
@@ -853,6 +858,81 @@ moduleOptionEscapeTests = case eitherDecode escapeGraphJson :: Either String Exp
     ]
 
 ----------------------------------------------------------------------
+-- Un-produced evidence (agda-deps `unsolvedModules` + per-def
+-- `unsolvedMetas`): the additive fields the producer added so that
+-- `failedModules: []` can no longer be read as "compiles" under
+-- --allow-unsolved-metas. Both are optional, so older graphs must decode to
+-- zero/empty; the encoder must omit them then (byte-identical for a clean
+-- corpus). `unsolvedDeps` is the transitive query behind the ⚠ banner, and it
+-- stays SEPARATE from `unsafeDeps` — an escape still type-checks, missing
+-- evidence does not.
+
+unsolvedGraphJson :: BL.ByteString
+unsolvedGraphJson = BLC.pack $ unlines
+  [ "{ \"v\": 2, \"mode\": \"expanded\", \"schemaVersion\": 2"
+  , ", \"modules\": [\"Gap\", \"Proof\"]"
+  , ", \"moduleFiles\": {}"
+  , ", \"failedModules\": []"
+  , ", \"definitions\":"
+    -- state H + unsolvedMetas = silently missing evidence …
+  , "  [ { \"name\": \"Gap.missingField\", \"module\": \"Gap\", \"kind\": \"function\""
+  , "    , \"state\": \"H\", \"unsolvedMetas\": 2 }"
+    -- … while state H alone is an honest `?` hole someone is working on.
+  , "  , { \"name\": \"Gap.honestHole\",   \"module\": \"Gap\", \"kind\": \"function\", \"state\": \"H\" }"
+  , "  , { \"name\": \"Proof.thm\",        \"module\": \"Proof\", \"kind\": \"function\" }"
+  , "  , { \"name\": \"Proof.clean\",      \"module\": \"Proof\", \"kind\": \"function\" }"
+  , "  ]"
+  , ", \"definitionEdges\": [ [\"Proof.thm\", \"Gap.missingField\"] ]"
+  , ", \"unsolvedModules\": { \"Gap\": { \"metas\": [12, 19], \"constraints\": [30] } }"
+  , "}"
+  ]
+
+unsolvedEvidenceTests :: [Check]
+unsolvedEvidenceTests = case eitherDecode unsolvedGraphJson :: Either String ExpandedGraph of
+  Left err -> [ check ("unsolved fixture decodes: " ++ err) False ]
+  Right g  ->
+    let ix = buildIndex g
+        metasOf n = fmap (defUnsolvedMetas . defAt ix) (lookupId ix n)
+        depNames n = fmap (\i -> map (defName . defAt ix) (unsolvedDeps ix i)) (lookupId ix n)
+        hasField gr = T.isInfixOf "unsolvedModules"
+                        (T.pack (BLC.unpack (encode (gr :: ExpandedGraph))))
+    in
+    [ checkEq "unsolved: the module rollup decodes as (metas, constraints)"
+        (Just ([12, 19], [30])) (Map.lookup "Gap" (egUnsolvedModules g))
+    , checkEq "unsolved: a clean module is absent from the rollup"
+        False (Map.member "Proof" (egUnsolvedModules g))
+    , checkEq "unsolved: the per-def count decodes" (Just 2) (metasOf "Gap.missingField")
+    -- The discrimination the producer added the field for: same `H` state.
+    , checkEq "unsolved: an honest `?` hole has no silent metas"
+        (Just 0) (metasOf "Gap.honestHole")
+    , checkEq "unsolved: an omitted field decodes to 0" (Just 0) (metasOf "Proof.clean")
+    , checkEq "unsolved: transitive query reaches a dependency with silent metas"
+        (Just ["Gap.missingField"]) (depNames "Proof.thm")
+    , checkEq "unsolved: an honest hole is NOT reported as un-produced evidence"
+        (Just []) (depNames "Gap.honestHole")
+    -- Kept separate on purpose: unsolved metas are not a --safe escape.
+    , checkEq "unsolved: silent metas are not folded into the unsafe taint"
+        (Just []) (fmap (defUnsafe . defAt ix) (lookupId ix "Gap.missingField"))
+    , checkEq "unsolved: encoder round-trips the rollup"
+        (Just ([12, 19], [30]))
+        (case eitherDecode (encode g) :: Either String ExpandedGraph of
+           Right g' -> Map.lookup "Gap" (egUnsolvedModules g')
+           Left _   -> Nothing)
+    , checkEq "unsolved: encoder round-trips the per-def count"
+        (Right (Just 2))
+        (fmap (\g' -> lookupId (buildIndex g') "Gap.missingField"
+                        >>= Just . defUnsolvedMetas . defAt (buildIndex g'))
+              (eitherDecode (encode g) :: Either String ExpandedGraph))
+    , check "unsolved: encoder emits the rollup when non-empty" (hasField g)
+    , check "unsolved: encoder omits the rollup for a clean graph"
+        (case eitherDecode taintGraphJson :: Either String ExpandedGraph of
+           Right gc -> not (hasField gc)
+                         && not (T.isInfixOf "unsolvedMetas"
+                                   (T.pack (BLC.unpack (encode gc))))
+           Left _   -> False)
+    ]
+
+----------------------------------------------------------------------
 -- LemmaRank — carrier-affinity tie-break.
 
 -- | Build a 'Definition' fixture; only the fields the ranker reads matter.
@@ -860,7 +940,7 @@ mkDef :: Text -> Text -> Kind -> Maybe Text -> Definition
 mkDef nm md kind sig = Definition
   { defId = -1, defName = nm, defModule = md, defState = Defined
   , defKind = kind, defLine = Nothing, defAccess = Public
-  , defSig = sig, defUnsafe = [], defX = 0, defY = 0, defOrigin = Nothing }
+  , defSig = sig, defUnsafe = [], defUnsolvedMetas = 0, defX = 0, defY = 0, defOrigin = Nothing }
 
 lemmaRankTests :: [Check]
 lemmaRankTests =
@@ -1181,7 +1261,7 @@ autoRenderTests :: [Check]
 autoRenderTests =
   [ checkEq "render: no open goals"
       "Loaded Foo.agda — no open goals; nothing for Mimer to try."
-      (renderAutoAll (noGoalsOutcome "Foo.agda"))
+      (renderAutoAll (noGoalsOutcome "Foo.agda" [] []))
   , checkEq "render: all solved (headline + trailing blank line)"
       "Mimer solved 1 of 1 open goal(s): g0.\n\n"
       (renderAutoAll base { aoGoalCount = 1, aoSolved = ["g0"], aoNew = Just "x" })
@@ -1212,7 +1292,7 @@ autoRenderTests =
       (not ("open import" `T.isInfixOf` oosNote "auto" [] ["mystery"]))
   ]
   where
-    base   = (noGoalsOutcome "Foo.agda") { aoNoGoals = False, aoSecs = 5 }
+    base   = (noGoalsOutcome "Foo.agda" [] []) { aoNoGoals = False, aoSecs = 5 }
     sucDef = mkDef "Data.Nat.Properties.+-suc" "Data.Nat.Properties" KFunction Nothing
 
 ----------------------------------------------------------------------
@@ -1224,7 +1304,20 @@ autoRenderTests =
 
 autoReportTests :: [Check]
 autoReportTests =
-  [ checkEq "exit: no goals → success"  ExitSuccess     (outcomeExit (noGoalsOutcome "F.agda"))
+  [ checkEq "exit: no goals → success"  ExitSuccess     (outcomeExit (noGoalsOutcome "F.agda" [] []))
+  -- No hole left + un-produced evidence is NOT success: Mimer has nothing it
+  -- can act on (a silent meta has no interaction point), so the file needs a
+  -- human edit and --fixpoint cannot converge past it.
+  , checkEq "exit: no goals but an unsolved meta → 1"
+      (ExitFailure 1) (outcomeExit (noGoalsOutcome "F.agda" ["_bad_12 : ⊥   (15:5)"] []))
+  , checkEq "exit: no goals but an unsolved constraint → 1"
+      (ExitFailure 1) (outcomeExit (noGoalsOutcome "F.agda" [] ["FindInstanceOF _r_10 : Eq Bool"]))
+  , check "human report: no goals + unsolved meta does not read as clean"
+      (let r = renderHumanReport (noGoalsOutcome "F.agda" ["_bad_12 : ⊥   (15:5)"] [])
+       in "does NOT type-check" `T.isInfixOf` r && "_bad_12 : ⊥" `T.isInfixOf` r
+            && "1 unsolved meta(s)" `T.isInfixOf` r)
+  , checkEq "human report: no goals and nothing unsolved is unchanged"
+      "F.agda: no open goals." (renderHumanReport (noGoalsOutcome "F.agda" [] []))
   , checkEq "exit: all solved → success" ExitSuccess    (outcomeExit (oc [solvedG] Nothing))
   , checkEq "exit: an unsolved hole → 1" (ExitFailure 1) (outcomeExit (oc [solvedG, unsolvedG] Nothing))
   , checkEq "exit: a skipped hole → 1"   (ExitFailure 1) (outcomeExit (oc [skippedG] Nothing))
@@ -1284,7 +1377,7 @@ autoReportTests =
   , checkEq "ledger: one line per goal" 3 (length (ledgerLines "F.agda" (oc [solvedG, unsolvedG, skippedG] Nothing)))
   ]
   where
-    oc goals abort = (noGoalsOutcome "F.agda")
+    oc goals abort = (noGoalsOutcome "F.agda" [] [])
       { aoNoGoals = False, aoGoalCount = length goals, aoGoals = goals, aoAbort = abort }
     bigOrig = T.replicate 100 "x"
     gr l c s e = GoalRange (RangePos l c s) (RangePos l c e)
@@ -1302,7 +1395,8 @@ autoReportTests =
       \{\"id\":\"g0\",\"status\":\"solved\",\"line\":9,\"col\":7,\"term\":\"x\",\"via\":\"lemma:+-comm\"},\
       \{\"id\":\"g1\",\"status\":\"unsolved\",\"line\":12,\"col\":5,\"hints\":[\"h1\"],\
       \\"imports\":[\"open import Data.Nat.Properties using (+-suc)\"]},\
-      \{\"id\":\"g2\",\"status\":\"skipped\"}]}"
+      \{\"id\":\"g2\",\"status\":\"skipped\"}],\
+      \\"unsolvedMetas\":[],\"unsolvedConstraints\":[]}"
 
 ----------------------------------------------------------------------
 -- AgdaInteract.Annotate: the in-hole marker grammar.
@@ -1507,7 +1601,7 @@ replayTests ref = do
   -- load.jsonl: AllGoalsWarnings with 4 goals, ids 0..3; + InteractionPoints
   loadRs <- parseLines (fixtureDir ++ "load.jsonl")
   check "load.jsonl: 4 visible goals with ids 0..3"
-    (case [g | ReplyDisplayInfo (AllGoalsWarnings g _ _) <- loadRs] of
+    (case [g | ReplyDisplayInfo AllGoalsWarnings{agwVisibleGoals = g} <- loadRs] of
        (gs:_) -> map goalId gs == [Just 0, Just 1, Just 2, Just 3]
                    && map goalType gs == ["Nat","Nat","Nat","A"]
        _      -> False) ref
@@ -1550,7 +1644,74 @@ replayTests ref = do
     (null [() | ReplyGiveAction{} <- holeRs]) ref
   check "auto-hole-content.jsonl: the goal stayed open after the probe"
     (any ((== "n + 0 ≡ n") . goalType)
-         (concat [gs | ReplyDisplayInfo (AllGoalsWarnings gs _ _) <- holeRs])) ref
+         (concat [gs | ReplyDisplayInfo AllGoalsWarnings{agwVisibleGoals = gs} <- holeRs])) ref
+
+  -- The unsolved-meta trio. These pin BOTH halves of the verdict rule
+  -- (AgdaInteract.Verdict.checkAcceptable) against real transcripts: the
+  -- silent meta must be fatal, and the hole-blocked meta must not be.
+  --
+  -- unsolved-meta.jsonl: a missing record field. Zero errors, zero warnings,
+  -- zero visible goals — the meta is ONLY in invisibleGoals, and the module it
+  -- comes from proves ⊥, so reading errors + visible goals alone is a ✓ over
+  -- un-produced evidence.
+  unsolvedRs <- parseLines "test/interaction/2.8.0/unsolved-meta.jsonl"
+  let unsolvedCo = interpretCheck (SendOk unsolvedRs)
+  check "unsolved-meta.jsonl: the meta is reported ONLY as an invisible goal"
+    (null (coErrors unsolvedCo) && null (coWarnings unsolvedCo)
+       && null (coGoals unsolvedCo)
+       && map goalType (coInvisible unsolvedCo) == ["⊥"]
+       && map goalName (coInvisible unsolvedCo) == [Just "_bad_12"]) ref
+  check "unsolved-meta.jsonl: no hole left ⇒ REFUSED"
+    (checkAcceptable unsolvedCo == Just UnaccUnsolved) ref
+  check "unsolved-meta.jsonl: the verdict says ✗ and names the count"
+    (let v = checkVerdict "Unsolved.agda" unsolvedCo
+     in "✗ does not type-check" `T.isPrefixOf` v
+          && "1 unsolved meta(s)" `T.isInfixOf` v) ref
+  check "unsolved-meta.jsonl: the meta is located in the diagnostics"
+    (let d = renderDiagnostics unsolvedCo
+     in "_bad_12 : ⊥" `T.isInfixOf` d && "(23:5)" `T.isInfixOf` d) ref
+
+  -- stuck-instance.jsonl: two candidate instances. Agda DOES raise an
+  -- [UnsolvedConstraints] error here, and Cmd_constraints carries the
+  -- structured candidate list that makes the report actionable.
+  stuckRs <- parseLines "test/interaction/2.8.0/stuck-instance.jsonl"
+  let stuckCo = interpretCheck (SendOk stuckRs)
+  check "stuck-instance.jsonl: the error message is extracted, not JSON-dumped"
+    (case coErrors stuckCo of
+       (e:_) -> "[UnsolvedConstraints]" `T.isInfixOf` e
+                  && not ("{\"message\"" `T.isInfixOf` e)
+       _     -> False) ref
+  check "stuck-instance.jsonl: the constraint carries both instance candidates"
+    (case coConstraints stuckCo of
+       [c] -> cnKind c == "FindInstanceOF" && cnMeta c == Just "_r_10"
+                && map icValue (cnCandidates c) == ["eqBool1", "eqBool2"]
+       _   -> False) ref
+  check "stuck-instance.jsonl: refused, and the candidates are echoed"
+    (checkAcceptable stuckCo == Just UnaccErrors
+       && "candidates: eqBool1 : Eq Bool, eqBool2 : Eq Bool"
+            `T.isInfixOf` renderDiagnostics stuckCo) ref
+
+  -- hole-blocked.jsonl: an ORDINARY `?` hole also yields an invisible meta
+  -- (the implicit blocked on the hole). Wire-indistinguishable from the
+  -- malignant one above, so the rule keys on the visible goals — this file
+  -- must stay ✓, or every work-in-progress edit would be refused.
+  blockedRs <- parseLines "test/interaction/2.8.0/hole-blocked.jsonl"
+  let blockedCo = interpretCheck (SendOk blockedRs)
+  check "hole-blocked.jsonl: one visible goal AND one invisible meta"
+    (length (coGoals blockedCo) == 1 && map goalType (coInvisible blockedCo) == ["Set"]) ref
+  check "hole-blocked.jsonl: a hole-blocked meta is NOT a refusal"
+    (isNothing (checkAcceptable blockedCo)) ref
+  check "hole-blocked.jsonl: ✓, with the meta counted and qualified"
+    (let v = checkVerdict "HoleBlocked.agda" blockedCo
+     in "✓ type-checks" `T.isPrefixOf` v
+          && "1 unsolved meta(s) (may be blocked on the open goals)" `T.isInfixOf` v) ref
+  -- Byte-identity for a clean load: the counts render only when nonzero, so
+  -- every unaffected file's verdict line is unchanged (and the plugin hook's
+  -- `grep ✗` contract holds).
+  cleanRs <- parseLines (fixtureDir ++ "load.jsonl")
+  check "a clean load's verdict line is unchanged by unsolved reporting"
+    (checkVerdict "Holes.agda" (interpretCheck (SendOk cleanRs))
+       == "✓ type-checks — Holes.agda (4 open goal(s), 0 error(s), 0 warning(s)).") ref
 
   -- make-case.jsonl → MakeCase id 0, Function, 2 clauses
   mcRs <- parseLines (fixtureDir ++ "make-case.jsonl")
@@ -1623,7 +1784,8 @@ mkGoal iid pos ty =
   Goal { goalType = ty
        , goalRange = Just (GoalRange (RangePos 1 1 pos) (RangePos 1 5 (pos + 4)))
        , goalKind = "OfType"
-       , goalId = Just iid }
+       , goalId = Just iid
+       , goalName = Nothing }
 
 goalIdTests :: [Check]
 goalIdTests =

@@ -70,6 +70,14 @@ you specifically want hole-driving or file authoring.
 - `search` filters by `kind` / `state`; pass an empty query to **list** all
   of a kind/state (audit postulates or holes), `module_prefix` to scope,
   `top_level_only: true` to drop where/anonymous locals.
+- `search mode=text` ripgreps the source bytes instead of the graph — use it
+  for pragmas, comments, `using`-lists and regexes the graph doesn't index.
+  Those hits are always current, independent of the graph snapshot.
+- `search unsafe=any` is an `agda --safe`-style audit: every definition
+  carrying a soundness escape. Name one instead of `any` to narrow — a
+  declaration kind (`non-terminating` / `trustme`) or a module OPTIONS flag
+  (`--type-in-type`, `--no-positivity-check`, …). Combine with an empty
+  `query` to enumerate.
 - `search` / `callers` / `callees` take `format: json` for a structured
   `{tool, query, total, shown, items}` envelope (scripting); default is prose.
 - A result tagged `[external: <lib>]` comes from a federated overlay graph
@@ -79,7 +87,8 @@ you specifically want hole-driving or file authoring.
   their `owner`, `callers`/`callees` annotate them with `(in owner)`.
 - `callers`/`callees`: `transitive: true` walks the whole cone;
   `module_prefix` narrows; `by_module: true` gives per-module counts;
-  `provenance: body` (vs `signature`/`where`/`with`) keeps genuine term uses.
+  `provenance: body` (vs `signature`/`module-local`/`with`/`unknown`, with
+  `where` accepted as a legacy spelling of `module-local`) keeps genuine term uses.
   With `transitive`, the provenance filter applies to the first hop.
 - `impact` = transitive-callers as a change-risk summary — run before editing
   a widely-used signature. `locate` also prints a `blast radius` line.
@@ -88,6 +97,8 @@ you specifically want hole-driving or file authoring.
 - `roots name=T`: T's transitive postulates/primitives, each with a witness
   chain. For record-field axioms use `kind=projection module_prefix=<mod>`;
   `by_module: true` for counts, `chains: false` for a bare list.
+  `unsafe=any` turns it into a *transitive* soundness audit — every escape
+  reachable through T's dependency cone, each witnessed by its chain.
 - `type_of`: elaborated type by default; `source=true` for the written
   signature when the elaborated form is noisy.
 - `similar_types` compares signature names; `similar_bodies` compares

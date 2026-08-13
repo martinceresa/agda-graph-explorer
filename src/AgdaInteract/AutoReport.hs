@@ -20,6 +20,9 @@ module AgdaInteract.AutoReport
   , GoalReport(..)
   , AutoAllOutcome(..)
   , noGoalsOutcome
+  , aoHasUnsolved
+  , unsolvedBlock
+  , unsolvedCount
   , renderAutoAll
   , oosNote
   , annotationEdits
@@ -83,15 +86,50 @@ data AutoAllOutcome = AutoAllOutcome
   , aoAllCands  :: ![(Text, Definition)]  -- ^ every hint candidate (for the OOS import-line lookup).
   , aoOosNames  :: ![Text]                -- ^ out-of-scope hint names to report (already nub'd).
   , aoGoals     :: ![GoalReport]          -- ^ per-goal structured view, input order (report/JSON/annotation).
+  , aoMetas     :: ![Text]                -- ^ rendered silent unsolved metas; see 'noGoalsOutcome'.
+  , aoCons      :: ![Text]                -- ^ rendered unsolved constraints; likewise.
   } deriving (Show)
 
 -- | The "loaded, no open goals" outcome (rendered by 'renderAutoAll' as the
 -- standalone note; 'aoNew' is 'Nothing', so the tool applies nothing).
-noGoalsOutcome :: FilePath -> AutoAllOutcome
-noGoalsOutcome file = AutoAllOutcome
+--
+-- @metas@ \/ @cons@ are the file's unsolved metas and constraints, rendered by
+-- the caller. Populated __only here__, because only here are they decisive:
+-- with no hole left, an unsolved meta is un-produced evidence and the file
+-- is not done (batch @agda@ would reject it), so this "no goals" is not a
+-- clean bill of health. While holes remain the same metas are routinely
+-- benign — an implicit blocked on a hole is one — and filling the hole
+-- solves them, so counting them there would fail honest work-in-progress.
+noGoalsOutcome :: FilePath -> [Text] -> [Text] -> AutoAllOutcome
+noGoalsOutcome file metas cons = AutoAllOutcome
   { aoFile = file, aoOrig = "", aoNew = Nothing, aoNoGoals = True
   , aoGoalCount = 0, aoSecs = 0, aoSolved = [], aoUnsolved = []
-  , aoAbort = Nothing, aoAllCands = [], aoOosNames = [], aoGoals = [] }
+  , aoAbort = Nothing, aoAllCands = [], aoOosNames = [], aoGoals = []
+  , aoMetas = metas, aoCons = cons }
+
+-- | Does the file carry un-produced evidence (either flavour)?
+aoHasUnsolved :: AutoAllOutcome -> Bool
+aoHasUnsolved o = not (null (aoMetas o)) || not (null (aoCons o))
+
+-- | The report block naming every unsolved meta \/ constraint. Empty when
+-- there are none, so a clean run's output is unchanged.
+unsolvedBlock :: AutoAllOutcome -> Text
+unsolvedBlock o
+  | not (aoHasUnsolved o) = ""
+  | otherwise = "\n" <> section "Unsolved metas (no hole to fill — Agda inserted these)" (aoMetas o)
+                     <> section "Unsolved constraints" (aoCons o)
+                     <> "These are un-produced evidence, not holes: Mimer cannot fill them \
+                        \(they have no interaction point). Fix the source — a missing record \
+                        \field, an ambiguous instance, an un-inferable implicit."
+  where
+    section _ []     = ""
+    section h xs     = "\n" <> h <> ":\n" <> T.unlines [ "  • " <> x | x <- xs ]
+
+-- | "1 unsolved meta(s)" / "… and 2 unsolved constraint(s)".
+unsolvedCount :: AutoAllOutcome -> Text
+unsolvedCount o = T.intercalate " and " (part "meta" (aoMetas o) ++ part "constraint" (aoCons o))
+  where
+    part label xs = [ showT (length xs) <> " unsolved " <> label <> "(s)" | not (null xs) ]
 
 showT :: Show a => a -> Text
 showT = T.pack . show
@@ -149,6 +187,10 @@ annotationEdits annotate secs orig goals
 -- Byte-identical output is pinned in test/Spec.hs.
 renderAutoAll :: AutoAllOutcome -> Text
 renderAutoAll o
+  | aoNoGoals o, aoHasUnsolved o =
+      "Loaded " <> T.pack (aoFile o) <> " — no open goals, but the module does \
+      \not type-check: " <> unsolvedCount o <> " remain and nothing for Mimer to try.\n"
+        <> unsolvedBlock o
   | aoNoGoals o =
       "Loaded " <> T.pack (aoFile o) <> " — no open goals; nothing for Mimer to try."
   | null (aoSolved o) =

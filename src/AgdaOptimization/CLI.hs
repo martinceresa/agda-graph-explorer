@@ -131,6 +131,9 @@ usage = unlines $
   , "  --numeric-version   print just the version number and exit."
   , "  --show-defaults     print a starter .agda-optimization.yml skeleton (global +"
   , "                      one section per subcommand) to stdout and exit."
+  , "  --completion-script[=bash|zsh]"
+  , "                      print a shell completion script (generated from the"
+  , "                      flag table, so it can't drift) and exit; default bash."
   , ""
   , "YAML CONFIG:"
   , "  Defaults can also be loaded from a YAML file (CLI flags override)."
@@ -147,8 +150,10 @@ usage = unlines $
   , "EXIT CODES:"
   , "  0  success."
   , "  1  error: bad flags/subcommand, unreadable or mismatched graph, config failure."
-  , "  2  fiedler: helper script (scripts/fiedler_helper.py) not found."
+  , "  2  fiedler: helper unavailable — scripts/fiedler_helper.py not found, or"
+  , "     the python interpreter could not be invoked."
   , "  3  fiedler: SciPy/NumPy not importable in the helper's Python."
+  , "  4  fiedler: any other helper fault (non-zero exit, unparseable output)."
   ]
   where
     pad n s = s ++ replicate (max 0 (n - length s)) ' '
@@ -364,7 +369,8 @@ completionSpec = CompletionSpec
   , csGlobals =
       [ "--graph", "--format", "--json", "--out", "--config"
       , "--explain", "--no-explain"
-      , "--help", "--version", "--numeric-version", "--show-defaults" ]
+      , "--help", "--version", "--numeric-version", "--show-defaults"
+      , "--completion-script" ]
   , csSubcommands =
       [ (name, map (("--" ++) . fst) (subFlagPairs name)) | (name, _) <- subcommands ]
   }
@@ -375,7 +381,7 @@ run = do
   -- `--show-defaults` prints a config skeleton and exits before subcommand /
   -- graph handling, so it works from anywhere (no graph.json needed).
   when ("--show-defaults" `elem` argv0) (putStr defaultsYaml >> exitSuccess)
-  -- `--completion-script[=bash|zsh]` (hidden): print a shell completion script
+  -- `--completion-script[=bash|zsh]`: print a shell completion script
   -- generated from the flag table, then exit. Bare form defaults to bash.
   case [ s | a <- argv0, Just s <- [stripPrefix "--completion-script" a]
            , s == "" || take 1 s == "=" ] of

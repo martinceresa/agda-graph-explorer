@@ -271,7 +271,7 @@ scanReplies = go Nothing Nothing
     go mErr mGs (r:rs) = case r of
       ReplyDisplayInfo (ErrorReply msg)
         -> go (mErr <|> Just msg) mGs rs
-      ReplyDisplayInfo (AllGoalsWarnings gs _ _)
+      ReplyDisplayInfo AllGoalsWarnings{agwVisibleGoals = gs}
         -> go mErr (mGs <|> Just gs) rs
       _ -> go mErr mGs rs
 

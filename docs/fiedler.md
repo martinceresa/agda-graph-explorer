@@ -62,8 +62,11 @@ The top bridge edge and the lowest-λ₂ module.
 
 `pip install scipy numpy`. This is the **only** subcommand that shells out.
 Helper precedence: `--helper=PATH` > `$AGDA_OPTIMIZATION_HELPER` > the cabal
-`data-files` path. Exit codes are distinct: **2** = helper script not found,
-**3** = SciPy/NumPy not importable. Both print a clean stderr diagnostic.
+`data-files` path. Exit codes are distinct: **2** = helper unavailable (script
+not found, or the interpreter could not be invoked), **3** = SciPy/NumPy not
+importable, **4** = any other helper fault (non-zero exit, unparseable output).
+Each prints a clean stderr diagnostic, and `--json` records the same cause under
+`reason`.
 
 See also: [`chokepoint`](chokepoint.md) (local cuts),
 [`strata`](strata.md) (declared-hierarchy cohesion).

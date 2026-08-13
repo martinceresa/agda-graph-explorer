@@ -23,6 +23,7 @@ module AgdaGraph.Interaction.Iotcm
   , iotcmGive
   , iotcmRefineOrIntro
   , iotcmAutoOne
+  , iotcmConstraints
   ) where
 
 import Data.List (intercalate)
@@ -103,6 +104,17 @@ iotcmAutoOne :: FilePath -> Rewrite -> Int -> String -> String
 iotcmAutoOne modPath rw iid opts =
   frame modPath $
     "Cmd_autoOne " ++ renderRewrite rw ++ " " ++ show iid ++ " noRange " ++ show opts
+
+-- | @Cmd_constraints@ — the constraints the current session could not
+-- solve, as a @Constraints@ display info. Nullary, so the frame's parens
+-- wrap a bare constructor (Agda's @read@ accepts that).
+--
+-- Read /after/ a load, in the same session: this is the actionable form of
+-- a stuck instance search (it carries the candidate list). A plain unsolved
+-- meta produces no constraint — that one only shows up in the load's
+-- @invisibleGoals@.
+iotcmConstraints :: FilePath -> String
+iotcmConstraints modPath = frame modPath "Cmd_constraints"
 
 showStringList :: [String] -> String
 showStringList ss = "[" ++ intercalate "," (map show ss) ++ "]"

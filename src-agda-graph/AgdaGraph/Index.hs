@@ -30,6 +30,7 @@ module AgdaGraph.Index
   , ancestors
   , closureFrom
   , unsafeDeps
+  , unsolvedDeps
   , moduleDependencyOrder
 
     -- * Node-key names
@@ -178,6 +179,9 @@ buildIndex ExpandedGraph{..} =
             , defAccess = Public
             , defSig    = Nothing
             , defUnsafe = []
+            -- A synthetic node is an edge target we never saw a def for, so
+            -- there is nothing unsolved to report about it.
+            , defUnsolvedMetas = 0
             , defX      = 0
             , defY      = 0
             , defOrigin = Nothing
@@ -346,6 +350,20 @@ ancestors ix seeds = closureFrom False (idxReverse ix) seeds
 unsafeDeps :: Index -> Int -> [Int]
 unsafeDeps ix i =
   filter (not . null . defUnsafe . defAt ix)
+         (IS.toAscList (descendants ix (IS.singleton i)))
+
+-- | Transitive dependencies that rest on un-produced evidence: their
+-- elaboration left __silent__ unsolved metas ('defUnsolvedMetas') — a missing
+-- record field, a failed instance search — as opposed to honest @?@ holes.
+--
+-- Deliberately NOT folded into 'unsafeDeps': a soundness escape
+-- (@NON_TERMINATING@, @--type-in-type@) breaks @agda --safe@ but the module
+-- still type-checks, whereas an unsolved meta means the module does not
+-- type-check at all under default flags. Same shape of question, different
+-- answer to give the user.
+unsolvedDeps :: Index -> Int -> [Int]
+unsolvedDeps ix i =
+  filter ((> 0) . defUnsolvedMetas . defAt ix)
          (IS.toAscList (descendants ix (IS.singleton i)))
 
 -- | Modules in dependency-first order: a module used by another (its

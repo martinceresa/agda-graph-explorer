@@ -41,6 +41,9 @@ GLOBAL OPTIONS:
   --numeric-version   print just the version number and exit.
   --show-defaults     print a starter .agda-optimization.yml skeleton (global +
                       one section per subcommand) to stdout and exit.
+  --completion-script[=bash|zsh]
+                      print a shell completion script (generated from the
+                      flag table, so it can't drift) and exit; default bash.
 
 YAML CONFIG:
   Defaults can also be loaded from a YAML file (CLI flags override).
@@ -57,5 +60,7 @@ Run 'agda-optimization <subcommand> --help' for subcommand-specific options.
 EXIT CODES:
   0  success.
   1  error: bad flags/subcommand, unreadable or mismatched graph, config failure.
-  2  fiedler: helper script (scripts/fiedler_helper.py) not found.
+  2  fiedler: helper unavailable — scripts/fiedler_helper.py not found, or
+     the python interpreter could not be invoked.
   3  fiedler: SciPy/NumPy not importable in the helper's Python.
+  4  fiedler: any other helper fault (non-zero exit, unparseable output).

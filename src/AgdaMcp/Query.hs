@@ -174,11 +174,21 @@ unsafeSuffix d = case defUnsafe d of
   [] -> ""
   us -> "  [unsafe: " <> T.intercalate ", " us <> "]"
 
+-- | @[unsolved: 1 meta(s)]@ tag for a def whose elaboration left __silent__
+-- unsolved metas ('defUnsolvedMetas') — un-produced evidence, not an honest
+-- @?@ hole (which shows as the @H@ state instead). Only ever nonzero when the
+-- producer ran with @--allow-unsolved-metas@ / @--lenient-imports@; empty
+-- otherwise, so a normal corpus's listings are unchanged.
+unsolvedSuffix :: Definition -> Text
+unsolvedSuffix d
+  | defUnsolvedMetas d <= 0 = ""
+  | otherwise = "  [unsolved: " <> tshow (defUnsolvedMetas d) <> " meta(s)]"
+
 oneLine :: Definition -> Text
 oneLine d =
   "- `" <> defName d <> "` [" <> renderKind (defKind d)
         <> stateSuffix (defState d) <> "] " <> loc d
-        <> unsafeSuffix d <> originSuffix d
+        <> unsafeSuffix d <> unsolvedSuffix d <> originSuffix d
 
 -- | The distinct soundness-escape kinds ('defUnsafe') carried by a set of
 -- node ids, sorted. Backs the transitive-taint banners.
@@ -206,6 +216,43 @@ rootsTaintBanner ix d = case unsafeDeps ix (defId d) of
            <> " (e.g. `" <> defName (defAt ix i0) <> "`), so it is not "
            <> "`agda --safe`. Run `roots " <> defName d
            <> " unsafe=any` for the witnessed chain(s).\n\n"
+
+-- | ⚠ un-produced-evidence banner: flags a definition whose elaboration — or
+-- that of anything in its dependency cone ('unsolvedDeps') — left __silent__
+-- unsolved metas, so a theorem that looks proved rests on evidence nobody
+-- supplied.
+--
+-- Distinct from the soundness banners above, and shown by both @roots@ and
+-- @impact@: an escaping definition still type-checks (it merely breaks
+-- @--safe@), while these do not type-check at all without
+-- @--allow-unsolved-metas@. Unlike 'rootsTaintBanner' this includes the
+-- subject's own count — an incomplete subject is the whole finding, and for
+-- @impact@ everything downstream inherits it. Empty for any normally-built
+-- corpus.
+unsolvedTaintBanner :: Index -> Definition -> Text
+unsolvedTaintBanner ix d
+  | own <= 0, null deps = ""
+  | otherwise =
+      "⚠ un-produced evidence: " <> subject <> viaDeps
+        <> ". Those metas are missing evidence, NOT open goals, so the proof is \
+           \incomplete even though nothing is postulated — \
+           \`--allow-unsolved-metas` is the only reason it built. Fix the \
+           \definition(s) and re-check.\n\n"
+  where
+    own  = defUnsolvedMetas d
+    deps = unsolvedDeps ix (defId d)
+    metas n = tshow n <> " silently unsolved metavariable(s)"
+    subject
+      | own > 0   = "`" <> defName d <> "` carries " <> metas own
+      | otherwise = "`" <> defName d <> "` transitively rests on "
+                      <> tshow (length deps) <> " definition(s) carrying "
+                      <> metas (sum [ defUnsolvedMetas (defAt ix j) | j <- deps ])
+    viaDeps = case (own > 0, deps) of
+      (True,  i0 : _) -> ", and rests on " <> tshow (length deps)
+                           <> " definition(s) with more (e.g. `"
+                           <> defName (defAt ix i0) <> "`)"
+      (False, i0 : _) -> " (e.g. `" <> defName (defAt ix i0) <> "`)"
+      _               -> ""
 
 -- | ⚠ soundness-taint banner for @impact@: if the subject carries a direct
 -- escape /or/ rests on one transitively, every definition that depends on
@@ -564,6 +611,11 @@ queryLocate ld name = case resolveDefNote ld name of
          [ "  unsafe:   " <> T.intercalate ", " (defUnsafe d)
              <> " (direct soundness escape — breaks `agda --safe`)"
          | not (null (defUnsafe d)) ] ++
+         [ "  unsolved: " <> tshow (defUnsolvedMetas d)
+             <> " silent unsolved meta(s) — un-produced evidence Agda inserted \
+                \(missing record field / failed instance search), NOT an open \
+                \goal; this module only compiles under --allow-unsolved-metas"
+         | defUnsolvedMetas d > 0 ] ++
          [ "  owner:    " <> defName o <> maybe "" ((":" <>) . tshow) (defLine o)
          | Just o <- [ownerOf ld d] ] ++
          [ "  origin:   external overlay `" <> og <> "` — needs an `open import` before use; \
@@ -726,7 +778,7 @@ queryImpact ld lim name = case resolveDefNote ld name of
         topMods = take 12 (sortBy (comparing (Down . snd)) byMod)
     in if IS.null trans
          then "Changing `" <> name <> "` is safe: nothing depends on it."
-         else (impactTaintBanner ix d <>) $ (<> coverageFootnote ld) $ T.unlines $
+         else (unsolvedTaintBanner ix d <>) $ (impactTaintBanner ix d <>) $ (<> coverageFootnote ld) $ T.unlines $
            [ "Changing `" <> name <> "` (its type/signature) could affect:"
            , "  " <> tshow (IS.size trans) <> " definition(s) transitively, "
                   <> tshow (IS.size direct) <> " directly."
@@ -913,8 +965,12 @@ queryRoots ld lim byMod chains mModPrefix mKindTxt mStateTxt mUnsafe name =
             n     = length roots
             descr = filterDescr mKindTxt mStateTxt mModPrefix
             -- No explicit filter ⇒ surface the transitive escape taint
-            -- passively; with `unsafe=` the body already enumerates it.
-            banner = if isJust mUnsafe then "" else rootsTaintBanner ix d
+            -- passively; with `unsafe=` the body already enumerates it. The
+            -- un-produced-evidence banner is never suppressed: `unsafe=` does
+            -- not enumerate unsolved metas (a different question), and an
+            -- incomplete proof is the more serious finding of the two.
+            banner = unsolvedTaintBanner ix d
+                       <> (if isJust mUnsafe then "" else rootsTaintBanner ix d)
             -- One forward BFS from the subject builds the shortest-path
             -- tree; every root's witness chain is then a cheap backtrace
             -- through it, instead of a fresh BFS per root.

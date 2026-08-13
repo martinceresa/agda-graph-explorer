@@ -150,6 +150,24 @@ it) — check it first when `AgdaGraph.Schema` drifts on a decode failure.
 - **Signatures.** Under `--with-signatures`, each definition carries an
   optional `"type"` string → `Definition.defSig`, consumed by `type_of`.
 
+- **Un-produced evidence.** Two additive optional fields (no `v` /
+  `nodeKeyVersion` bump) distinguish *missing* evidence from an *honest* hole,
+  which `state: "H"` alone cannot: per-def `unsolvedMetas` (count of **silent**
+  non-interaction metas → `Definition.defUnsolvedMetas`, omitted when 0) and
+  top-level `unsolvedModules` (`{ module → {metas: [line], constraints:
+  [line]} }` → `ExpandedGraph.egUnsolvedModules`, omitted when empty). So `H`
+  with no count is an open goal someone is working on; `H` **with** a count is
+  evidence nobody supplied. Only reachable when the producer ran with
+  `--allow-unsolved-metas` / `--lenient-imports` — there Agda postulates the
+  open metas and the module *succeeds*, so `--keep-going`'s catch never fires
+  and **`failedModules: []` does not mean "compiles"**. Meta lines are exact;
+  constraint lines are best-effort (highlighting spans, so two on one line
+  collapse) — count metas, treat constraints as locations.
+  `AgdaGraph.Index.unsolvedDeps` is the transitive query behind the ⚠
+  un-produced-evidence banner on `roots` / `impact`, kept **separate** from
+  `unsafeDeps`: a soundness escape still type-checks (it only breaks
+  `--safe`), while an unsolved meta means the module doesn't type-check at all.
+
 - **Module option escapes.** Optional top-level `moduleOptionEscapes`
   (`{ module → [flag] }`, ascending, escaping modules only, omitted when
   empty) → `ExpandedGraph.egModuleOptionEscapes`. Carries the file-level
@@ -353,6 +371,13 @@ src/
                                 + wildcard/all-give discriminators + the
                                 inspect/scratch op enums + validators. Extracted
                                 so the offline suite tests routing agda-free.
+    Verdict.hs                  PURE ✓/✗ verdict: CheckOutcome (errors,
+                                warnings, visible goals, invisible metas,
+                                unsolved constraints) + interpretCheck +
+                                checkAcceptable — THE rule, read by `check` and
+                                every write gate — + the report renderers.
+                                State-free (the Batch pattern) so the offline
+                                suite pins the truth table agda-free.
     Annotate.hs                 PURE in-hole marker grammar (agda-auto Phase C):
                                 renderMarker/parseMarker/stripMarker/annotateHole
                                 + holeHints (the read side — hole text → hint
@@ -706,6 +731,33 @@ plugin/                         Claude Code plugin: agda-explore MCP server +
   and splicing uses `Data.Text` char indexing (`AgdaInteract.Edit`), never
   bytes (`→` is one char, three bytes). `AgdaInteract.Literate.isInsideCode`
   refuses splices into prose.
+
+- **An unsolved meta is an unnamed axiom, and the ✗ rule keys on the VISIBLE
+  goals being empty — don't "simplify" it to unconditional.** Agda's
+  interaction mode is built for editors, where a hole-carrying file must stay
+  loadable, so it does *not* promote `[UnsolvedMetaVariables]` /
+  `[UnsolvedConstraints]` to errors the way batch `agda` does at the end of a
+  module. A silently-inserted meta (missing record field, un-inferable
+  implicit, failed instance search) is therefore neither an error nor a
+  `?`-goal: it arrives in `AllGoalsWarnings.invisibleGoals` with the errors
+  **and** warnings lists empty (pinned by
+  `test/interaction/2.8.0/unsolved-meta.jsonl`). Reading only errors + visible
+  goals reported a clean ✓ over a module that proves `⊥`.
+  `AgdaInteract.Verdict.checkAcceptable` is the single rule (`check`'s verdict
+  **and** every write gate read it): unacceptable iff errors, **or** no visible
+  goal remains and metas/constraints are unsolved. It cannot be unconditional
+  because an ordinary `?` hole *also* yields an invisible meta — an implicit
+  blocked on the hole's eventual content
+  (`test/interaction/2.8.0/hole-blocked.jsonl`), wire-indistinguishable from
+  the malignant one — so gating on any invisible meta would refuse every
+  work-in-progress file. Gating on "no hole left" fires exactly when the file
+  would be handed to batch `agda`. Invisible metas get **no** stable goal id
+  (they have no interaction point, so Mimer cannot act on them): report-only,
+  never addressable. Counts render only when nonzero, so a clean file's verdict
+  line stays byte-identical (the plugin hook greps `✗`). Constraints come from
+  a second `Cmd_constraints` round-trip appended to the load burst
+  (`withConstraints`) — that is the only place a stuck *instance*'s candidate
+  list is machine-readable.
 
 - **The write-side bridge enforces a hard zero-axiom contract and by default
   does not write.** `AgdaInteract.Guard.checkGiveInput` rejects `postulate` /

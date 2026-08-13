@@ -72,8 +72,9 @@ CLI**.
 |---|---|
 | `0` | success. |
 | `1` | bad flags/subcommand, unreadable or mismatched graph, config failure. |
-| `2` | [`fiedler`](fiedler.md) only: helper script not found. |
+| `2` | [`fiedler`](fiedler.md) only: helper unavailable — script not found, or the interpreter could not be invoked. |
 | `3` | [`fiedler`](fiedler.md) only: SciPy/NumPy not importable. |
+| `4` | [`fiedler`](fiedler.md) only: any other helper fault (non-zero exit, unparseable output). |
 
 ## Extra inputs
 

@@ -30,6 +30,8 @@ module AgdaGraph.Interaction.Protocol
   , Goal(..)
   , GoalRange(..)
   , RangePos(..)
+  , ConstraintEntry(..)
+  , InstanceCandidate(..)
 
     -- * Parsing
   , parseReply
@@ -70,12 +72,26 @@ data Reply
 -- to 'OtherDisplayInfo'.
 data DisplayInfo
   = AllGoalsWarnings
-      { agwVisibleGoals :: ![Goal]
-      , agwErrors       :: ![Text]
-      , agwWarnings     :: ![Text]
+      { agwVisibleGoals   :: ![Goal]
+      , agwInvisibleGoals :: ![Goal]
+      , agwErrors         :: ![Text]
+      , agwWarnings       :: ![Text]
       }
     -- ^ Fired after @Cmd_load@ (and after a successful @Cmd_give@) —
     -- enumerates every visible goal in the loaded module.
+    --
+    -- @agwInvisibleGoals@ are the unsolved metas that are __not__
+    -- interaction points: a missing record field, an un-inferable implicit,
+    -- a stuck instance argument. Batch @agda@ promotes these to
+    -- @[UnsolvedMetaVariables]@ errors at the end of a module; the
+    -- interaction mode (built for editors, where a hole-carrying file must
+    -- stay loadable) reports them here with @errors@ and @warnings@ both
+    -- empty — so a consumer that reads only @agwErrors@ and
+    -- @agwVisibleGoals@ sees a clean load over un-produced evidence.
+    -- Note they are routine and benign for a file that still has holes (an
+    -- implicit blocked on a hole's eventual content is one), which is why
+    -- the verdict rule keys on @agwVisibleGoals@ being empty — see
+    -- @AgdaInteract.Tools.checkAcceptable@.
   | GoalSpecific !Int !GoalInfo
     -- ^ @info.kind == "GoalSpecific"@. The 'Int' is
     -- @interactionPoint.id@; the 'GoalInfo' is the @goalInfo@ payload.
@@ -85,9 +101,42 @@ data DisplayInfo
     -- @info.error.message@ — for a rejected @give@/@refine@ this is the
     -- localized type error (it embeds the source location). Surfaced to
     -- the user verbatim.
+  | ConstraintsReply ![ConstraintEntry]
+    -- ^ @info.kind == "Constraints"@ — the reply to @Cmd_constraints@:
+    -- the constraints Agda could not solve. Empty for a clean load /and/
+    -- for a plain unsolved meta (which carries no constraint); non-empty
+    -- for a stuck instance search, where it is the actionable form (it
+    -- carries the candidate list).
   | OtherDisplayInfo !Text
     -- ^ The display-info @kind@ string; payload discarded.
   deriving (Show)
+
+-- | One entry of a 'ConstraintsReply'. Deliberately shallow: Agda's
+-- constraint vocabulary is large and unversioned, so only the fields that
+-- generalise across kinds are destructured and 'cnRaw' keeps the compact
+-- JSON as the fallback rendering for a shape we don't recognise.
+data ConstraintEntry = ConstraintEntry
+  { cnKind       :: !Text
+    -- ^ @constraint.kind@ (e.g. @FindInstanceOF@); @""@ when absent.
+  , cnMeta       :: !(Maybe Text)
+    -- ^ The blocked meta's name off @constraint.constraintObj@ (a bare
+    -- string here, unlike the goal object in an 'AllGoalsWarnings').
+  , cnType       :: !(Maybe Text)
+    -- ^ @constraint.type@, for the kinds that carry one.
+  , cnCandidates :: ![InstanceCandidate]
+    -- ^ @constraint.candidates@ — what an instance search had to choose
+    -- between. Echoing these is what makes a stuck-instance report
+    -- actionable.
+  , cnRange      :: !(Maybe GoalRange)
+  , cnRaw        :: !Text
+    -- ^ Compact JSON of the whole entry; rendered when 'cnKind' is empty.
+  } deriving (Show)
+
+-- | One @{value, type}@ candidate of an instance-resolution constraint.
+data InstanceCandidate = InstanceCandidate
+  { icValue :: !Text
+  , icType  :: !Text
+  } deriving (Show)
 
 -- | The @goalInfo@ payload on a 'GoalSpecific' display info.
 data GoalInfo
@@ -141,6 +190,10 @@ data Goal = Goal
     -- ^ Agda's current interaction-point integer (@constraintObj.id@).
     -- Renumbered on every reload — see "AgdaInteract.GoalId" for the
     -- stable-id layer built on top of this.
+  , goalName  :: !(Maybe Text)
+    -- ^ @constraintObj.name@ — the meta's internal name (@_bad_12@). Set
+    -- for an /invisible/ goal, which has a name but no interaction id
+    -- (the reverse of a visible one); the only handle for reporting it.
   } deriving (Show)
 
 -- | Source range of a goal — start and end positions.
@@ -238,14 +291,19 @@ displayInfoParser = A.withObject "DisplayInfo" $ \o -> do
   k <- o .: "kind"
   case (k :: Text) of
     "AllGoalsWarnings" -> do
-      gs    <- o .:? "visibleGoals" .!= []
-      errs  <- o .:? "errors"       .!= []
-      warns <- o .:? "warnings"     .!= []
+      gs    <- o .:? "visibleGoals"   .!= []
+      igs   <- o .:? "invisibleGoals" .!= []
+      errs  <- o .:? "errors"         .!= []
+      warns <- o .:? "warnings"       .!= []
       pure AllGoalsWarnings
-        { agwVisibleGoals = gs
-        , agwErrors       = map textyShow errs
-        , agwWarnings     = map textyShow warns
+        { agwVisibleGoals   = gs
+        , agwInvisibleGoals = igs
+        , agwErrors         = map textyShow errs
+        , agwWarnings       = map textyShow warns
         }
+    "Constraints" -> do
+      cs <- o .:? "constraints" .!= []
+      pure (ConstraintsReply cs)
     "GoalSpecific" -> do
       iid <- interactionPointId o
       gi  <- o .: "goalInfo" >>= goalInfoParser
@@ -273,11 +331,15 @@ goalInfoParser = A.withObject "goalInfo" $ \o -> do
     other          -> pure (GiOther other)
 
 -- | Errors / warnings can be strings or objects depending on the Agda
--- version. Grab the string form, else a tagged encode.
+-- version. Grab the string form, the object's rendered @message@ when it
+-- has one (2.8 wraps each entry as @{"message": …}@ — the raw encode of
+-- that is unreadable in a report), else a tagged encode.
 textyShow :: A.Value -> Text
 textyShow = \case
   A.String t -> t
-  v          -> T.pack (BLC.unpack (A.encode v))
+  v          -> case A.parseMaybe (A.withObject "msg" (.: "message")) v of
+    Just t  -> t
+    Nothing -> T.pack (BLC.unpack (A.encode v))
 
 instance A.FromJSON ContextEntry where
   parseJSON = A.withObject "ContextEntry" $ \o -> ContextEntry
@@ -298,12 +360,47 @@ instance A.FromJSON Goal where
     ty <- o .:? "type"  .!= ""
     mr <- parseGoalRange o
     mi <- parseGoalId o
+    mn <- parseGoalName o
     pure Goal
       { goalType  = ty
       , goalRange = mr
       , goalKind  = k
       , goalId    = mi
+      , goalName  = mn
       }
+
+-- | The meta's internal name, nested at @constraintObj.name@ (invisible
+-- goals) or flat (defensive).
+parseGoalName :: A.Object -> A.Parser (Maybe Text)
+parseGoalName o = do
+  cobj <- o .:? "constraintObj"
+  case cobj of
+    Just c  -> A.withObject "constraintObj" (\c' -> c' .:? "name") c
+    Nothing -> o .:? "name"
+
+instance A.FromJSON ConstraintEntry where
+  parseJSON v = flip (A.withObject "ConstraintEntry") v $ \o -> do
+    inner <- o .:? "constraint"
+    rng   <- parseRangeArray o
+    let raw = T.pack (BLC.unpack (A.encode v))
+    case inner of
+      Nothing -> pure (ConstraintEntry "" Nothing Nothing [] rng raw)
+      Just c  -> flip (A.withObject "constraint") c $ \c' -> do
+        k     <- c' .:? "kind" .!= ""
+        ty    <- c' .:? "type"
+        cands <- c' .:? "candidates" .!= []
+        -- A bare string here, unlike the object form in an AllGoalsWarnings
+        -- goal; accept either so one shape change doesn't fail the decode.
+        mMeta <- c' .:? "constraintObj" >>= \case
+          Just (A.String s) -> pure (Just s)
+          Just obj@A.Object{} -> A.withObject "constraintObj" (\m -> m .:? "name") obj
+          _                 -> pure Nothing
+        pure (ConstraintEntry k mMeta ty cands rng raw)
+
+instance A.FromJSON InstanceCandidate where
+  parseJSON = A.withObject "InstanceCandidate" $ \o -> InstanceCandidate
+    <$> o .:? "value" .!= ""
+    <*> o .:? "type"  .!= ""
 
 -- | The interaction-point integer. In @AllGoalsWarnings@ goals it is
 -- nested at @constraintObj.id@.

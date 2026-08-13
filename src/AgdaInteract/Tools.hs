@@ -75,6 +75,7 @@ import           AgdaInteract.Guard
 import           AgdaInteract.Literate
 import           AgdaInteract.Registry
 import           AgdaInteract.Session
+import           AgdaInteract.Verdict
 import           AgdaMcp.Inspect         (GoalLite (..), InspectEvent (..),
                                           emitInspect)
 import           AgdaMcp.Query           (queryFindLemma, goalHintCands)
@@ -181,7 +182,10 @@ interactTools =
   , Tool "check"
       "[prove] Type-check a module in the live session → ✓/✗, every error and warning, \
       \and open goals with stable ids + (line:col); when goals remain it probes \
-      \them with Mimer and reports ready-made solutions inline. Pass `content` \
+      \them with Mimer and reports ready-made solutions inline. ✗ also covers \
+      \unsolved metavariables — evidence Agda silently inserted (a missing record \
+      \field, an ambiguous instance) that is NOT a hole and cannot be filled by \
+      \Mimer; the count and location are reported. Pass `content` \
       \to dry-run proposed text without writing. Use instead of `agda <file>`. \
       \When a goal is stuck, reach for `lemmas` (find a reusable lemma), `auto` \
       \(Mimer with graph-ranked hints), or a `construct` case_split/refine step \
@@ -195,7 +199,9 @@ interactTools =
       "Author a WHOLE definition or file — the validated, zero-axiom counterpart \
       \to a blind `Write`. Supply EXACTLY ONE of `content` (full file text; also \
       \creates a new file) or `append` (a def block spliced onto the end). \
-      \Guarded + type-checked; returns a diff, or the localized errors unchanged."
+      \Guarded + type-checked; returns a diff, or the localized errors unchanged. \
+      \Refused if the content elaborates with unsolved metavariables and no hole \
+      \left to fill them — that is an unnamed axiom, same tier as a `postulate`."
       (objSchema [ ("file", sp "Target module file (created if it doesn't exist, in `content` mode).")
                  , ("content", sp "Full proposed file text. Mutually exclusive with `append`.")
                  , ("append", sp "A definition block to append to the existing file. Mutually exclusive with `content`.")
@@ -324,10 +330,10 @@ runLoad ss a = case argText a "file" of
   Just f  -> do
     r <- doLoad ss (absFile ss f)
     case r of
-      Left err            -> pure (Left err)
-      Right (_, _, es, fp) -> do
-        emitGoals ss fp es
-        pure (Right (renderGoals fp es))
+      Left err -> pure (Left err)
+      Right lr -> do
+        emitGoals ss (lrFile lr) (lrGoals lr)
+        pure (Right (renderGoals (lrFile lr) (lrCheck lr) (lrGoals lr)))
 
 -- | Broadcast a module's on-disk body + open goals to the web inspector's
 -- editing view (a no-op when @--inspect@ is off). Best-effort: an unreadable
@@ -735,8 +741,12 @@ autoAllCore ss a = do
       r <- doLoad ss file
       case r of
         Left err -> pure (Left err)
-        Right (sess, _, es, _)
-          | null es   -> pure (Right (noGoalsOutcome file))
+        Right (LoadResult sess _ es _ co)
+          -- No hole to fill: report the unsolved state, which is decisive here
+          -- (see 'noGoalsOutcome') — a silent meta means the module does not
+          -- type-check and Mimer has nothing it can act on.
+          | null es   -> pure (Right (noGoalsOutcome file (map renderInvisible (coInvisible co))
+                                                          (map renderConstraint (coConstraints co))))
           | otherwise -> do
               ef <- readSourceStamped ss file
               case ef of
@@ -822,6 +832,9 @@ autoAllCore ss a = do
                         , aoAllCands  = recAllCands hintedRecs
                         , aoOosNames  = nub (recPreOosNames hintedRecs ++ recBounced hintedRecs)
                         , aoGoals     = goals
+                        -- Empty by design while holes remain: see 'noGoalsOutcome'.
+                        , aoMetas     = []
+                        , aoCons      = []
                         }
                   case if null allEdits then Right Nothing else Just <$> spliceRanges orig allEdits of
                     Left ov    -> pure (Left ov)
@@ -1149,20 +1162,28 @@ loadRenamedTemp ss targetFile candidate = do
           case es of
             Left e     -> pure (Left ("agda could not start: " <> e))
             Right sess -> do
-              out <- sendIotcm sess (iotcmLoad tmpFile (loadIncludes ss tmpFile))
+              out0 <- sendIotcm sess (iotcmLoad tmpFile (loadIncludes ss tmpFile))
+              -- Before the session goes away: the dry-run verdict needs the
+              -- unsolved state as much as the live one does.
+              out  <- withConstraints sess tmpFile out0
               closeSession sess
               pure (Right out)
   _ <- try (removePathForcibly tmpDir) :: IO (Either SomeException ())
   pure r
 
 -- | Pass/fail validation of candidate text (used by @promote@): 'Right ()'
--- iff it type-checks (remaining holes are fine). Built on 'loadRenamedTemp'.
+-- iff it type-checks (remaining holes are fine, un-produced evidence is not
+-- — 'checkAcceptable'). Built on 'loadRenamedTemp'.
 validateCandidate :: ServerState -> FilePath -> Text -> IO (Either Text ())
 validateCandidate ss targetFile candidate = do
   r <- loadRenamedTemp ss targetFile candidate
   pure $ case r of
     Left e    -> Left e
-    Right out -> either Left (const (Right ())) (interpretLoad out)
+    Right out ->
+      let co = interpretCheck out
+      in case checkAcceptable co of
+           Nothing  -> Right ()
+           Just why -> Left (refusalClause co why <> renderDiagnostics co)
 
 -- | Splice @repl@ over the hole's range, guarding that the hole is inside a
 -- code block. Marks the session dirty (its in-memory state has diverged
@@ -1212,11 +1233,12 @@ applyOrDiff ss write file old new
                 Right () -> do
                   r <- doLoadAfterWrite ss (contentStamp new) file
                   case r of
-                    Left err            ->
+                    Left err ->
                       pure (Right (wroteMsg file d <> "\n\n⚠ reloaded with a problem: " <> err))
-                    Right (_, _, es, fp) -> do
-                      emitGoals ss fp es
-                      pure (Right (wroteMsg file d <> "\n\n" <> renderGoals fp es))
+                    Right lr -> do
+                      emitGoals ss (lrFile lr) (lrGoals lr)
+                      pure (Right (wroteMsg file d <> "\n\n"
+                                     <> renderGoals (lrFile lr) (lrCheck lr) (lrGoals lr)))
   where
     d = unifiedDiff file old new
 
@@ -1363,7 +1385,10 @@ loadAndSync ss mExpect file = modifyMVar (ssSessions ss) $ \m -> do
       -- during the load makes the bracket unstable → stamp unknown → the
       -- entry is dirty and mutators refuse until a clean reload.
       preH  <- stampOf file
-      out   <- sendIotcm sess (iotcmLoad file (loadIncludes ss file))
+      out0  <- sendIotcm sess (iotcmLoad file (loadIncludes ss file))
+      -- Read the unsolved-constraint state while we still hold the session:
+      -- part of the load's settled diagnostics, not a separate query.
+      out   <- withConstraints sess file out0
       postH <- stampOf file
       now   <- getCurrentTime
       -- Reuse the existing last-used cell when reloading a known file (so its
@@ -1380,29 +1405,37 @@ loadAndSync ss mExpect file = modifyMVar (ssSessions ss) $ \m -> do
       m2 <- capSessions (cfgMaxSessions (ssConfig ss)) file m1
       pure (m2, Right (sess, gm1, es, out))
 
--- | (Re)load a module, returning the session, the new goal map, the goal
--- entries, and the file path — or the load error. Wraps 'loadAndSync',
--- returning 'Left' on a load error. Offset-keyed goal ids are reset unless
--- the content is unchanged since the prior load.
-doLoad :: ServerState -> FilePath -> IO (Either Text (Session, GoalMap, [GoalEntry], FilePath))
+-- | A settled (re)load. Carries the load's full diagnostics ('lrCheck')
+-- alongside the goals so a caller that reports "no open goals" can also see
+-- the unsolved metas that claim would otherwise mask.
+data LoadResult = LoadResult
+  { lrSession :: !Session
+  , lrGoalMap :: !GoalMap
+  , lrGoals   :: ![GoalEntry]
+  , lrFile    :: !FilePath
+  , lrCheck   :: !CheckOutcome
+  }
+
+-- | (Re)load a module, returning the settled 'LoadResult' — or the load
+-- error. Wraps 'loadAndSync', returning 'Left' on a load error. Offset-keyed
+-- goal ids are reset unless the content is unchanged since the prior load.
+doLoad :: ServerState -> FilePath -> IO (Either Text LoadResult)
 doLoad ss = doLoadWith ss Nothing
 
 -- | 'doLoad' after a bridge-initiated write of content hashing to @h@: since
 -- the bridge knows the exact new layout, offset-keyed goal-id reuse stays
 -- allowed as long as disk still matches what was written.
-doLoadAfterWrite :: ServerState -> Word64 -> FilePath
-                 -> IO (Either Text (Session, GoalMap, [GoalEntry], FilePath))
+doLoadAfterWrite :: ServerState -> Word64 -> FilePath -> IO (Either Text LoadResult)
 doLoadAfterWrite ss h = doLoadWith ss (Just h)
 
-doLoadWith :: ServerState -> Maybe Word64 -> FilePath
-           -> IO (Either Text (Session, GoalMap, [GoalEntry], FilePath))
+doLoadWith :: ServerState -> Maybe Word64 -> FilePath -> IO (Either Text LoadResult)
 doLoadWith ss mExpect file = do
   r <- loadAndSync ss mExpect file
   pure $ case r of
     Left err                  -> Left err
     Right (sess, gm, es, out) -> case interpretLoad out of
       Left lerr -> Left lerr
-      Right _   -> Right (sess, gm, es, file)
+      Right _   -> Right (LoadResult sess gm es file (interpretCheck out))
 
 -- | RTS flags that cap a spawned @agda@'s heap (@+RTS -M<n>m -RTS@), or none
 -- when the cap is @<= 0@. Bounds the worst-case footprint of a single
@@ -1528,8 +1561,8 @@ resolveLoaded ss mFileArg = do
         then do
           r <- doLoad ss file
           pure $ case r of
-            Left err              -> Left err
-            Right (s, gm, _, _)   -> Right (file, s, gm)
+            Left err -> Left err
+            Right lr -> Right (file, lrSession lr, lrGoalMap lr)
         else do
           -- Reusing a live session: refresh its idle clock so the reaper
           -- doesn't close a session that is actively serving goal commands.
@@ -1570,28 +1603,30 @@ interpretLoad out = case out of
   SendDied _ err -> Left ("agda session ended during load: " <> err)
   SendOk rs      -> case firstError rs of
     Just m  -> Left m
-    Nothing -> Right (concat [gs | ReplyDisplayInfo (AllGoalsWarnings gs _ _) <- rs])
+    Nothing -> Right (concat [gs | ReplyDisplayInfo AllGoalsWarnings{agwVisibleGoals = gs} <- rs])
 
--- | The full diagnostics of a load — every error, every warning, and the
--- open goals — for the @check@ tool. Where 'interpretLoad' keeps only the
--- first error or else the goals, this keeps them all so @check@ can report
--- a complete picture in one call.
-data CheckOutcome = CheckOutcome
-  { coErrors   :: ![Text]
-  , coWarnings :: ![Text]
-  , coGoals    :: ![Goal]
-  }
-
-interpretCheck :: SendOutcome -> CheckOutcome
-interpretCheck out = case out of
-  SendTimeout _  -> CheckOutcome ["agda timed out during load (session reset)."] [] []
-  SendDied _ err -> CheckOutcome ["agda session ended during load: " <> err] [] []
-  SendOk rs      ->
-    let agws = [ (gs, es, ws) | ReplyDisplayInfo (AllGoalsWarnings gs es ws) <- rs ]
-        hard = [ m | ReplyDisplayInfo (ErrorReply m) <- rs ]
-    in CheckOutcome (hard ++ concat [ es | (_, es, _) <- agws ])
-                    (concat [ ws | (_, _, ws) <- agws ])
-                    (concat [ gs | (gs, _, _) <- agws ])
+-- | Append the session's unsolved-constraint state to a settled load burst,
+-- so 'interpretCheck' reads it off the same reply list.
+--
+-- One extra round-trip on an already-elaborated module (@Cmd_constraints@
+-- reads TCM state; it re-checks nothing). Skipped when the load already
+-- raised a hard error: the verdict is decided, the session is at a
+-- well-defined failure, and Agda's own message carries the detail. Never
+-- appends an error reply of its own — a failed probe leaves the burst
+-- exactly as it was, so it cannot turn a good load into a reported failure.
+--
+-- A probe that timed out poisons the session (as any command does), which
+-- costs a respawn on the next use but cannot desync the protocol; the load's
+-- own goals were already read off the settled burst.
+withConstraints :: Session -> FilePath -> SendOutcome -> IO SendOutcome
+withConstraints sess file out = case out of
+  SendOk rs | isNothing (firstError rs) -> do
+    probe <- sendIotcm sess (iotcmConstraints file)
+    pure $ case probe of
+      SendOk prs | isNothing (firstError prs) ->
+        SendOk (rs ++ [ r | r@(ReplyDisplayInfo ConstraintsReply{}) <- prs ])
+      _ -> out
+  _ -> pure out
 
 -- | The first GoalSpecific goal-info in a burst (Error wins).
 firstGoalInfo :: [Reply] -> Either Text GoalInfo
@@ -1605,13 +1640,25 @@ firstGoalInfo rs = case firstError rs of
 -- Rendering
 -- ---------------------------------------------------------------------
 
-renderGoals :: FilePath -> [GoalEntry] -> Text
-renderGoals file es
-  | null es   = "Loaded " <> T.pack file <> " — no open goals."
+-- | The post-load / post-write goal report. Takes the load's outcome so
+-- "no open goals" cannot be printed over un-produced evidence: an unsolved
+-- meta with no hole left is the malignant case ('checkAcceptable'), and it
+-- gets the ✗ verdict line and the located diagnostics instead of silence.
+renderGoals :: FilePath -> CheckOutcome -> [GoalEntry] -> Text
+renderGoals file co es
+  | null es, isJust (checkAcceptable co) =
+      checkVerdict file co <> renderDiagnostics co
+  | null es   = "Loaded " <> T.pack file <> " — no open goals." <> unsolvedTail
   | otherwise =
-      "Loaded " <> T.pack file <> " — " <> showT (length es) <> " open goal(s):\n"
+      "Loaded " <> T.pack file <> " — " <> showT (length es) <> " open goal(s)"
+        <> unsolvedClause co <> ":\n"
         <> T.unlines [ "  " <> renderStableId (geStable e) <> "  : " <> geType e <> posNote e | e <- es ]
         <> goalsFooter es
+  where
+    -- Backstop: the ✗ branch above keys on the wire's visible goals, this one
+    -- on the reconciled entries. They agree in practice; if they ever don't,
+    -- the count still gets printed rather than dropped.
+    unsolvedTail = if coHasUnsolved co then unsolvedClause co else ""
 
 -- | The next-step routing footer appended wherever open goals are listed
 -- (load / check / a @write:true@ reload). Names the first goal concretely
@@ -1739,23 +1786,6 @@ autoHints ss sess file es
         <> "s budget on " <> gid <> "; remaining goals were not probed — the Agda \
            \session was reset and reloads on the next command.)"
 
-checkVerdict :: FilePath -> CheckOutcome -> Text
-checkVerdict file co =
-  (if null (coErrors co) then "✓ type-checks" else "✗ does not type-check")
-    <> " — " <> T.pack file
-    <> " (" <> (let n = length (coGoals co)
-                in if n == 0 then "no open goals" else showT n <> " open goal(s)")
-    <> ", " <> showT (length (coErrors co)) <> " error(s), "
-    <> showT (length (coWarnings co)) <> " warning(s))."
-
-renderDiagnostics :: CheckOutcome -> Text
-renderDiagnostics co = errBlock <> warnBlock
-  where
-    errBlock  = if null (coErrors co) then ""
-                else "\n\nErrors:\n"   <> T.unlines [ "  • " <> e | e <- coErrors co ]
-    warnBlock = if null (coWarnings co) then ""
-                else "\n\nWarnings:\n" <> T.unlines [ "  • " <> w | w <- coWarnings co ]
-
 -- | @check@ of the on-disk file: goals carry stable ids (from the live
 -- session's reconciled map) and source positions. @hints@ are the
 -- speculative Mimer solutions from 'autoHints' — surfaced inline so the
@@ -1801,11 +1831,6 @@ renderCheckDry file co =
                <> T.unlines [ "  ?" <> showT i <> "  : " <> goalType g <> goalPosNote g
                             | (i, g) <- zip [0 :: Int ..] (coGoals co) ])
     <> "\n(Positions index the proposed text; apply it, then `load` for stable goal ids.)"
-
-goalPosNote :: Goal -> Text
-goalPosNote g = case goalRange g of
-  Just (GoalRange s _) -> "   (" <> showT (rpLine s) <> ":" <> showT (rpCol s) <> ")"
-  Nothing              -> ""
 
 -- ---------------------------------------------------------------------
 -- repair  (graph-backed, spec-preserving repair loop)
@@ -1883,8 +1908,19 @@ repairLoop ss file env maxIter orig = do
   where
     go :: Int -> Int -> [Text] -> Text -> CheckOutcome -> IO (Text, RepairReport)
     go iter compiles applied text co
-      | null (coErrors co) = pure (text, mkReport True iter compiles applied [] (Just co))
+      | isNothing (checkAcceptable co) =
+          pure (text, mkReport True iter compiles applied [] (Just co))
       | iter >= maxIter    = pure (text, mkReport False iter compiles applied ["reached max_iter"] (Just co))
+      -- Un-produced evidence with no error to classify: repair only ever adds
+      -- imports, and an import cannot solve a meta. Report it and stop rather
+      -- than spin (and never call this "repaired").
+      | null (coErrors co) =
+          pure (text, mkReport False iter compiles applied
+                        (("refused — " <> refusalClause co UnaccUnsolved
+                            <> "; repair adds imports, which cannot supply evidence")
+                           : map ("unsolved meta: " <>) (map renderInvisible (coInvisible co))
+                           ++ map ("unsolved constraint: " <>) (map renderConstraint (coConstraints co)))
+                        (Just co))
       | otherwise =
           let diags      = RD.classify (coErrors co)
               actionable = filter isActionable diags
@@ -1969,7 +2005,9 @@ firstWorking ss file env co text diags = go 0 flat
                   Right co' | accepts co co' d -> pure (Just (text', describeEdits cand, co'), dc')
                             | otherwise        -> go dc' rest
 
--- | Accept a candidate iff it compiles clean, or it resolves the targeted
+-- | Accept a candidate iff it compiles clean (error-free — which is progress,
+-- not necessarily the loop's success test: 'repairLoop' ends on the stricter
+-- 'checkAcceptable'), or it resolves the targeted
 -- name without raising the error count. Because imports only grow scope
 -- (repair is import-only), each accepted round adds a new distinct import
 -- line, so this is monotone — the loop cannot oscillate. @stillMissing@ comes
@@ -2052,10 +2090,14 @@ proceedGiveFile ss write file candidate = case checkFileInputFor file candidate 
       Left err  -> pure (Left err)
       Right out ->
         let co = interpretCheck out in
-        if not (null (coErrors co))
-          then pure (Left ("give_file: the proposed content does not type-check — nothing changed:"
-                             <> renderDiagnostics co))
-          else do
+        -- Un-produced evidence is refused at the same tier as a `postulate`
+        -- (checkFileInputFor, above): an unsolved meta Agda inserted is an
+        -- unnamed axiom, and no grep for `postulate` would ever find it.
+        case checkAcceptable co of
+          Just why -> pure (Left ("give_file: the proposed content "
+                                    <> refusalClause co why <> "; nothing changed:"
+                                    <> renderDiagnostics co))
+          Nothing  -> do
             eold <- readFileSafe file
             let old = either (const "") id eold
             res <- applyOrDiff ss write file old candidate
@@ -2068,11 +2110,14 @@ proceedGiveFile ss write file candidate = case checkFileInputFor file candidate 
               _               -> pure ()
             pure (fmap (<> remainingGoalsNote co) res)
 
--- | A trailing "(N goals / M warnings remain)" note for 'runGiveFile'.
+-- | A trailing "(N goals / M warnings remain)" note for 'runGiveFile'. The
+-- unsolved counts ride along when nonzero — benign here by rule (goals
+-- remain, else the gate would have refused), but never silent.
 remainingGoalsNote :: CheckOutcome -> Text
 remainingGoalsNote co =
   "\n\n" <> showT (length (coGoals co)) <> " open goal(s) after this change"
     <> (if null (coWarnings co) then "" else ", " <> showT (length (coWarnings co)) <> " warning(s)")
+    <> (if coHasUnsolved co then ", " <> unsolvedSummary co else "")
     <> "."
 
 -- ---------------------------------------------------------------------
@@ -2113,10 +2158,15 @@ runNewModule ss a = case argText a "path" of
         v <- loadRenamedTemp ss file content
         let vmsg = case v of
               Left err  -> "⚠ could not validate the scaffold: " <> err
+              -- A fresh scaffold is all holes, so 'checkAcceptable' passes it;
+              -- it fires only if the stubs' types themselves left un-produced
+              -- evidence (an un-inferable implicit in a stub signature).
               Right out -> let c = interpretCheck out
-                           in if null (coErrors c)
-                                then "✓ scaffold type-checks (" <> showT (length (coGoals c)) <> " hole(s))"
-                                else "✗ scaffold does not type-check yet:" <> renderDiagnostics c
+                           in case checkAcceptable c of
+                                Nothing -> "✓ scaffold type-checks (" <> showT (length (coGoals c))
+                                             <> " hole(s))" <> unsolvedClause c
+                                Just why -> "✗ scaffold " <> refusalClause c why <> ":"
+                                              <> renderDiagnostics c
             unresNote = if null unresolved then ""
                         else "\n\nUnresolved imports (no defining module in the graph — add by hand): "
                                <> T.intercalate ", " unresolved
@@ -2133,13 +2183,13 @@ runNewModule ss a = case argText a "path" of
                 kickRebuild ss file
                 r <- doLoadAfterWrite ss (contentStamp content) file
                 case r of
-                  Left err             ->
+                  Left err ->
                     pure (Right ("Created " <> T.pack file <> " (module " <> modName <> ").\n"
                                    <> vmsg <> unresNote <> "\n\n⚠ reload: " <> err))
-                  Right (_, _, es, fp) -> do
-                    emitGoals ss fp es
+                  Right lr -> do
+                    emitGoals ss (lrFile lr) (lrGoals lr)
                     pure (Right ("Created " <> T.pack file <> " (module " <> modName <> ").\n\n"
-                                   <> renderGoals fp es <> unresNote))
+                                   <> renderGoals (lrFile lr) (lrCheck lr) (lrGoals lr) <> unresNote))
           else pure (Right ("Proposed module " <> modName <> " → " <> T.pack file <> "\n" <> vmsg <> unresNote
                               <> "\n\nWrite this content (or re-run with write=true), then `load`:\n\n"
                               <> contentFrame content))
@@ -2267,7 +2317,7 @@ constructLoop ss file orig origStamp cb (s:rest) acc = do
   r <- doLoad ss file
   case r of
     Left err -> pure (Left ("construct: " <> stepLabel s <> ": load failed: " <> err))
-    Right (sess, gm, _, _) -> do
+    Right (LoadResult sess gm _ _ _) -> do
       -- The per-step reload re-stamps to disk; if that no longer matches the
       -- text the edits are computed against, an external edit landed mid-batch
       -- — abort rather than splice ORIGINAL-offset edits into new content.

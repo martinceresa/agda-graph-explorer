@@ -40,13 +40,16 @@ cabal run -v0 agda-explore -- query search query=eval --graph test/deps.json
 cabal run -v0 agda-explore -- query brief name=Test.eval --graph test/deps.json
 ```
 
-(The committed fixtures predate the current node-key convention, so the
-`explore` queries print a harmless one-line "stale format" note on stderr —
-that freshness tracking is a feature; the answers on stdout are correct.)
+(The committed fixtures predate the current node-key convention and carry the
+paths of the project they were generated from, so the `explore` queries print
+harmless freshness / closure-coverage notes — that tracking is a feature; the
+answers themselves are correct.)
 
 ## Prerequisites
 
-- GHC 9.14.x + cabal 3.16 (older GHC ≥ 9.6 should work; CI pins 9.14.1).
+- GHC 9.14.x + cabal 3.16. `cabal.project` pins `ghc-9.14.1`, and that is a
+  requirement rather than a preference: GHC 9.12.x's RTS corrupts the heap under
+  ≥ 2 capabilities, and every batch executable is built `-with-rtsopts=-N`.
 - `agda-optimization`'s `fiedler` subcommand only: `pip install scipy numpy`.
 - `agda-goals`, `agda-auto`, `agda-explore --enable-interact`: `agda` on `$PATH`.
 - `agda-explore`'s live regeneration: `agda-deps` on `$PATH` (see
@@ -111,6 +114,8 @@ Essential invocations below; flag-by-flag recipes are in
 `--format human|json`. The older spellings — `agda-unused`'s `--json=FILE`
 (input) and `--json-out`, and `--json` (output) on `agda-optimization` /
 `agda-auto` — remain as permanent aliases, so existing scripts keep working.
+All five binaries also answer `--help`, `--version`, `--numeric-version` (the
+bare number, for scripts) and `--show-defaults`.
 
 ### `agda-unused` — flag unused imports / defs / opens
 
@@ -249,6 +254,14 @@ flag reads the positive key `x`, so write `x: false` rather than `no-x: true`;
 - Expanded JSON carries optional `definitionEdgesProvenance`, a per-definition
   `"type"` (under the producer's `--with-signatures`), and `moduleOptionEscapes`
   (file-level `{-# OPTIONS #-}` soundness escapes).
+- Two optional fields separate *missing* evidence from an honest hole, which
+  `state: "H"` alone cannot: per-definition `unsolvedMetas` (count of silent
+  non-interaction metas, omitted when `0`) and top-level `unsolvedModules`
+  (`{module → {metas: [line], constraints: [line]}}`, omitted when empty). They
+  only appear when the producer ran with `--allow-unsolved-metas` /
+  `--lenient-imports` — there Agda postulates the open metas and the module
+  *succeeds*, so `failedModules: []` does **not** mean the project type-checks.
+  Meta lines are exact; constraint lines are best-effort locations.
 
 A machine-readable JSON Schema (draft 2020-12) for the expanded form lives in the
 producer repo at `schema/graph-v2-expanded.schema.json`. For the full schema
