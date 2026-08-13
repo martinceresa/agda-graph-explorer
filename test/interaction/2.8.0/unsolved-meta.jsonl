@@ -1,0 +1,3 @@
+{"info":{"errors":[],"invisibleGoals":[{"constraintObj":{"name":"_bad_12","range":[{"end":{"col":11,"line":23,"pos":636},"start":{"col":5,"line":23,"pos":630}}]},"kind":"OfType","type":"⊥"}],"kind":"AllGoalsWarnings","visibleGoals":[],"warnings":[]},"kind":"DisplayInfo"}
+{"interactionPoints":[],"kind":"InteractionPoints"}
+{"info":{"constraints":[],"kind":"Constraints"},"kind":"DisplayInfo"}

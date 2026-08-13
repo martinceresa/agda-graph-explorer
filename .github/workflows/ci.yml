@@ -53,7 +53,10 @@ jobs:
         for f in test/auto/smoke.sh \
                  test/interaction/regen.sh \
                  test/interaction/src/Combine.agda \
-                 test/interaction/src/HoleHint.agda; do
+                 test/interaction/src/HoleHint.agda \
+                 test/interaction/src/Unsolved.agda \
+                 test/interaction/src/Stuck.agda \
+                 test/interaction/src/HoleBlocked.agda; do
           git ls-files --error-unmatch "$f" >/dev/null \
             || { echo "canary fixture untracked/missing: $f"; exit 1; }
         done
