@@ -63,6 +63,39 @@ jobs:
         bash -n test/auto/smoke.sh
         echo "canary fixture guard OK"
 
+    - name: Fixture version pin (ci-live's agda == the committed goldens)
+      # regen.sh writes into $(agda --version)/, and ci-live regenerates the
+      # goldens against the version it pins and fails on ANY diff. So goldens
+      # captured from a different agda than the pin surface there as "PROTOCOL
+      # DRIFT" — untracked files in a second version directory — when the real
+      # fault is version skew. That misreads for weeks on a non-blocking weekly
+      # canary, so catch it here, on the PR gate, without needing agda.
+      run: |
+        pin=$(grep -oE 'Agda-[0-9]+(\.[0-9]+)+' .github/workflows/ci-live.yml | head -1 | sed 's/Agda-//')
+        dir=$(grep -oE 'test/interaction/[0-9]+(\.[0-9]+)+/' test/Spec.hs | head -1 | sed 's#test/interaction/##; s#/##')
+        have=$(git ls-files 'test/interaction/*' \
+                 | grep -oE '^test/interaction/[0-9]+(\.[0-9]+)+' \
+                 | sed 's#test/interaction/##' | sort -u)
+        [ -n "$pin" ] && [ -n "$dir" ] || { echo "could not read the agda pin / fixtureDir"; exit 1; }
+        [ "$pin" = "$dir" ] \
+          || { echo "version skew: ci-live pins Agda-$pin but test/Spec.hs replays $dir"; exit 1; }
+        [ "$have" = "$pin" ] \
+          || { echo "committed fixture dirs are [$(echo $have)], expected exactly $pin"; exit 1; }
+        echo "fixture version pin OK (Agda $pin)"
+
+    - name: Golden transcripts carry no absolute paths
+      # IOTCM needs an absolute file argument and agda echoes it back inside
+      # error messages and highlighting notes, so a naive capture bakes the
+      # generating machine's checkout path into the goldens — which then differ
+      # on every other checkout and fail ci-live's verbatim drift check forever.
+      # regen.sh normalizes them out; assert it stayed that way.
+      run: |
+        if git grep -lIE '(/home/|/Users/|[A-Za-z]:\\\\)' -- 'test/interaction/*/*'; then
+          echo "golden transcript carries an absolute path — regen.sh must normalize it out"
+          exit 1
+        fi
+        echo "no absolute paths in the goldens"
+
     - name: Update Hackage index
       run: cabal update
 

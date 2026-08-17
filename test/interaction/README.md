@@ -6,9 +6,23 @@ the spec the `AgdaGraph.Interaction.Protocol` parser is written against and the
 regression tripwire when Agda bumps — `--interaction-json` is **not** officially
 version-stable.
 
-The committed fixtures under `2.9.0/` were captured from **Agda 2.9.0**
-(GHC 9.6.7). CI replays them **offline** (no `agda` binary); regenerating them
-is a manual, agda-required step — run `bash regen.sh` (needs `agda` on `$PATH`).
+The committed fixtures under `2.8.0/` were captured from **Agda 2.8.0**. The
+offline suite replays them without an `agda` binary; regenerating is a manual,
+agda-required step — run `bash regen.sh` (needs `agda` on `$PATH`).
+
+`regen.sh` writes into `$(agda --version)/`, so a different local Agda lands its
+output in a *new* directory rather than overwriting these. Exactly one version
+is committed at a time, and it must be the one
+`.github/workflows/ci-live.yml` pins: that job regenerates and fails on any
+diff, so a second version directory reads as protocol drift. Bumping means
+regenerating, repointing `fixtureDir` in `test/Spec.hs`, deleting the old
+directory, and moving the workflow's pin — in one commit.
+
+Fixtures are **path-normalized**: `IOTCM` requires an absolute file argument and
+agda echoes it back inside error messages and highlighting notes, so `regen.sh`
+rewrites the fixture root back out of everything it captures. Committed
+transcripts therefore say `src/Holes.agda`, not `/home/<you>/…/src/Holes.agda`,
+and regenerate identically on any checkout.
 
 ## Protocol facts pinned by these fixtures
 
@@ -42,7 +56,7 @@ is a manual, agda-required step — run `bash regen.sh` (needs `agda` on `$PATH`
 
 ## `auto` / Mimer
 
-Agda 2.9's signature is `Cmd_autoOne Rewrite InteractionId Range String` — the
+Agda 2.8's signature is `Cmd_autoOne Rewrite InteractionId Range String` — the
 leading `Rewrite` is mandatory (omit it and Mimer "cannot read" the command).
 With it, Mimer runs and replies with a `GiveAction` carrying the found term —
 the `auto` MCP tool fills the hole (diff) or reports no solution.
@@ -74,7 +88,7 @@ python3 test/interaction/convergence.py        # discovers the cabal binary
 **agent-driven** pass: point an agent at the daemon, have it close every hole
 using only the bridge tools, then confirm `agda` is clean.
 
-## IOTCM command syntax (Agda 2.9.0, confirmed working)
+## IOTCM command syntax (Agda 2.8.0, confirmed working)
 
 ```
 IOTCM "F" None Direct (Cmd_load "F" [])

@@ -12,10 +12,17 @@ F="$PWD/src/Holes.agda"
 L="$PWD/src/Lit.lagda.md"
 C="$PWD/src/Combine.agda"
 HH="$PWD/src/HoleHint.agda"
-clean() { grep -vE 'ClearRunningInfo|ClearHighlighting|RunningInfo|"kind":"Status"' | sed 's/^JSON> //' | grep '^{'; }
+# IOTCM needs an ABSOLUTE path, and agda echoes it back inside error messages,
+# JumpToError payloads and highlighting notes. Committed fixtures must not carry
+# the generating machine's paths — CI's drift check compares them verbatim, so a
+# baked-in /home/<dev>/… fails on every checkout for a reason that is not drift.
+# Rewrite the fixture root back out of everything captured.
+ROOT_RE=$(printf '%s' "$PWD/" | sed 's/[][\.*^$&#]/\\&/g')
+normpaths() { sed "s#$ROOT_RE##g"; }
+clean() { grep -vE 'ClearRunningInfo|ClearHighlighting|RunningInfo|"kind":"Status"' | sed 's/^JSON> //' | grep '^{' | normpaths; }
 load() { printf 'IOTCM "%s" None Direct (Cmd_load "%s" [])\n' "$1" "$1"; }
 
-{ load "$F"; printf 'IOTCM "%s" None Direct (Cmd_goal_type_context Simplified 0 noRange "")\n' "$F"; printf 'IOTCM "%s" None Direct (Cmd_infer Simplified 3 noRange "zero")\n' "$F"; printf 'IOTCM "%s" None Direct (Cmd_compute DefaultCompute 0 noRange "1 + 1")\n' "$F"; } | agda --interaction-json 2>/dev/null > "$OUT/session-readonly.txt"
+{ load "$F"; printf 'IOTCM "%s" None Direct (Cmd_goal_type_context Simplified 0 noRange "")\n' "$F"; printf 'IOTCM "%s" None Direct (Cmd_infer Simplified 3 noRange "zero")\n' "$F"; printf 'IOTCM "%s" None Direct (Cmd_compute DefaultCompute 0 noRange "1 + 1")\n' "$F"; } | agda --interaction-json 2>/dev/null | normpaths > "$OUT/session-readonly.txt"
 
 load "$F" | agda --interaction-json 2>/dev/null | clean > "$OUT/load.jsonl"
 load "$L" | agda --interaction-json 2>/dev/null | clean > "$OUT/load-literate.jsonl"
@@ -25,6 +32,10 @@ load "$L" | agda --interaction-json 2>/dev/null | clean > "$OUT/load-literate.js
 { load "$F"; printf 'IOTCM "%s" None Direct (Cmd_goal_type_context Simplified 0 noRange "")\n' "$F"; }| agda --interaction-json 2>/dev/null | clean | grep GoalSpecific > "$OUT/goal-type-context.jsonl"
 { load "$F"; printf 'IOTCM "%s" None Direct (Cmd_infer Simplified 3 noRange "zero")\n' "$F"; }       | agda --interaction-json 2>/dev/null | clean | grep InferredType > "$OUT/infer.jsonl"
 { load "$F"; printf 'IOTCM "%s" None Direct (Cmd_compute DefaultCompute 0 noRange "1 + 1")\n' "$F"; }| agda --interaction-json 2>/dev/null | clean | grep NormalForm   > "$OUT/compute.jsonl"
+# A REJECTED give (`Set` into a `Nat` hole): the type error arrives as a
+# DisplayInfo/Error reply, not as a failed command — pins that the bridge reads
+# the localized message out of the wire rather than dumping the JSON.
+{ load "$F"; printf 'IOTCM "%s" None Direct (Cmd_give WithoutForce 0 noRange "Set")\n' "$F"; }       | agda --interaction-json 2>/dev/null | clean | grep '"kind":"Error"' > "$OUT/give-error.jsonl"
 # Phase-3a multi-hint batch: a goal solvable ONLY by combining two in-scope
 # hints (trans' eq1 eq2). Confirms Cmd_autoOne accepts a batch of in-scope
 # hints and returns the combined term — the tripwire for a batch-semantics

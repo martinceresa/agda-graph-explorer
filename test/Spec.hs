@@ -1584,8 +1584,12 @@ premiseBenchTests ref = do
 ----------------------------------------------------------------------
 -- Fixture replay — the protocol-skew tripwire.
 
+-- | The one Agda version the whole golden set is captured against. Keep it in
+-- step with the @Agda-@ pin in @.github/workflows/ci-live.yml@: that job
+-- regenerates the fixtures and fails on any diff, so a mismatch here reports
+-- the version skew as protocol drift.
 fixtureDir :: FilePath
-fixtureDir = "test/interaction/2.9.0/"
+fixtureDir = "test/interaction/2.8.0/"
 
 parseLines :: FilePath -> IO [Reply]
 parseLines fp = do
@@ -1610,12 +1614,24 @@ replayTests ref = do
        (ips:_) -> map ipId ips == [0,1,2,3]
        _       -> False) ref
 
-  -- give.jsonl → GiveAction id 0, paren False
+  -- give.jsonl → GiveAction id 0 carrying the term to splice. `giveResult` has
+  -- TWO wire shapes and agda picks by version: 2.8.0 answers a plain give with
+  -- {"str":…} (splice this), where 2.9.0 answered {"paren":Bool} (splice the
+  -- user's own input, parenthesized per the flag). Only one can be captured
+  -- from a single agda, so the golden pins the live shape and the literal below
+  -- keeps the other decode branch covered.
   giveRs <- parseLines (fixtureDir ++ "give.jsonl")
-  check "give.jsonl: GiveParen False at id 0"
-    ([0 :: Int] == [iid | ReplyGiveAction iid (GiveParen False) <- giveRs]) ref
+  check "give.jsonl: GiveStr \"n\" at id 0"
+    (case [s | ReplyGiveAction 0 (GiveStr s) <- giveRs] of
+       (s:_) -> s == "n"
+       _     -> False) ref
   check "give.jsonl: exactly one GiveAction"
     (length [() | ReplyGiveAction{} <- giveRs] == 1) ref
+  check "giveResult {\"paren\":false} still decodes to GiveParen False"
+    (case parseReply "{\"kind\":\"GiveAction\",\"giveResult\":{\"paren\":false}\
+                      \,\"interactionPoint\":{\"id\":0,\"range\":[]}}" of
+       Right (Just (ReplyGiveAction 0 (GiveParen False))) -> True
+       _                                                  -> False) ref
 
   -- refine.jsonl → GiveAction id 0 with str "suc ?"
   refineRs <- parseLines (fixtureDir ++ "refine.jsonl")
@@ -1626,9 +1642,9 @@ replayTests ref = do
 
   -- auto-batch.jsonl (Phase-3a) → a multi-hint Cmd_autoOne batch returns the
   -- COMBINED term `trans' eq1 eq2`, which no single hint reaches. Pins the
-  -- batch semantics verified on this agda (2.8.0 dir); a future agda that
-  -- aborts the batch instead would drop the GiveAction and fail this.
-  batchRs <- parseLines "test/interaction/2.8.0/auto-batch.jsonl"
+  -- batch semantics verified on this agda; a future agda that aborts the batch
+  -- instead would drop the GiveAction and fail this.
+  batchRs <- parseLines (fixtureDir ++ "auto-batch.jsonl")
   check "auto-batch.jsonl: batch combines two hints into `trans' eq1 eq2`"
     (case [s | ReplyGiveAction 0 (GiveStr s) <- batchRs] of
        (s:_) -> s == "trans' eq1 eq2"
@@ -1639,7 +1655,7 @@ replayTests ref = do
   -- does not read hole contents as a hint on this agda, so agda-auto seeds them
   -- explicitly. A future agda that consumed hole bodies would add a GiveAction
   -- and fail the first check — the signal to simplify the seeding.
-  holeRs <- parseLines "test/interaction/2.8.0/auto-hole-content.jsonl"
+  holeRs <- parseLines (fixtureDir ++ "auto-hole-content.jsonl")
   check "auto-hole-content.jsonl: hole body is NOT a native Mimer hint (no give)"
     (null [() | ReplyGiveAction{} <- holeRs]) ref
   check "auto-hole-content.jsonl: the goal stayed open after the probe"
@@ -1654,7 +1670,7 @@ replayTests ref = do
   -- zero visible goals — the meta is ONLY in invisibleGoals, and the module it
   -- comes from proves ⊥, so reading errors + visible goals alone is a ✓ over
   -- un-produced evidence.
-  unsolvedRs <- parseLines "test/interaction/2.8.0/unsolved-meta.jsonl"
+  unsolvedRs <- parseLines (fixtureDir ++ "unsolved-meta.jsonl")
   let unsolvedCo = interpretCheck (SendOk unsolvedRs)
   check "unsolved-meta.jsonl: the meta is reported ONLY as an invisible goal"
     (null (coErrors unsolvedCo) && null (coWarnings unsolvedCo)
@@ -1674,7 +1690,7 @@ replayTests ref = do
   -- stuck-instance.jsonl: two candidate instances. Agda DOES raise an
   -- [UnsolvedConstraints] error here, and Cmd_constraints carries the
   -- structured candidate list that makes the report actionable.
-  stuckRs <- parseLines "test/interaction/2.8.0/stuck-instance.jsonl"
+  stuckRs <- parseLines (fixtureDir ++ "stuck-instance.jsonl")
   let stuckCo = interpretCheck (SendOk stuckRs)
   check "stuck-instance.jsonl: the error message is extracted, not JSON-dumped"
     (case coErrors stuckCo of
@@ -1695,7 +1711,7 @@ replayTests ref = do
   -- (the implicit blocked on the hole). Wire-indistinguishable from the
   -- malignant one above, so the rule keys on the visible goals — this file
   -- must stay ✓, or every work-in-progress edit would be refused.
-  blockedRs <- parseLines "test/interaction/2.8.0/hole-blocked.jsonl"
+  blockedRs <- parseLines (fixtureDir ++ "hole-blocked.jsonl")
   let blockedCo = interpretCheck (SendOk blockedRs)
   check "hole-blocked.jsonl: one visible goal AND one invisible meta"
     (length (coGoals blockedCo) == 1 && map goalType (coInvisible blockedCo) == ["Set"]) ref
@@ -1740,11 +1756,13 @@ replayTests ref = do
   check "compute.jsonl: NormalForm 2"
     (not (null [ () | ReplyDisplayInfo (GoalSpecific _ (GiNormalForm "2")) <- computeRs ])) ref
 
-  -- give-error.jsonl → ErrorReply mentioning UnequalTypes
+  -- give-error.jsonl → a rejected give arrives as an ErrorReply, not a failed
+  -- command. The tag is version-sensitive (2.8.0 says [UnequalTerms] where
+  -- 2.9.0 said [UnequalTypes]), so it doubles as the skew tripwire.
   errRs <- parseLines (fixtureDir ++ "give-error.jsonl")
   check "give-error.jsonl: ErrorReply carries the localized message"
     (case [m | ReplyDisplayInfo (ErrorReply m) <- errRs] of
-       (m:_) -> "UnequalTypes" `T.isInfixOf` m
+       (m:_) -> "UnequalTerms" `T.isInfixOf` m
        _     -> False) ref
 
   -- session-readonly.txt: prompt-delimited burst splitting

@@ -1,0 +1,1 @@
+{"info":{"error":{"message":"1.1-4: error: [UnequalTerms]\nSet₁ !=< Nat\nwhen checking that the expression Set has type Nat"},"kind":"Error","warnings":[]},"kind":"DisplayInfo"}
