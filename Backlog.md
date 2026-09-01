@@ -11,7 +11,7 @@ requests: [Deferred.md](Deferred.md).
 - **Migrate the four hand-rolled CLIs onto the shared `FlagSpec`** (agda-unused
   / agda-goals / agda-explore / agda-auto → the declarative table
   `agda-optimization` uses). Reassessed and deferred during the 2026-07 UX pass
-  (`UX.md` §1.4, a local working note): the stated acceptance gate — `--help` output
+  (`notes/UX.md` §1.4, a local working note): the stated acceptance gate — `--help` output
   *byte-identical* to the pre-migration goldens — conflicts with `FlagSpec`'s
   flat generated help, because the single-command tools' usage carries
   structure a generator won't reproduce (multi-line USAGE / OPTIONS /

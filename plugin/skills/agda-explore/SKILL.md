@@ -35,15 +35,15 @@ on disk — reconnect (`/mcp`) to pick it up.
 If a query reports "no entry configured", set `AGDA_EXPLORE_ENTRY` (entry
 module) and `AGDA_EXPLORE_INCLUDE` (include dir), or pass `--graph`.
 
-**Tool tiers.** The plugin advertises the **core** tool set by default: the
-read tools plus the validate/diagnose loop (`load`, `goal_brief`, `inspect`,
-`check`, `repair`, `lemmas`). The extra structural reads (`path`, `roots`,
-`similar_types`, `similar_bodies`) and the **authoring** tools (`auto`,
-`construct`, `scratch`, `give_file`, `new_module`) are documented below but
-appear in `tools/list` only under `--tool-tier full` (set it in the server's
-`.mcp.json` args). If a tool below isn't listed, you're on `core` — the core
-loop (query → edit → `check` → `repair`) covers most work; switch to full when
-you specifically want hole-driving or file authoring.
+**Tool tiers.** The plugin advertises the **full** tool set by default
+(`--tool-tier full` in its `.mcp.json` args). Under `--tool-tier core` the
+catalogue narrows to the read tools plus the validate/diagnose loop (`load`,
+`goal_brief`, `inspect`, `check`, `repair`, `lemmas`); the extra structural
+reads (`path`, `roots`, `similar_types`, `similar_bodies`) and the
+**authoring** tools (`auto`, `construct`, `scratch`, `give_file`,
+`new_module`) then stay documented here but absent from `tools/list`. So if a
+tool below isn't listed, you're on `core` — the core loop (query → edit →
+`check` → `repair`) covers most work regardless.
 
 ## Which tool for which question
 
@@ -87,7 +87,7 @@ you specifically want hole-driving or file authoring.
   their `owner`, `callers`/`callees` annotate them with `(in owner)`.
 - `callers`/`callees`: `transitive: true` walks the whole cone;
   `module_prefix` narrows; `by_module: true` gives per-module counts;
-  `provenance: body` (vs `signature`/`module-local`/`with`/`unknown`, with
+  `provenance: body` (vs `signature`/`module-local`/`unknown`, with
   `where` accepted as a legacy spelling of `module-local`) keeps genuine term uses.
   With `transitive`, the provenance filter applies to the first hop.
 - `impact` = transitive-callers as a change-risk summary — run before editing
@@ -122,6 +122,27 @@ mode:
   `duplicate` (same module opened twice).
 - **Noisy / best-effort:** `blanket`, `defined`, `public` — over-report on
   `open import X public` re-exporters and anonymous-module projections.
+- **Always low-confidence:** `field` (a record field whose projection is never
+  applied; included in `dead`). The edit is to the *record*, not to the
+  projection — and a no-eta record matched positionally uses its fields
+  without ever applying one, which the graph cannot see.
+- **Certain, but a spec change:** `arg-removable` / `arg-erasable` (kinds
+  `args`) — arguments a definition never uses. The verdict is Agda's own
+  occurrence/polarity analysis, so it is not a heuristic; the confidence
+  grades whether the *deletion* is contained (private or no cross-module
+  user), because removing a binder changes the definition's type. Two rules:
+  a position listed as `(with …)` must be deleted **together** with that set,
+  and the indices count **implicits** and refer to the definition's own
+  signature line — not to what `type_of` prints, which for a `where` helper
+  or a parametrised-module definition still shows inherited binders. The
+  report spells each binder the way the signature does (`0 {a}`, `3 ⦃d⦄`,
+  `0 m`); a position flagged *inserted by a `variable`* has no binder on the
+  line at all — delete the whole set and it goes away with it.
+  Needs a graph whose producer emits `argUsage`. These are the one class of
+  finding a `check` can never raise — Agda warns about no argument a
+  definition fails to use — so when the daemon serves its control endpoint,
+  the post-edit hook reports them for you after a `✓`; a spare binder you
+  just wrote will surface there without your asking.
 - **Known false positives:** instance methods, and names used only through
   `with` / `with ←` chains.
 

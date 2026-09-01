@@ -17,6 +17,11 @@ module AgdaGraph.Schema
   ( State(..)
   , Kind(..)
   , Access(..)
+  , ArgUsage(..)
+  , ArgBinder(..)
+  , BinderHiding(..)
+  , argRemovableAlone
+  , abInserted
   , Definition(..)
   , ReExport(..)
   , ExternalsSummary(..)
@@ -38,6 +43,7 @@ import           Data.Aeson           ( FromJSON(..), withObject, withText
                                       , (.:), (.:?), (.!=) )
 import qualified Data.ByteString      as BS
 import qualified Data.ByteString.Char8 as BSC
+import qualified Data.IntSet          as IS
 import qualified Data.Map.Strict      as M
 import           Data.Text            ( Text )
 import qualified Data.Text            as T
@@ -104,6 +110,152 @@ instance FromJSON Access where
     "private" -> pure Private
     _         -> fail $ "unknown access: " ++ T.unpack t
 
+-- | Per-argument usage evidence: which telescope positions a definition
+-- never actually uses. The producer reads Agda's own
+-- @defArgOccurrences@ \/ @defPolarity@, so the verdict is the compiler's,
+-- not a heuristic — see the @agda-deps@ repo's @Prompts\/ArgUsage.md@.
+--
+-- Positions are 0-based telescope indices, __implicits included__,
+-- ascending, and — since the producer subtracts the enclosing section's
+-- telescope — every one is a position on the definition's __own signature
+-- line__.
+--
+-- Do __not__ align these against 'defSig'. That string reifies the /raw
+-- elaborated/ telescope, so a section-lifted definition still shows the
+-- binders it inherited while these indices do not: the producer's golden
+-- has @Section.drops@ at @arity 2@ with a three-binder @type@, where index
+-- 0 read off the type names the wrong binder. @auArity@ < the binder count
+-- in 'defSig' is the tell that a def was section-lifted.
+-- | How a binder is passed. Rendered with Agda's own brackets, so a
+-- report line reads the way the signature does.
+data BinderHiding = BHExplicit | BHImplicit | BHInstance
+  deriving (Show, Eq, Generic)
+
+instance NFData BinderHiding
+
+instance FromJSON BinderHiding where
+  parseJSON = withText "hiding" $ \t -> case t of
+    "explicit" -> pure BHExplicit
+    "implicit" -> pure BHImplicit
+    "instance" -> pure BHInstance
+    _          -> fail ("unknown binder hiding: " ++ T.unpack t)
+
+instance A.ToJSON BinderHiding where
+  toJSON BHExplicit = A.String "explicit"
+  toJSON BHImplicit = A.String "implicit"
+  toJSON BHInstance = A.String "instance"
+
+-- | One telescope position's binder, as the producer read it off the
+-- syntactic @Pi@ spine.
+data ArgBinder = ArgBinder
+  { abHiding :: !BinderHiding
+    -- ^ Always known — a spine position always has argument info.
+  , abName   :: !(Maybe Text)
+    -- ^ The binder name as Agda spells it, or 'Nothing' where the spine
+    -- binds nothing to name (@Nat → Nat@). Never guessed: a position the
+    -- spine does not reach has no entry in 'auBinders' at all rather
+    -- than a fabricated one.
+  } deriving (Show, Eq, Generic)
+
+instance NFData ArgBinder
+
+instance FromJSON ArgBinder where
+  parseJSON = withObject "argBinder" $ \o ->
+    ArgBinder <$> o .: "hiding" <*> o .:? "name"
+
+instance A.ToJSON ArgBinder where
+  toJSON b = A.object $
+    [ "hiding" A..= abHiding b ]
+    ++ [ "name" A..= n | Just n <- [abName b] ]
+
+-- | True when the binder was inserted by a @variable@ generalisation
+-- rather than written on the definition's signature line, so there is
+-- nothing at that position to edit.
+--
+-- The test is the dotted name: Agda names a generalisation /dependency/
+-- after its path (@P.A@), and a source binder name cannot contain a
+-- @.@ — that character is the qualifier separator. It is a
+-- __sufficient, not necessary__ signal: a @variable@ the signature
+-- /mentions/ is inserted under its own plain name (@A@) and is
+-- indistinguishable from a written binder here.
+--
+-- That incompleteness is harmless in practice, because
+-- 'auRemovableRequires' already covers the case. An inserted binder
+-- exists only because some written argument mentions it; if that
+-- argument were used, the variable would be relevant in its domain and
+-- the inserted binder would not be 'auRemovable' at all. So whenever an
+-- inserted position is removable, the written position that mentions it
+-- is removable too and sits in its closure — meaning
+-- 'argRemovableAlone' always hands back a set containing something the
+-- user can actually delete. The flag is for the human hunting the
+-- binder on the line, not a safety gate.
+abInserted :: ArgBinder -> Bool
+abInserted b = maybe False (T.isInfixOf ".") (abName b)
+
+data ArgUsage = ArgUsage
+  { auRemovable :: ![Int]
+    -- ^ Unused in the body /and/ variance-irrelevant: the binder and the
+    -- argument at every call site can go. Deleting one changes the
+    -- definition's __type__, so this is a spec change, not a refactor.
+  , auRemovableRequires :: !(M.Map Int [Int])
+    -- ^ Which /other/ 'auRemovable' positions must be deleted alongside a
+    -- given one, transitively — a directed closure, always pointing
+    -- forward (every value exceeds its key). Absent from the wire, and
+    -- absent as a key, means __\"removable on its own\"__, never
+    -- \"unknown\": a lone removal that strands a later binder is the
+    -- failure this map exists to prevent. Empty for every single-index
+    -- verdict.
+  , auErasable  :: ![Int]
+    -- ^ Unused in the body but still variance-relevant: used only in
+    -- types, so an @\@0@ candidate rather than a removal.
+  , auArity     :: {-# UNPACK #-} !Int
+    -- ^ Telescope positions the verdict ranges over; every index above is
+    -- below this.
+  , auBinders   :: !(M.Map Int ArgBinder)
+    -- ^ Binder hiding + name for the reported positions, sparse (only
+    -- positions the producer had something to say about) and keyed like
+    -- 'auRemovableRequires'. A missing entry means the syntactic spine
+    -- did not reach that position — the producer degrades rather than
+    -- guessing — so render the bare index there.
+  } deriving (Show, Eq, Generic)
+
+instance NFData ArgUsage
+
+instance FromJSON ArgUsage where
+  parseJSON = withObject "argUsage" $ \o ->
+    ArgUsage
+      <$> o .:? "removable" .!= []
+      -- Wire keys are decimal strings ("0", "1"); aeson's 'FromJSONKey'
+      -- for 'Int' parses them.
+      <*> o .:? "removableRequires" .!= M.empty
+      <*> o .:? "erasable"  .!= []
+      <*> o .:? "arity"     .!= 0
+      <*> o .:? "binders"   .!= M.empty
+
+instance A.ToJSON ArgUsage where
+  toJSON au = A.object $
+    [ "removable" A..= auRemovable au
+    , "erasable"  A..= auErasable au
+    , "arity"     A..= auArity au
+    ]
+    -- Both omitted when empty, matching the producer, so a decode/encode
+    -- round-trip is byte-stable.
+    ++ [ "removableRequires" A..= auRemovableRequires au
+       | not (M.null (auRemovableRequires au)) ]
+    ++ [ "binders" A..= auBinders au | not (M.null (auBinders au)) ]
+
+-- | The positions that must be deleted together with @i@, @i@ included and
+-- ascending. A position with no requirement yields @[i]@, so a caller can
+-- treat every finding uniformly as \"delete this set\".
+--
+-- Returns @[]@ for a position that is not removable at all, so a caller
+-- cannot accidentally propose a deletion the producer never sanctioned.
+argRemovableAlone :: ArgUsage -> Int -> [Int]
+argRemovableAlone au i
+  | i `notElem` auRemovable au = []
+  | otherwise = IS.toAscList
+      (IS.insert i (IS.fromList (M.findWithDefault [] i (auRemovableRequires au))))
+
 -- | A single definition. Strict fields throughout; this record is built
 -- once per QName and held across the whole analysis.
 data Definition = Definition
@@ -148,6 +300,11 @@ data Definition = Definition
     -- evidence nobody asked for — an unnamed axiom. Only reachable at all when
     -- the producer ran with @--allow-unsolved-metas@ \/ @--lenient-imports@
     -- (otherwise such a module fails and lands in 'egFailedModules').
+  , defArgUsage :: !(Maybe ArgUsage)
+    -- ^ Per-argument usage evidence (the optional per-def @"argUsage"@
+    -- object). 'Nothing' when the definition has nothing to report — and
+    -- on any graph from a producer that predates the field, so every
+    -- consumer path gated on presence yields zero findings there.
   , defX      :: {-# UNPACK #-} !Double
   , defY      :: {-# UNPACK #-} !Double
   , defOrigin :: !(Maybe Text)
@@ -172,6 +329,7 @@ instance FromJSON Definition where
       <*> o .:? "type"
       <*> o .:? "unsafe" .!= []
       <*> o .:? "unsolvedMetas" .!= 0
+      <*> o .:? "argUsage"
       <*> o .:? "x"      .!= 0.0
       <*> o .:? "y"      .!= 0.0
       <*> pure Nothing
@@ -506,6 +664,7 @@ instance A.ToJSON Definition where
     -- Omitted when empty/zero, matching the producer (keeps clean defs terse).
     ++ [ "unsafe" A..= defUnsafe d | not (null (defUnsafe d)) ]
     ++ [ "unsolvedMetas" A..= defUnsolvedMetas d | defUnsolvedMetas d > 0 ]
+    ++ [ "argUsage" A..= au | Just au <- [defArgUsage d] ]
 
 instance A.ToJSON ReExport where
   toJSON r = A.object $

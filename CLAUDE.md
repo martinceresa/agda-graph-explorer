@@ -15,7 +15,8 @@ One shared library and five executables:
 - **`agda-graph`** (library) — typed view of the expanded `graph.json` + an
   in-memory `Index`; the shared substrate for the JSON-consuming executables.
 - **`agda-unused`** — flags unused imports / definitions / blanket opens /
-  public re-exports from the expanded JSON.
+  public re-exports / never-projected record fields / unused *arguments*
+  from the expanded JSON.
 - **`agda-optimization`** — 19 subcommand-driven graph-level analyses:
   `motif`, `load-bearing`, `polyglot`, `fingerprint`, `debt`, `basket`,
   `ledger`, `echo`, `gravity`, `pyre`, `chokepoint`, `silhouette`, `entwine`,
@@ -79,10 +80,11 @@ One shared library and five executables:
   HTTP+SSE, off by default, localhost-only, never touching the JSON-RPC
   stdout; probes upward from the start port so several daemons coexist.
   Under `--control-port N` (needs `--enable-interact`) it serves a second
-  localhost side channel (`AgdaMcp.Control`, `GET /check?file=…` and
-  `GET /repair?file=…`, diff-only) so the plugin's PostToolUse hook can run the
-  warm check and suggest a repair from outside the MCP transport. Needs `agda`
-  on `$PATH` (or `--agda-bin`).
+  localhost side channel (`AgdaMcp.Control`, `GET /check?file=…`,
+  `GET /repair?file=…` diff-only, and `GET /unused?file=…` = that file's
+  `unused kinds=args`) so the plugin's PostToolUse hook can run the warm
+  check, suggest a repair, and report unused arguments from outside the MCP
+  transport. Needs `agda` on `$PATH` (or `--agda-bin`).
 - **`agda-auto`** — *batch hole-filler* (CLI, no daemon): fills every open hole
   in a file — or a whole project — via `agda-explore`'s Mimer + graph-hint
   ladder (`AgdaInteract.Tools.autoAllCore`, the split-out core of the `auto_all`
@@ -147,6 +149,18 @@ it) — check it first when `AgdaGraph.Schema` drifts on a decode failure.
   parameterised-section member). Absent in legacy JSON → every edge
   treated as `unknown`; `silhouette` falls back to fingerprint-equivalence
   with a stderr note.
+  **`with` was removed from the producer** (fragment format v10) after we
+  showed it was unreachable by construction: `EWith` was tagged only when
+  the target *is* the def's with-helper (`Just qn == withTarget`, from
+  `funWith`), and `funWith` is non-empty exactly on with-functions, which
+  `AgdaDeps.Deps.ignoreDef` drops — so the tag could only be computed while
+  walking a def that is never emitted (zero occurrences in the producer's
+  own golden, and zero on a purpose-built probe, where the helper's edges
+  arrive contracted into the parent tagged `body`). The producer's
+  `$defs/provenance` enum is now `signature | body | module-local |
+  unknown`. `AgdaGraph.Schema` still decodes `"with"` → `ProvWith`; leave
+  it (costless, and no graph can now produce it), but never gate a feature
+  on that tag.
 - **Signatures.** Under `--with-signatures`, each definition carries an
   optional `"type"` string → `Definition.defSig`, consumed by `type_of`.
 
@@ -168,6 +182,58 @@ it) — check it first when `AgdaGraph.Schema` drifts on a decode failure.
   `unsafeDeps`: a soundness escape still type-checks (it only breaks
   `--safe`), while an unsolved meta means the module doesn't type-check at all.
 
+- **Argument usage.** Optional per-def `argUsage` object (additive, no `v` /
+  `nodeKeyVersion` bump) → `Definition.defArgUsage :: Maybe ArgUsage`, omitted
+  when there is nothing to report. The producer reads Agda's own
+  `defArgOccurrences` × `defPolarity`, so the verdict is the compiler's:
+  `removable` (unused **and** variance-irrelevant — binder and every call-site
+  argument can go) and `erasable` (unused but type-relevant — an `@0`
+  candidate), both 0-based telescope indices with **implicits included**, plus
+  `arity`. Consumed by `agda-unused`'s `arg-removable` / `arg-erasable` kinds.
+  Two traps, both load-bearing:
+  - **`removableRequires`** (`{ "0": [1,3] }`, decimal-string keys, values
+    always **greater** than the key) is a *directed* closure, not a group: a
+    listed position drags its whole set. Absent — as a key or as a field —
+    means "removable on its own", **never "unknown"**. Gate every suggested
+    deletion on it (`AgdaGraph.Schema.argRemovableAlone` returns the set to
+    delete, self included); a partial removal strands a later binder.
+  - **Never align an index against `defSig`.** The `type` string reifies the
+    *raw elaborated* telescope while these indices have the enclosing
+    section's telescope subtracted, so for a section-lifted def they disagree
+    — the producer's `Section.drops` is `arity 2` against a three-binder
+    `type`, where index 0 read off the type names the wrong binder. Indices
+    are positions on the definition's **own signature line**. `auArity` <
+    the `type`'s binder count is the tell.
+
+  `binders` (sparse, keyed like `removableRequires`) → `auBinders :: Map Int
+  ArgBinder`, carrying `hiding` (always) and `name` (when the syntactic Pi
+  spine binds one) — taken *after* the section shift, so it agrees with the
+  indices. A position the spine does not reach gets **no entry**, never a
+  guess, so render the bare index there. Rendering the hiding is not
+  cosmetic: "argument 0" of `{a : Set} → List a → …` reads as the first list
+  to any reader, and it is the `{a}`.
+
+  `removable` means deletable from the type **as written**: the producer's
+  `guardDeletable` drops a position still occurring in the codomain or in a
+  later *surviving* domain, checked relevance-blind (`freeIn`) against both
+  the syntactic and the reduced spine. That guard is load-bearing and was
+  added late — before it, 47 of 145 stdlib findings were undeletable, in
+  three shapes: an irrelevant binder used irrelevantly, a **relevant** binder
+  consumed irrelevantly by a *callee* (invisible in the definition's own
+  type — do not try to filter this consumer-side), and an occurrence that
+  reduction relocates out of the codomain. Don't weaken it to "free in no
+  later domain": that destroys `removableRequires`, whose chains are free in
+  later domains by construction.
+
+  A **dotted** name (`P.A`) means the binder was inserted by a `variable`
+  generalisation and is *not on the signature line* — a written binder name
+  cannot contain `.`. `AgdaGraph.Schema.abInserted` is that test. It is
+  sufficient, not necessary (a *mentioned* `variable` is inserted under its
+  own plain name and is indistinguishable), but the gap is harmless: an
+  inserted binder can only be `removable` when the written argument that
+  mentions it is removable too and sits in its closure, so
+  `argRemovableAlone` always returns a set containing something editable.
+  Report it, don't gate on it.
 - **Module option escapes.** Optional top-level `moduleOptionEscapes`
   (`{ module → [flag] }`, ascending, escaping modules only, omitted when
   empty) → `ExpandedGraph.egModuleOptionEscapes`. Carries the file-level
@@ -232,7 +298,12 @@ src/
                                 asserts every one has an entry.
     Motif.hs ... Strata.hs      the analyses (see overview above).
     TermCluster.hs              AST subterm fingerprint clusters
-                                (reads definitionSubtermHashes).
+                                (reads definitionSubtermHashes). Two tiers:
+                                exact duplicates (identical hash MULTISET +
+                                equal defSig when present; no thresholds, so
+                                always rendered, sequential for -NK
+                                byte-identity) above the ranked
+                                similarity clusters.
     ConceptBundle.hs            Apriori over signature-provenance edges.
     HintBench.hs                `hint-bench` CLI skin over AgdaGraph.PremiseBench
                                 (flags + human/JSON render); empty corpus (no
@@ -306,9 +377,11 @@ src/
                                 without a cycle).
     Control.hs                  opt-in localhost control endpoint
                                 (--control-port, needs --enable-interact):
-                                GET /check?file=… and GET /repair?file=…
-                                (diff-only) run the same runners as the `check`
-                                / `repair` tools (MainMcp passes them as plain
+                                GET /check?file=…, GET /repair?file=…
+                                (diff-only) and GET /unused?file=… (the graph
+                                side: `unused scope=<file> kinds=args`) run the
+                                same runners as the `check` / `repair` /
+                                `unused` tools (MainMcp passes them as plain
                                 callbacks — imports no project module, no
                                 cycle); 503 while busy; writes the bound port
                                 to <out-dir>/control-port (removed on

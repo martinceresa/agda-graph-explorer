@@ -148,15 +148,30 @@ parseKindsCSV = fmap concat . mapM parseKindsToken . splitComma
 parseKindsToken :: String -> Either String [FindingKind]
 parseKindsToken "using"         = Right [UnusedInUsing]
 parseKindsToken "blanket"       = Right [UnusedBlanketOpen]
-parseKindsToken "defined"       = Right [DefinedDead, DefinedInternalOnly]
-parseKindsToken "dead"          = Right [DefinedDead]
+parseKindsToken "defined"       = Right [ DefinedDead, FieldNeverProjected
+                                        , DefinedInternalOnly ]
+-- 'dead' keeps reporting every zero-caller definition it always did.
+-- 'FieldNeverProjected' is a RECLASSIFICATION of part of that set (a
+-- dead projection), so leaving it out here would silently shrink an
+-- existing `--kinds=dead` run's output. 'field' selects just those.
+parseKindsToken "dead"          = Right [DefinedDead, FieldNeverProjected]
+parseKindsToken "field"         = Right [FieldNeverProjected]
 parseKindsToken "internal-only" = Right [DefinedInternalOnly]
 parseKindsToken "public"        = Right [PublicWithoutDownstream]
 parseKindsToken "duplicate"     = Right [DuplicateUsingForModule]
+-- Argument-usage verdicts. Separate tokens because their yields differ by
+-- two orders of magnitude (on the standard library: 0.87% of definitions
+-- carry a removable argument, 26.3% an erasable one), so someone hunting
+-- refactors wants `arg-removable` alone. `args` is the both-of-them alias,
+-- mirroring how `defined` covers its pair.
+parseKindsToken "arg-removable" = Right [ArgRemovable]
+parseKindsToken "arg-erasable"  = Right [ArgErasable]
+parseKindsToken "args"          = Right [ArgRemovable, ArgErasable]
 parseKindsToken "all"           = Right
   [ UnusedInUsing, UnusedBlanketOpen
-  , DefinedDead, DefinedInternalOnly
+  , DefinedDead, FieldNeverProjected, DefinedInternalOnly
   , PublicWithoutDownstream, DuplicateUsingForModule
+  , ArgRemovable, ArgErasable
   ]
 parseKindsToken s = Left $ "unknown kind: " ++ s
 

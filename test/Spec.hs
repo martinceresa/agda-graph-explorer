@@ -22,7 +22,7 @@ import           Data.IORef
 import           Data.List            ( elemIndex, intercalate, isInfixOf, sort )
 import qualified Data.IntMap.Strict   as IntMap
 import qualified Data.IntSet          as IntSet
-import           Data.Maybe           ( listToMaybe, mapMaybe, isNothing )
+import           Data.Maybe           ( listToMaybe, mapMaybe, isNothing, fromMaybe )
 import           Data.Text            ( Text )
 import qualified Data.Text            as T
 import           System.Exit          ( ExitCode(..), exitFailure, exitSuccess )
@@ -70,17 +70,22 @@ import           AgdaInteract.Annotate ( Annotation(..), renderMarker, parseMark
 import qualified AgdaRepair.Diagnostic as RD
 import qualified AgdaRepair.Edit       as RE
 import qualified AgdaRepair.Strategy   as RS
-import           Data.Aeson            ( Value, eitherDecode, encode, object, (.=) )
+import           Data.Aeson            ( Value(..), decode, eitherDecode, encode
+                                       , object, (.=) )
 import qualified Data.Aeson.Key        as K
 import qualified Data.Aeson.KeyMap     as KM
 import qualified Data.Map.Strict       as Map
 import           AgdaGraph.Schema      ( ExpandedGraph(..), Definition(..), ReExport(..)
                                        , State(..), Kind(..), Access(..)
+                                       , ArgUsage(..), ArgBinder(..), BinderHiding(..)
+                                       , argRemovableAlone, abInserted
                                        , loadExpandedGraph, explainDecodeError )
 import           AgdaGraph.Index       ( buildIndex, lookupId, unsafeDeps, unsolvedDeps, defAt
                                        , idxRealCount, moduleDependencyOrder
-                                       , idxDefs, idxExternalsSummary )
-import           AgdaUnused.Analysis   ( Finding(..), FindingKind(..), analyse )
+                                       , idxDefs, idxExternalsSummary
+                                       , idxSubtermHashes )
+import           AgdaUnused.Analysis   ( Finding(..), FindingKind(..), Confidence(..)
+                                       , analyse, argumentsJson )
 import           AgdaGraph.ConfigCore  ( unknownKeys, unknownKeyError, nearestKey
                                        , checkKnownKeys, extractValueFlag )
 import           AgdaOptimization.Legend ( legendKeys, renderLegend )
@@ -142,6 +147,9 @@ main = do
   sequence_ (map ($ fails) goalCanonTests)
   sequence_ (map ($ fails) unusedDeadTests)
   sequence_ (map ($ fails) schemaFieldTests)
+  sequence_ (map ($ fails) argUsageTests)
+  sequence_ (map ($ fails) argFindingTests)
+  sequence_ (map ($ fails) dupTests)
   sequence_ (map ($ fails) taintTests)
   sequence_ (map ($ fails) moduleOptionEscapeTests)
   sequence_ (map ($ fails) unsolvedEvidenceTests)
@@ -657,6 +665,187 @@ cycleClientSrc = T.unlines
   , "use n = cycA n"
   ]
 
+-- | A record with two fields, one of which nothing ever projects. The
+-- evidence is exactly a dead def's — zero callers — but the edit is one
+-- level up, in the record declaration, so it must come back as
+-- 'FieldNeverProjected', not as a "delete this def" suggestion. The
+-- plain dead function in the same fixture is the control: the
+-- reclassification is keyed on 'KProjection' and must not widen.
+projFieldJson :: BL.ByteString
+projFieldJson = BLC.pack $ unlines
+  [ "{ \"v\": 2, \"mode\": \"expanded\", \"schemaVersion\": 2"
+  , ", \"modules\": [\"Rec\", \"Rec.R\"]"
+  , ", \"moduleFiles\": { \"Rec\": \"/t/Rec.agda\", \"Rec.R\": \"/t/Rec.agda\" }"
+  , ", \"definitions\":"
+  , "  [ { \"name\": \"Rec.R\",        \"module\": \"Rec\",   \"kind\": \"record\",     \"state\": \"D\" }"
+  , "  , { \"name\": \"Rec.R.used\",   \"module\": \"Rec.R\", \"kind\": \"projection\", \"state\": \"D\" }"
+  , "  , { \"name\": \"Rec.R.unused\", \"module\": \"Rec.R\", \"kind\": \"projection\", \"state\": \"D\" }"
+  , "  , { \"name\": \"Rec.getUsed\",  \"module\": \"Rec\",   \"kind\": \"function\",   \"state\": \"D\" }"
+  , "  ]"
+  -- The two pieces of structure every REAL producer graph carries and the
+  -- first version of this fixture omitted — which is exactly why the check
+  -- shipped inert. A record has a body edge to each of its own fields, and
+  -- the enclosing module re-exports them (1698 of stdlib's 1702
+  -- projections). Neither is a use; without both here the test passes
+  -- whether or not the fix is present.
+  , ", \"definitionEdges\": [ [\"Rec.getUsed\", \"Rec.R.used\"]"
+  , "                     , [\"Rec.R\", \"Rec.R.used\"], [\"Rec.R\", \"Rec.R.unused\"] ]"
+  , ", \"reexports\": [ { \"from\": \"Rec\", \"to\": \"Rec.R\""
+  , "                 , \"names\": [\"Rec.R.used\", \"Rec.R.unused\"] } ]"
+  , "}"
+  ]
+
+projFieldSrc :: Text
+projFieldSrc = T.unlines
+  [ "module Rec where"
+  , ""
+  , "record R : Set1 where"
+  , "  field"
+  , "    used   : Set"
+  , "    unused : Set"
+  , ""
+  , "getUsed : R -> Set"
+  , "getUsed r = R.used r"
+  ]
+
+-- | The `argUsage`-driven findings. Four definitions cover the whole
+-- decision surface: a requirement chain that must render its closure, a
+-- private def and an unexported one (both contained, so High), the same
+-- shape exported WITH a cross-module user (Low — the deletion is an API
+-- break we cannot scope), and an erasable-only def. `plain` carries no
+-- `argUsage` at all, which is every def on a pre-field graph.
+argFindingJson :: BL.ByteString
+argFindingJson = BLC.pack $ unlines
+  [ "{ \"v\": 2, \"mode\": \"expanded\", \"schemaVersion\": 2"
+  , ", \"modules\": [\"AU\", \"Client\"]"
+  , ", \"moduleFiles\": { \"AU\": \"/t/AU.agda\", \"Client\": \"/t/Client.agda\" }"
+  , ", \"definitions\":"
+  , "  [ { \"name\": \"AU.chain\", \"module\": \"AU\", \"kind\": \"function\", \"line\": 3"
+  , "    , \"argUsage\": { \"removable\": [0,1,3]"
+  , "                  , \"removableRequires\": { \"0\": [1,3] }"
+  , "                  , \"erasable\": [], \"arity\": 4 } }"
+  , "  , { \"name\": \"AU.solo\", \"module\": \"AU\", \"kind\": \"function\", \"line\": 6"
+  , "    , \"argUsage\": { \"removable\": [0], \"erasable\": [], \"arity\": 2 } }"
+  , "  , { \"name\": \"AU.priv\", \"module\": \"AU\", \"kind\": \"function\", \"line\": 9"
+  , "    , \"access\": \"private\""
+  , "    , \"argUsage\": { \"removable\": [0], \"erasable\": [], \"arity\": 2 } }"
+  , "  , { \"name\": \"AU.eras\", \"module\": \"AU\", \"kind\": \"function\", \"line\": 12"
+  , "    , \"argUsage\": { \"removable\": [], \"erasable\": [0], \"arity\": 2"
+  , "                  , \"binders\": { \"0\": {\"hiding\": \"implicit\", \"name\": \"a\"} } } }"
+  -- Binder rendering: an instance argument, an unnamed explicit (which
+  -- must NOT gain a noise `_`), and a generalisation-inserted position.
+  , "  , { \"name\": \"AU.shapes\", \"module\": \"AU\", \"kind\": \"function\", \"line\": 18"
+  , "    , \"argUsage\": { \"removable\": [0,1,2], \"erasable\": [], \"arity\": 4"
+  , "                  , \"binders\": { \"0\": {\"hiding\": \"instance\", \"name\": \"d\"}"
+  , "                                , \"1\": {\"hiding\": \"explicit\"}"
+  , "                                , \"2\": {\"hiding\": \"implicit\", \"name\": \"P.A\"} } } }"
+  , "  , { \"name\": \"AU.plain\", \"module\": \"AU\", \"kind\": \"function\", \"line\": 15 }"
+  , "  , { \"name\": \"Client.use\", \"module\": \"Client\", \"kind\": \"function\", \"line\": 3 }"
+  , "  ]"
+  -- The cross-module user is what makes `chain`'s deletion unscopable.
+  , ", \"definitionEdges\": [ [\"Client.use\", \"AU.chain\"] ]"
+  , "}"
+  ]
+
+argFindingSrc :: Text
+argFindingSrc = T.unlines
+  [ "module AU where", "", "chain : (X : Set) -> X -> (n : Nat) -> Vec X n -> Nat"
+  , "chain _ _ n _ = n", "", "solo : Nat -> Nat -> Nat", "solo _ b = b", ""
+  , "priv : Nat -> Nat -> Nat", "priv _ b = b", ""
+  , "eras : {A : Set} -> A -> A", "eras a = a", ""
+  , "plain : Nat -> Nat", "plain n = n"
+  ]
+
+argFindingClientSrc :: Text
+argFindingClientSrc = T.unlines
+  [ "module Client where", "", "use : Nat", "use = chain Nat zero zero []" ]
+
+argFindingTests :: [Check]
+argFindingTests =
+  fixtureChecks argFindingJson
+    [ ("/t/AU.agda", argFindingSrc), ("/t/Client.agda", argFindingClientSrc) ] $
+    \findings ->
+      let argsOf sh = [ f | f <- findings, symbolFinding f == Just sh
+                          , kindFinding f `elem` [ArgRemovable, ArgErasable] ]
+          kindsOf sh = map kindFinding (argsOf sh)
+          noteOf  sh = [ n | f <- argsOf sh, Just n <- [noteFinding f] ]
+          confOf  sh = map confFinding (argsOf sh)
+      in
+      [ checkEq "argUsage finding: a removable verdict fires once per def"
+          [ArgRemovable] (kindsOf "chain")
+      , check "argUsage finding: a chained position renders its closure"
+          (any ("0 (with 1, 3)" `T.isInfixOf`) (noteOf "chain"))
+      , check "argUsage finding: independent positions render bare"
+          (any (\n -> "1, 3 of 4" `T.isInfixOf` n) (noteOf "chain"))
+      , check "argUsage finding: a single position reads singular"
+          (any ("argument 0 of 2" `T.isInfixOf`) (noteOf "solo"))
+      , check "argUsage finding: the blast radius is reported"
+          (any ("other module(s)" `T.isInfixOf`) (noteOf "chain"))
+        -- Confidence grades the DELETION, never the analysis: Agda's
+        -- verdict is equally certain in all three of these.
+      , checkEq "argUsage confidence: exported with a cross-module user is Low"
+          [Low] (confOf "chain")
+      , checkEq "argUsage confidence: exported with no outside user is High"
+          [High] (confOf "solo")
+      , checkEq "argUsage confidence: private is High"
+          [High] (confOf "priv")
+      , checkEq "argUsage finding: erasable is its own kind"
+          [ArgErasable] (kindsOf "eras")
+      , checkEq "argUsage finding: a def without the field yields nothing"
+          [] (kindsOf "plain")
+        -- The `arguments` JSON payload is a public contract: the offline
+        -- delete-and-retypecheck check and any cascade loop act on it.
+        -- `delete` is the load-bearing key — acting on a bare position
+        -- instead of its set is what strands a binder.
+      , checkEq "arguments JSON: removable carries positions, arity and delete sets"
+          -- `chain` is `removable [0,1,3]` requiring only `{"0": [1,3]}`, so
+          -- 1 and 3 each stand alone; `binders` is empty because this
+          -- fixture carries none (the binder shapes are pinned on `shapes`).
+          (Just (object [ "positions" .= [0 :: Int, 1, 3]
+                        , "arity"     .= (4 :: Int)
+                        , "binders"   .= object []
+                        , "delete"    .= object
+                            [ "0" .= [0 :: Int, 1, 3]
+                            , "1" .= [1 :: Int]
+                            , "3" .= [3 :: Int] ] ]))
+          (listToMaybe [ argumentsJson (kindFinding f) au
+                       | f <- argsOf "chain", Just au <- [argsFinding f] ])
+      , checkEq "arguments JSON: binders are carried through for the flagged positions"
+          (Just (object [ "0" .= object [ "hiding" .= ("instance" :: Text)
+                                        , "name"   .= ("d" :: Text) ]
+                        , "1" .= object [ "hiding" .= ("explicit" :: Text) ]
+                        , "2" .= object [ "hiding" .= ("implicit" :: Text)
+                                        , "name"   .= ("P.A" :: Text) ] ]))
+          (listToMaybe [ b
+                       | f <- argsOf "shapes", Just au <- [argsFinding f]
+                       , Object o <- [argumentsJson (kindFinding f) au]
+                       , Just b <- [KM.lookup "binders" o] ])
+      , check "arguments JSON: erasable carries positions but NO delete key"
+          (case [ argumentsJson (kindFinding f) au
+                | f <- argsOf "eras", Just au <- [argsFinding f] ] of
+             [Object o] -> KM.member "positions" o && not (KM.member "delete" o)
+             _          -> False)
+      , check "arguments JSON: absent on every non-argument finding"
+          (all (isNothing . argsFinding)
+               [ f | f <- findings
+                   , kindFinding f `notElem` [ArgRemovable, ArgErasable] ])
+        -- Binder rendering. The implicit brackets are the whole point:
+        -- "argument 0" on `{a : Set} → List a → …` reads as the first
+        -- list to anyone, and it is the `{a}`.
+      , check "argUsage render: an implicit shows Agda's braces"
+          (any ("argument 0 {a} of 2" `T.isInfixOf`) (noteOf "eras"))
+      , check "argUsage render: an instance shows its brackets"
+          (any ("0 ⦃d⦄" `T.isInfixOf`) (noteOf "shapes"))
+      , check "argUsage render: an unnamed explicit stays a bare index"
+          (any ("1," `T.isInfixOf`) (noteOf "shapes"))
+      , check "argUsage render: an unnamed explicit gains no placeholder"
+          (not (any ("1 _" `T.isInfixOf`) (noteOf "shapes")))
+      , check "argUsage render: a generalisation-inserted binder is called out"
+          (any ("2 inserted by a `variable`" `T.isInfixOf`) (noteOf "shapes"))
+      , check "argUsage render: only the dotted position is called out"
+          (not (any ("0, 2 inserted" `T.isInfixOf`) (noteOf "shapes")))
+      ]
+
 -- | Decode a fixture graph and hand the resulting findings to the
 -- assertion builder; a decode failure surfaces as a single failing
 -- check.
@@ -709,6 +898,24 @@ unusedDeadTests = concat
           (DefinedDead `notElem` kindOf "cycB")
       , checkEq "reachable cycle: cycB stays internal-only (via cycA)"
           [DefinedInternalOnly] (kindOf "cycB")
+      ]
+
+  , fixtureChecks projFieldJson [("/t/Rec.agda", projFieldSrc)] $ \findings ->
+      let kindOf sh = [ kindFinding f | f <- findings, symbolFinding f == Just sh ]
+          confOf sh = [ confFinding f | f <- findings, symbolFinding f == Just sh ]
+          noteOf sh = [ n | f <- findings, symbolFinding f == Just sh
+                          , Just n <- [noteFinding f] ]
+      in
+      [ checkEq "never-projected field is FieldNeverProjected, not DefinedDead"
+          [FieldNeverProjected] (kindOf "unused")
+      , checkEq "a never-projected field is always Low confidence"
+          [Low] (confOf "unused")
+      , check "its note points at the record, not at the projection"
+          (any ("remove the field" `T.isInfixOf`) (noteOf "unused"))
+      , checkEq "a projected field is not reported at all"
+          [] (kindOf "used")
+      , checkEq "the reclassification does not widen: a dead function stays dead"
+          [DefinedDead] (kindOf "getUsed")
       ]
   ]
 
@@ -775,6 +982,151 @@ taintGraphJson = BLC.pack $ unlines
   , ", \"definitionEdges\": [ [\"Proof.thm\", \"Proof.step\"], [\"Proof.step\", \"Danger.loops\"] ]"
   , "}"
   ]
+
+-- The producer's optional per-def `argUsage` object (agda-deps
+-- `Prompts/ArgUsage.md`). Shapes mirrored from its committed golden:
+-- `ArgUsage.chain` (a requirement chain), `ArgUsage.indep` (independent,
+-- so no `removableRequires` key at all) and `Test.map` (erasable only,
+-- empty `removable`). The fourth def carries no `argUsage`, which is what
+-- every def on a pre-field graph looks like.
+
+argUsageGraphJson :: BL.ByteString
+argUsageGraphJson = BLC.pack $ unlines
+  [ "{ \"v\": 2, \"mode\": \"expanded\", \"schemaVersion\": 2"
+  , ", \"modules\": [\"AU\"]"
+  , ", \"moduleFiles\": {}"
+  , ", \"definitions\":"
+  , "  [ { \"name\": \"AU.chain\", \"module\": \"AU\", \"kind\": \"function\""
+  , "    , \"argUsage\": { \"removable\": [0,1,3]"
+  , "                  , \"removableRequires\": { \"0\": [1,3], \"1\": [3] }"
+  -- Sparse: position 3 has no entry (the spine did not reach it), and
+  -- position 1 has hiding but no name.
+  , "                  , \"binders\": { \"0\": {\"hiding\": \"implicit\", \"name\": \"P.A\"}"
+  , "                                , \"1\": {\"hiding\": \"instance\"} }"
+  , "                  , \"erasable\": [], \"arity\": 4 } }"
+  , "  , { \"name\": \"AU.indep\", \"module\": \"AU\", \"kind\": \"function\""
+  , "    , \"argUsage\": { \"removable\": [0,2], \"erasable\": [], \"arity\": 3 } }"
+  , "  , { \"name\": \"AU.eras\", \"module\": \"AU\", \"kind\": \"function\""
+  , "    , \"argUsage\": { \"removable\": [], \"erasable\": [0,1], \"arity\": 4 } }"
+  , "  , { \"name\": \"AU.plain\", \"module\": \"AU\", \"kind\": \"function\" }"
+  , "  ]"
+  , ", \"definitionEdges\": []"
+  , "}"
+  ]
+
+argUsageTests :: [Check]
+argUsageTests = case eitherDecode argUsageGraphJson :: Either String ExpandedGraph of
+  Left err -> [ check ("argUsage fixture decodes: " ++ err) False ]
+  Right g ->
+    let byName n = listToMaybe [ d | d <- egDefinitions g, defName d == n ]
+        auOf n   = byName n >>= defArgUsage
+        chain    = auOf "AU.chain"
+    in
+    [ checkEq "argUsage: removable decodes"
+        (Just [0, 1, 3]) (fmap auRemovable chain)
+    , checkEq "argUsage: removableRequires decodes off decimal-string keys"
+        (Just (Map.fromList [(0, [1, 3]), (1, [3])]))
+        (fmap auRemovableRequires chain)
+    , checkEq "argUsage: arity decodes" (Just 4) (fmap auArity chain)
+    , checkEq "argUsage: an absent removableRequires is an EMPTY map, not a failure"
+        (Just Map.empty) (fmap auRemovableRequires (auOf "AU.indep"))
+    , checkEq "argUsage: erasable-only decodes with an empty removable"
+        (Just ([], [0, 1])) (fmap (\a -> (auRemovable a, auErasable a)) (auOf "AU.eras"))
+    , checkEq "argUsage: a def without the key decodes to Nothing (pre-field graphs)"
+        (Just Nothing) (fmap defArgUsage (byName "AU.plain"))
+      -- The deletion set a consumer may actually propose. A position with
+      -- no requirement stands alone; a chained one drags its closure in.
+    , checkEq "argRemovableAlone: an independent position stands alone"
+        (Just [2]) (fmap (`argRemovableAlone` 2) (auOf "AU.indep"))
+    , checkEq "argRemovableAlone: a chained position pulls its closure, self included"
+        (Just [0, 1, 3]) (fmap (`argRemovableAlone` 0) chain)
+    , checkEq "argRemovableAlone: a later link pulls only what it needs"
+        (Just [1, 3]) (fmap (`argRemovableAlone` 1) chain)
+    , checkEq "argRemovableAlone: a position that is NOT removable yields nothing"
+        (Just []) (fmap (`argRemovableAlone` 2) chain)
+      -- Binders: sparse, hiding always present, name optional, and a
+      -- position the producer could not reach simply has no entry.
+    , checkEq "argUsage: binders decode with hiding and an optional name"
+        (Just (Just (BHImplicit, Just "P.A")))
+        (fmap (fmap (\b -> (abHiding b, abName b)) . Map.lookup 0 . auBinders) chain)
+    , checkEq "argUsage: a binder may carry hiding with no name"
+        (Just (Just (BHInstance, Nothing)))
+        (fmap (fmap (\b -> (abHiding b, abName b)) . Map.lookup 1 . auBinders) chain)
+    , checkEq "argUsage: an unreached position has NO binder entry, not a guess"
+        (Just Nothing) (fmap (Map.lookup 3 . auBinders) chain)
+    , checkEq "argUsage: binders default to empty on a graph without them"
+        (Just Map.empty) (fmap auBinders (auOf "AU.indep"))
+      -- A dotted name is Agda's spelling for a generalisation dependency,
+      -- and a written binder name cannot contain a '.'.
+    , checkEq "abInserted: a dotted name marks a generalisation-inserted binder"
+        (Just (Just True)) (fmap (fmap abInserted . Map.lookup 0 . auBinders) chain)
+    , checkEq "abInserted: an unnamed binder is not claimed to be inserted"
+        (Just (Just False)) (fmap (fmap abInserted . Map.lookup 1 . auBinders) chain)
+      -- Round-trip: Union re-encodes decoded graphs, so the object must
+      -- survive, and must not grow an empty removableRequires key.
+    , checkEq "argUsage: ToJSON round-trips the object"
+        chain (decode (encode chain) :: Maybe ArgUsage)
+    , check "argUsage: empty removableRequires and binders are omitted on re-encode"
+        (case auOf "AU.indep" >>= decode . encode :: Maybe (KM.KeyMap Value) of
+           Just o  -> not (KM.member "removableRequires" o)
+                        && not (KM.member "binders" o)
+           Nothing -> False)
+    ]
+
+-- term-cluster's exact-duplicate tier: definitions whose subterm-hash
+-- MULTISET is identical AND whose signature matches. The three things
+-- the tier must get right are all in one fixture — order-insensitivity
+-- (a bag, not a sequence), the signature gate (equal bags, different
+-- types, no group), and the empty-bag skip (two hash-less defs are not
+-- duplicates of each other, they are just absent from the data).
+
+dupGraphJson :: BL.ByteString
+dupGraphJson = BLC.pack $ unlines
+  [ "{ \"v\": 2, \"mode\": \"expanded\", \"schemaVersion\": 2"
+  , ", \"modules\": [\"M\"]"
+  , ", \"moduleFiles\": {}"
+  , ", \"definitions\":"
+  , "  [ { \"name\": \"M.a\", \"module\": \"M\", \"kind\": \"function\", \"type\": \"A -> B\" }"
+  , "  , { \"name\": \"M.b\", \"module\": \"M\", \"kind\": \"function\", \"type\": \"A -> B\" }"
+  , "  , { \"name\": \"M.c\", \"module\": \"M\", \"kind\": \"function\", \"type\": \"A -> B\" }"
+  , "  , { \"name\": \"M.d\", \"module\": \"M\", \"kind\": \"function\", \"type\": \"X\" }"
+  , "  , { \"name\": \"M.e\", \"module\": \"M\", \"kind\": \"function\", \"type\": \"Y\" }"
+  , "  , { \"name\": \"M.f\", \"module\": \"M\", \"kind\": \"function\", \"type\": \"Z\" }"
+  , "  , { \"name\": \"M.g\", \"module\": \"M\", \"kind\": \"function\", \"type\": \"Z\" }"
+  , "  , { \"name\": \"M.h\", \"module\": \"M\", \"kind\": \"function\", \"type\": \"Q\" }"
+  , "  , { \"name\": \"M.i\", \"module\": \"M\", \"kind\": \"function\", \"type\": \"Q\" }"
+  , "  ]"
+  , ", \"definitionEdges\": []"
+  -- a,b,c: one bag, b's written in a different order. d,e: same bag,
+  -- different signature. f,g: no hashes at all. h,i: a plain pair.
+  , ", \"definitionSubtermHashes\":"
+  , "  [ [1,2,3], [3,2,1], [1,2,3], [7,8], [7,8], [], [], [9], [9] ]"
+  , "}"
+  ]
+
+dupTests :: [Check]
+dupTests = case eitherDecode dupGraphJson :: Either String ExpandedGraph of
+  Left err -> [ check ("term-cluster dup fixture decodes: " ++ err) False ]
+  Right g ->
+    let ix     = buildIndex g
+        hashes = fromMaybe IntMap.empty (idxSubtermHashes ix)
+        groups = TermCluster.rankDupGroups ix
+                   (TermCluster.exactDuplicates ix
+                      (TermCluster.inScopeEntries hashes IntSet.empty))
+        names  = map (map (defName . defAt ix) . TermCluster.dgMembers) groups
+        flat   = concat names
+    in
+    [ checkEq "term-cluster: duplicates group by MULTISET, not hash order"
+        [["M.a", "M.b", "M.c"], ["M.h", "M.i"]] names
+    , checkEq "term-cluster: the larger group ranks first"
+        [3, 2] (map (length . TermCluster.dgMembers) groups)
+    , checkEq "term-cluster: each group reports its shared bag size"
+        [3, 1] (map TermCluster.dgTerms groups)
+    , check "term-cluster: an identical bag with a different signature is no group"
+        (all (`notElem` flat) ["M.d", "M.e"])
+    , check "term-cluster: two hash-less defs are not duplicates of each other"
+        (all (`notElem` flat) ["M.f", "M.g"])
+    ]
 
 taintTests :: [Check]
 taintTests = case eitherDecode taintGraphJson :: Either String ExpandedGraph of
@@ -940,7 +1292,8 @@ mkDef :: Text -> Text -> Kind -> Maybe Text -> Definition
 mkDef nm md kind sig = Definition
   { defId = -1, defName = nm, defModule = md, defState = Defined
   , defKind = kind, defLine = Nothing, defAccess = Public
-  , defSig = sig, defUnsafe = [], defUnsolvedMetas = 0, defX = 0, defY = 0, defOrigin = Nothing }
+  , defSig = sig, defUnsafe = [], defUnsolvedMetas = 0, defArgUsage = Nothing
+  , defX = 0, defY = 0, defOrigin = Nothing }
 
 lemmaRankTests :: [Check]
 lemmaRankTests =

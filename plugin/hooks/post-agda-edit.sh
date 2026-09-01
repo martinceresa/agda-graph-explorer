@@ -4,7 +4,10 @@
 # Phase 2 (preferred): if the agda-explore daemon serves its control
 # endpoint (--control-port; discovered via <project>/.agda-explore/
 # control-port), run a REAL warm `check` of the edited file and inject the
-# verdict + diagnostics + open goals as context.
+# verdict + diagnostics + open goals as context. On a ✗ it appends a
+# diff-only `repair` suggestion; on a ✓ it appends any unused-ARGUMENT
+# findings, which a clean check cannot report (Agda has no warning for an
+# argument a definition never uses).
 #
 # Phase 1 (fallback): no endpoint (or busy/timeout) → inject a one-line
 # nudge to validate via the bridge's `check` tool, rate-limited per
@@ -48,6 +51,34 @@ if [[ -r "$port_file" ]]; then
 
 ── suggested repair (diff-only; NOT applied — review and apply, or call \`repair file=$file write:true\`) ──
 $rep"
+      fi
+    else
+      # A ✓ file can still carry arguments nothing uses: that verdict comes
+      # from the GRAPH (the producer's argUsage, Agda's own occurrence and
+      # polarity analysis), never from a type-check, so `check` alone can
+      # never surface it. /unused runs `unused scope=<file> kinds=args`.
+      #
+      # `# total: 0 finding(s)` is agda-unused's own zero line — skip the
+      # whole section then, so a clean edit stays silent. A 500 (file not in
+      # the graph yet, no agda-unused binary) fails `curl -sf` and is also
+      # silent. The graph may still predate this edit; the tool's own
+      # freshness footer says so when it does, and the next edit's hook
+      # catches what the background rebuild has since landed.
+      #
+      # 20s, not the 90s the bridge routes get: this is an agda-unused
+      # subprocess over an already-loaded graph (sub-second in practice), and
+      # it has to fit inside what `check` leaves of the hook's own 120s
+      # timeout. A cold daemon whose first query blocks on a full build hits
+      # the cap and degrades to silence, which is the right trade for a
+      # report-only section.
+      if un=$(curl -sf --max-time 20 --get \
+                "http://127.0.0.1:$port/unused" \
+                --data-urlencode "file=$file" 2>/dev/null) \
+           && ! grep -q '^# total: 0 finding' <<<"$un"; then
+        ctx="$result
+
+── unused arguments in $file (agda-unused kinds=args; NOT applied) ──
+$un"
       fi
     fi
     jq -n --arg ctx "$ctx" \

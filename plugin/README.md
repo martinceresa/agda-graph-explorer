@@ -1,9 +1,9 @@
-# agda-explore — Claude Code plugin
+# agda-explore — Model Context Protocol plugin
 
-An interactive Agda library explorer for [Claude Code](https://code.claude.com). It bundles:
+An interactive Agda library explorer for LLM agents. It bundles:
 
-- **An MCP server (`agda-explore`)** — a daemon that holds an Agda project's dependency graph in memory and answers point queries instead of `grep`. The graph is regenerated on the fly (re-runs `agda-deps`, hot-swaps the in-memory graph). `--enable-interact` adds a write-side interaction bridge; `--inspect` adds a localhost web inspector (both below).
-- **A skill (`agda-explore`)** — teaches Claude when to use the tools and how to read their output.
+- **An MCP server (`agda-explore`)** — a daemon that holds an Agda project's dependency graph in memory and answers point queries. The graph is regenerated on the fly (re-runs `agda-deps`, hot-swaps the in-memory graph). `--enable-interact` adds a write-side interaction bridge; `--inspect` adds a localhost web inspector (both below).
+- **A skill (`agda-explore`)** — teaches LLM agents when to use the tools and how to read their output.
 - **Two Agda agents** — `agda-simplifier` and `agda-protocol-formalizer`.
 - **Two hooks** — after any text edit to an Agda file, validate it through the warm bridge (or nudge to); on the first structural `grep`, route to the graph tools instead (below).
 
@@ -17,13 +17,18 @@ Build this repo's binaries (GHC 9.14.x + cabal 3.16; `cabal.project` pins `ghc-9
 cabal build agda-explore agda-unused
 ```
 
-That's enough — the launcher finds `agda-explore` in the `dist-newstyle` build tree. Optionally put the binaries on `PATH`:
+That's enough — the launcher finds `agda-explore` in the `dist-newstyle` build
+tree. Optionally put the binaries on `PATH`:
 
 ```bash
 cabal install agda-explore agda-unused   # onto PATH
 ```
 
-At runtime `agda-explore` also needs **`agda-deps`** — a *separate* repo (the Agda backend that builds the graph); put it on `PATH`. It needs `agda-unused` for the `unused` tool. If any aren't discoverable, point at them with `AGDA_EXPLORE_BIN`, `AGDA_DEPS_BIN`, `AGDA_UNUSED_BIN`. Preloaded mode (a fixed `--graph`) needs no `agda-deps`.
+At runtime `agda-explore` also needs **`agda-deps`** — a *separate* repo (the
+Agda backend that builds the graph); put it on `PATH`. It needs `agda-unused`
+for the `unused` tool. If any aren't discoverable, point at them with
+`AGDA_EXPLORE_BIN`, `AGDA_DEPS_BIN`, `AGDA_UNUSED_BIN`. Preloaded mode (a fixed
+`--graph`) needs no `agda-deps`.
 
 ## Install the plugin
 
@@ -66,7 +71,7 @@ or check a project-scoped `.mcp.json` into the Agda repo:
 
 The launcher starts the server with a few opinionated defaults (all overridable):
 
-- **`--tool-tier core`** — advertises the measured-used tool subset (read tools + the `load`/`goal_brief`/`inspect`/`check`/`repair`/`lemmas` validate loop), cutting the agent's per-choice decision-load. The authoring/advanced tools (`auto`, `construct`, `scratch`, `give_file`, `new_module`, and `path`/`roots`/`similar_*`) stay reachable — add `--tool-tier full` to `.mcp.json`'s `args` to advertise them.
+- **`--tool-tier core`**, **overridden to `full` by `.mcp.json`'s `args`** — the launcher script itself passes `core` (the measured-used subset: read tools + the `load`/`goal_brief`/`inspect`/`check`/`repair`/`lemmas` validate loop), but `.mcp.json` appends `--tool-tier full` after it and flags are last-wins, so the shipped default advertises **every** tool, authoring included (`auto`, `construct`, `scratch`, `give_file`, `new_module`, and `path`/`roots`/`similar_*`). To cut the agent's per-choice decision-load back down, drop that pair from `args` (a `tool-tier:` in `.agda-explore.yml` will *not* do it — the launcher's CLI flag beats the config file).
 - **`--enable-interact --control-port 7100`** — turns on the write bridge and a localhost control endpoint (port probed upward on clash) so the edit hook runs a *real* warm `check` after every Agda edit, not just a nudge. Set **`AGDA_EXPLORE_NO_INTERACT=1`** to opt out (e.g. no `agda` on the machine).
 
 ## Usage
@@ -122,7 +127,7 @@ Start with **`--enable-interact`** (or `enable-interact: true` in `.agda-explore
 | `auto`         | Mimer proof search on one goal → a fill diff, or a "no solution" note. On failure it retries seeded with the top `find_lemma` lemmas for the goal, so one-lemma goals close (`timeout` / `hints` tune). The recommended when-stuck move. |
 | `construct`    | Primary hole-filling interface: drive holes with a SEQUENCE of `{op, goal, …}` steps against one warm load — `give` (`term`) / `refine` (`expr`) / `case_split` (`var`) / `auto` → one combined diff. A single `{op:auto, goal:"*"}` step runs Mimer over EVERY open goal. |
 | `scratch`      | Scratch-module lifecycle (batcher): `op:open` opens an ephemeral scratch module (optional `target` seeds imports) to build a new def in isolation; `op:promote` splices its def(s) into the real `target`, merges imports, re-validates the whole target (honours `write`); `op:discard` drops it. |
-| `check`        | Type-check a module (on-disk or `content` dry-run) → ✓/✗ + every error/warning + open goals. On the live path it also probes remaining goals with Mimer and reports ready-made solutions inline (`--no-auto-hints` disables; `--auto-hints-limit` / `--auto-hints-timeout` tune). |
+| `check`        | Type-check a module (on-disk or `content` dry-run) → ✓/✗ + every error/warning + open goals. On the live path it also probes remaining goals with Mimer, seeded with the top graph-ranked in-scope lemmas, and reports ready-made solutions inline (`--no-auto-hints` disables; `--auto-hints-limit` / `--auto-hints-timeout` / `--auto-hints-lemmas` tune). |
 | `give_file`    | Author a whole file (`content`) or append a block (`append`), guarded + type-checked → diff (or `write:true`). |
 | `new_module`   | Scaffold a NEW validated module: header, literate fences, imports resolved off the graph, a hole per `{name,type}` stub. |
 | `lemmas`       | Goal-directed lemma search off a live goal's type → candidates to feed a `construct` `give`/`refine` step. |
@@ -140,7 +145,7 @@ loop.
 
 The plugin ships two hooks (`hooks/hooks.json`; they need `jq` on `PATH` and are active only while the plugin is enabled):
 
-- **`post-agda-edit`** (PostToolUse on `Edit`/`Write`): after any text edit to an `.agda` / `.lagda*` file, close the edit→check loop. If the daemon serves its control endpoint (below), the hook runs a REAL warm `check` and injects the verdict + diagnostics + goals as context; otherwise it injects a one-line nudge to call the bridge's `check` (rate-limited per session+file, so refactors aren't spammed). It never blocks the edit.
+- **`post-agda-edit`** (PostToolUse on `Edit`/`Write`): after any text edit to an `.agda` / `.lagda*` file, close the edit→check loop. If the daemon serves its control endpoint (below), the hook runs a REAL warm `check` and injects the verdict + diagnostics + goals as context; otherwise it injects a one-line nudge to call the bridge's `check` (rate-limited per session+file, so refactors aren't spammed). On a `✗` it appends a diff-only `repair` suggestion. On a `✓` it appends any **unused-argument** findings for that file (`unused kinds=args`) — the one defect class a clean check cannot report, since Agda raises no warning for an argument a definition never uses; nothing is injected when there are none. It never blocks the edit and never writes.
 - **`pre-grep-route`** (PreToolUse on `Grep`): the FIRST structural grep over Agda sources in a session is denied with the grep→graph tool mapping (`locate` / `search` / `callers` / `callees` / `type_of` / `find_lemma`); every later grep sails through — text searches over prose and comments are legitimate.
 
 **Kill switch:** disable the plugin, or delete/blank `hooks/hooks.json`.
@@ -158,9 +163,11 @@ scripts/tool-usage-report.sh <project>/.agda-explore/query-log.jsonl
 That table is the evidence for tuning `--tool-tier` (which tools are actually
 used, and how reliably). Needs `jq`.
 
-### Control endpoint (Phase 2 of the edit hook)
+### Control endpoint
 
-Start the daemon with **`--control-port N`** (or `control-port: N` in `.agda-explore.yml`; needs `--enable-interact`) to serve `GET /check?file=…` and `GET /repair?file=…` (diff-only, never writes) on localhost — the same warm check and repair the MCP `check` / `repair` tools run, callable by the hook from outside the MCP transport. The bound port (probed upward from N) is written to `<out-dir>/control-port` for discovery and removed on shutdown; a busy endpoint answers `503` and the hook degrades to the nudge. Localhost-only, off by default.
+Start the daemon with **`--control-port N`** (or `control-port: N` in `.agda-explore.yml`; needs `--enable-interact`) to serve `GET /check?file=…`, `GET /repair?file=…` (diff-only, never writes) and `GET /unused?file=…` (that file's unused-argument findings, `kinds=args`) on localhost — the same runners the MCP `check` / `repair` / `unused` tools use, callable by the hook from outside the MCP transport. The bound port (probed upward from N) is written to `<out-dir>/control-port` for discovery and removed on shutdown; a busy endpoint answers `503` and the hook degrades to the nudge. Localhost-only, off by default.
+
+`/unused` reads the **graph**, not the live session, so it reports what the last `agda-deps` build saw: right after an edit the finding set can lag by one rebuild, which the report's own freshness footer says when it does. The next edit's hook picks up whatever the background rebuild has since landed.
 
 ## Live web inspector (opt-in)
 

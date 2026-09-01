@@ -45,6 +45,13 @@
 -- The hash itself is opaque (we don't carry the source 'Term' across
 -- the JSON boundary); reports surface it as a 16-character hex
 -- fingerprint so a human can grep for it.
+--
+-- Above the ranked clusters the report carries a sharper tier, __exact
+-- duplicates__: definitions whose subterm-hash MULTISETS are identical
+-- and whose rendered signature (under @--with-signatures@) matches. A
+-- cluster says "these definitions share a fragment"; a group says
+-- "these definitions are assembled from exactly the same bag of
+-- fragments". It needs no threshold, so it is always rendered.
 module AgdaOptimization.TermCluster
   ( Options(..)
   , SortBy(..)
@@ -53,6 +60,11 @@ module AgdaOptimization.TermCluster
   , parseOptions
   , applyConfig
   , run
+    -- * Exposed for the offline suite
+  , DupGroup(..)
+  , inScopeEntries
+  , exactDuplicates
+  , rankDupGroups
   ) where
 
 import           Control.DeepSeq      ( NFData(..) )
@@ -64,10 +76,10 @@ import qualified Data.IntMap.Strict   as IM
 import           Data.IntMap.Strict   ( IntMap )
 import qualified Data.IntSet          as IS
 import           Data.IntSet          ( IntSet )
-import           Data.List            ( sortBy )
+import           Data.List            ( sort, sortBy, sortOn )
 import qualified Data.Map.Strict      as M
 import           Data.Map.Strict      ( Map )
-import           Data.Maybe           ( mapMaybe )
+import           Data.Maybe           ( isJust, mapMaybe )
 import           Data.Ord             ( Down(..), comparing )
 import           Data.Text            ( Text )
 import qualified Data.Text            as T
@@ -252,11 +264,13 @@ run ix gOpts opts@Options{..} = case idxSubtermHashes ix of
                             Just m  -> not (IM.null m)
                             Nothing -> False
         !excluded       = excludedDefIds ix optExcludeModuleRegex
-        !buckets        = buildBuckets ix sthMap stdMap excluded
+        !entries        = inScopeEntries sthMap excluded
+        !buckets        = buildBuckets ix entries stdMap
         !totalHashes    = totalHashCount sthMap
         !distinctHashes = M.size buckets
         !ranked         = rankClusters ix opts buckets
         !shown          = take optTopN ranked
+        !dupGroups      = rankDupGroups ix (exactDuplicates ix entries)
     when (not hasDepths) $ hPutStrLn stderr
       "agda-optimization term-cluster: note: graph.json has no \
       \'definitionSubtermDepths' field — meanDepth defaults to 1.0 \
@@ -265,10 +279,11 @@ run ix gOpts opts@Options{..} = case idxSubtermHashes ix of
     case gOutFormat gOpts of
       OutJson  -> emitJsonReport (gOutPath gOpts)
                     (reportJson ix opts totalHashes distinctHashes
-                                hasDepths (IS.size excluded) shown)
+                                hasDepths (IS.size excluded) dupGroups shown)
       OutHuman -> withHumanReport gOpts "term-cluster" $
         emitHuman ix opts totalHashes distinctHashes
-                  hasDepths (IS.size excluded) (length ranked) shown
+                  hasDepths (IS.size excluded) dupGroups
+                  (length ranked) shown
 
 -- | Sum every per-def hash list.
 totalHashCount :: IntMap [Word64] -> Int
@@ -301,19 +316,24 @@ excludedDefIds ix pat
 -- associative-commutative 'mergeBucket'. Determinism: chunking is
 -- defId-order-stable and the merge is associative-commutative, so the
 -- result is byte-identical regardless of @+RTS -NK@.
+-- | The per-def hash lists both tiers read: ascending by def id, with
+-- the @--exclude-module-regex@ set dropped. Computed once in 'run' and
+-- shared, so the two tiers cannot disagree about what is in scope and
+-- the 'IntSet' membership test is paid once per def rather than twice.
+inScopeEntries :: IntMap [Word64] -> IntSet -> [(Int, [Word64])]
+inScopeEntries sthMap excluded =
+  [ (defId, hs)
+  | (defId, hs) <- IM.toAscList sthMap
+  , not (IS.member defId excluded)
+  ]
+
 buildBuckets
   :: Index
-  -> IntMap [Word64]
+  -> [(Int, [Word64])]
   -> Maybe (IntMap [Int])
-  -> IntSet
   -> Map Word64 BucketAcc
-buildBuckets _ix sthMap stdMap excluded =
-  let !entries =
-        [ (defId, hs)
-        | (defId, hs) <- IM.toAscList sthMap
-        , not (IS.member defId excluded)
-        ]
-      !nEntries = length entries
+buildBuckets _ix entries stdMap =
+  let !nEntries = length entries
       -- Target ~64 chunks but never finer than ~32 defs per chunk —
       -- small corpora degrade to a single chunk and skip spark
       -- overhead entirely.
@@ -363,6 +383,76 @@ zipPad = go
     go []     _      = []
     go (h:hs) []     = (h, 1) : go hs []
     go (h:hs) (d:ds) = (h, d) : go hs ds
+
+-- ---------------------------------------------------------------------------
+-- Exact duplicates
+
+-- | Definitions with an IDENTICAL subterm-hash multiset and — when the
+-- producer emitted signatures — an identical rendered type.
+--
+-- Evidence, not proof: the hashes are a MULTISET, so two definitions
+-- that assemble the same parts into a different shape land in the same
+-- group. The signature match is what rules most of those out, which is
+-- why a graph built without @--with-signatures@ gives a weaker tier
+-- (the report says so). Read a group as "diff these", not "delete one".
+data DupGroup = DupGroup
+  { dgMembers :: ![Int]
+    -- ^ Member def ids, qname-ascending.
+  , dgTerms   :: !Int
+    -- ^ Size of the shared hash bag (the same for every member).
+  , dgSig     :: !(Maybe Text)
+    -- ^ The shared signature, when the producer emitted one.
+  }
+
+-- | Group every def with a non-empty hash bag by @(sorted bag,
+-- signature)@; keep the groups with at least two members.
+--
+-- Sequential by design: one pass over the same 'IntMap' 'buildBuckets'
+-- walks, with an ordered 'M.toAscList' and an explicit member sort, so
+-- the output is byte-identical under any @+RTS -NK@ without needing an
+-- order-preserving parallel reduction. Defs dropped by
+-- @--exclude-module-regex@ are dropped here too, so both tiers agree
+-- on what is in scope.
+--
+-- An EMPTY bag is skipped: every hash-less def would otherwise be
+-- "identical" to every other, which is a fact about the producer's
+-- flags rather than about the code.
+exactDuplicates :: Index -> [(Int, [Word64])] -> [DupGroup]
+exactDuplicates ix entries =
+  [ DupGroup { dgMembers = sortOn (defName . defAt ix) ids
+             , dgTerms   = length bag
+             , dgSig     = sig
+             }
+  | ((bag, sig), ids) <- M.toAscList grouped
+    -- Two or more members; stops at the second cons rather than walking
+    -- the whole group, and this runs once per distinct bag.
+  , (_ : _ : _) <- [ids]
+  ]
+  where
+    grouped :: Map ([Word64], Maybe Text) [Int]
+    grouped = M.fromListWith (++)
+      [ ((sort hs, defSig (defAt ix defId)), [defId])
+      | (defId, hs) <- entries
+      , not (null hs)
+      ]
+
+-- | Rank duplicate groups: most members first, then the largest shared
+-- body, then the first member's qname. A total order, so the listing
+-- cannot flip between runs.
+rankDupGroups :: Index -> [DupGroup] -> [DupGroup]
+rankDupGroups ix = sortOn key
+  where
+    key g       = (Down (length (dgMembers g)), Down (dgTerms g), firstName g)
+    firstName g = case dgMembers g of
+      (i : _) -> defName (defAt ix i)
+      []      -> T.empty
+
+-- | True when at least one definition carries a rendered signature,
+-- i.e. the producer ran with @--with-signatures@. Drives the report's
+-- "hash multiset alone" caveat.
+graphHasSignatures :: Index -> Bool
+graphHasSignatures ix =
+  any (isJust . defSig . defAt ix) [0 .. idxRealCount ix - 1]
 
 -- | Build & sort the cluster list. Filtered by 'optMinCluster' and
 -- 'optSpanModules'; sorted descending by 'optSortBy'.
@@ -486,8 +576,10 @@ emitHuman
   :: Index -> Options -> Int -> Int
   -> Bool       -- ^ depth data present
   -> Int        -- ^ excluded def count
+  -> [DupGroup] -- ^ exact-duplicate groups, ranked
   -> Int -> [Cluster] -> IO ()
-emitHuman ix Options{..} totalHashes distinctHashes hasDepths nExcluded nRanked shown = do
+emitHuman ix Options{..} totalHashes distinctHashes hasDepths nExcluded
+          dupGroups nRanked shown = do
   putStrLn $ "# term-cluster — top " ++ show optTopN
           ++ " (sort=" ++ sortTag
           ++ ", min-cluster=" ++ show optMinCluster
@@ -496,10 +588,35 @@ emitHuman ix Options{..} totalHashes distinctHashes hasDepths nExcluded nRanked 
   putStrLn $ "  total subterm hashes        : " ++ show totalHashes
   putStrLn $ "  distinct hashes             : " ++ show distinctHashes
   putStrLn $ "  clusters surviving filters  : " ++ show nRanked
+  putStrLn $ "  exact-duplicate groups      : " ++ show (length dupGroups)
   when (nExcluded > 0) $
     putStrLn $ "  defs filtered (regex)       : " ++ show nExcluded
   when (not hasDepths) $
     putStrLn   "  (no depth data — meanDepth defaults to 1.0)"
+  putStrLn ""
+  -- Exact duplicates lead: a group is a strictly stronger finding than
+  -- a shared fragment, and the list is usually far shorter.
+  putStrLn "## Exact duplicates"
+  -- Only the human report needs this, so the O(defs) probe is paid here
+  -- rather than in 'run' where the JSON path would pay it too.
+  when (not (graphHasSignatures ix)) $
+    putStrLn "  (no signatures in graph — groups match on the hash multiset alone)"
+  putStrLn ""
+  case take optTopN dupGroups of
+    [] -> putStrLn "no definitions share an identical subterm multiset"
+    ds -> do
+      let dupHeader = ["Group", "|defs|", "Terms", "Members"]
+          renderDup rank g =
+            [ show rank
+            , show (length (dgMembers g))
+            , show (dgTerms g)
+            , showMembers ix optMaxDefs (dgMembers g)
+            ]
+      putStr (renderTable dupHeader (zipWith renderDup [(1 :: Int) ..] ds))
+      when (length dupGroups > optTopN) $
+        putStrLn $ "  (showing the first " ++ show optTopN ++ ")"
+  putStrLn ""
+  putStrLn "## Recurring subterms"
   putStrLn ""
   case shown of
     [] -> putStrLn "no clusters at these thresholds"
@@ -532,6 +649,18 @@ emitHuman ix Options{..} totalHashes distinctHashes hasDepths nExcluded nRanked 
       SortLogScore -> "LogScore"
       _            -> "Score"
 
+-- | Member qnames, comma-joined and capped at @cap@ with a @+K more@
+-- tail, so one large duplicate group cannot swamp the table. Reuses
+-- @--max-defs@ (the cluster tier's cosmetic cap) rather than adding a
+-- second knob for the same job.
+showMembers :: Index -> Int -> [Int] -> String
+showMembers ix cap ids =
+  let kept   = take cap ids
+      hidden = length ids - length kept
+      names  = T.intercalate ", " [ defName (defAt ix i) | i <- kept ]
+  in T.unpack names
+     ++ (if hidden > 0 then ", +" ++ show hidden ++ " more" else "")
+
 -- | Render the top-defs list inline: @qname×count, qname×count, …@.
 showTopDefs :: Index -> [(Int, Int)] -> String
 showTopDefs ix = T.unpack . T.intercalate ", " . map one
@@ -545,20 +674,25 @@ showTopDefs ix = T.unpack . T.intercalate ", " . map one
 
 reportJson
   :: Index -> Options -> Int -> Int
-  -> Bool   -- ^ depth data present
-  -> Int    -- ^ excluded def count
+  -> Bool       -- ^ depth data present
+  -> Int        -- ^ excluded def count
+  -> [DupGroup] -- ^ exact-duplicate groups, ranked
   -> [Cluster] -> A.Value
-reportJson ix opts totalHashes distinctHashes hasDepths nExcluded shown =
+reportJson ix opts totalHashes distinctHashes hasDepths nExcluded dupGroups shown =
   A.object
     [ "subcommand" .= ("term-cluster" :: Text)
     , "options"    .= optionsJson opts
     , "stats"      .= A.object
-        [ "total_subterm_hashes" .= totalHashes
-        , "distinct_hashes"      .= distinctHashes
-        , "clusters_shown"       .= length shown
-        , "depth_data_present"   .= hasDepths
-        , "excluded_def_count"   .= nExcluded
+        [ "total_subterm_hashes"   .= totalHashes
+        , "distinct_hashes"        .= distinctHashes
+        , "clusters_shown"         .= length shown
+        , "depth_data_present"     .= hasDepths
+        , "excluded_def_count"     .= nExcluded
+        , "exact_duplicate_groups" .= length dupGroups
         ]
+    , "exact_duplicates" .= A.toJSON
+        (zipWith (dupGroupJson ix) [1 :: Int ..]
+                 (take (optTopN opts) dupGroups))
     , "rows" .= A.toJSON (zipWith (clusterJson ix) [1 :: Int ..] shown)
     ]
 
@@ -568,12 +702,14 @@ emptyReportJson opts =
     [ "subcommand" .= ("term-cluster" :: Text)
     , "options"    .= optionsJson opts
     , "stats"      .= A.object
-        [ "total_subterm_hashes" .= (0 :: Int)
-        , "distinct_hashes"      .= (0 :: Int)
-        , "clusters_shown"       .= (0 :: Int)
-        , "reason"               .= ("no definitionSubtermHashes in graph.json" :: Text)
+        [ "total_subterm_hashes"   .= (0 :: Int)
+        , "distinct_hashes"        .= (0 :: Int)
+        , "clusters_shown"         .= (0 :: Int)
+        , "exact_duplicate_groups" .= (0 :: Int)
+        , "reason"                 .= ("no definitionSubtermHashes in graph.json" :: Text)
         ]
-    , "rows" .= ([] :: [A.Value])
+    , "exact_duplicates" .= ([] :: [A.Value])
+    , "rows"             .= ([] :: [A.Value])
     ]
 
 optionsJson :: Options -> A.Value
@@ -606,6 +742,26 @@ clusterJson ix rank Cluster{..} = A.object
   , "log_score"    .= cLogScore
   , "top_defs"     .= A.toJSON (map (defPair ix) cTopDefs)
   ]
+
+-- | One exact-duplicate group. @type@ is the shared signature, or
+-- @null@ when the producer emitted none — in which case the group
+-- rests on the hash multiset alone.
+dupGroupJson :: Index -> Int -> DupGroup -> A.Value
+dupGroupJson ix rank DupGroup{..} = A.object
+  [ "rank"      .= rank
+  , "def_count" .= length dgMembers
+  , "terms"     .= dgTerms
+  , "type"      .= dgSig
+  , "members"   .= A.toJSON (map (memberJson ix) dgMembers)
+  ]
+
+memberJson :: Index -> Int -> A.Value
+memberJson ix defId =
+  let d = defAt ix defId
+  in A.object
+       [ "qname"  .= defName d
+       , "module" .= defModule d
+       ]
 
 defPair :: Index -> (Int, Int) -> A.Value
 defPair ix (defId, k) =

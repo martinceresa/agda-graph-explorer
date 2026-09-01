@@ -3,9 +3,10 @@
 
 -- | A localhost control endpoint for the @agda-explore@ daemon (opt-in via
 -- @--control-port@). It lets an external process — in practice a Claude Code
--- /PostToolUse hook/ — run the same warm @check@ / @repair@ the MCP tools run,
--- so a text edit to an Agda file can be validated (and a fix suggested) without
--- going through the MCP stdio transport, which the agent harness owns.
+-- /PostToolUse hook/ — run the same warm @check@ \/ @repair@ \/ @unused@ the
+-- MCP tools run, so a text edit to an Agda file can be validated (and a fix or
+-- a cleanup suggested) without going through the MCP stdio transport, which
+-- the agent harness owns.
 --
 -- Like "AgdaMcp.Inspect" it is a /side channel/: a hand-rolled minimal
 -- HTTP\/1.1 server over the existing @network@ dependency, and it imports no
@@ -20,6 +21,10 @@
 --   * @GET \/repair?file=PATH@ — run the repair callback (diff-only, never
 --     writes); @200@ with the report + proposed diff. Serves the PostToolUse
 --     hook's "suggest a fix" step.
+--   * @GET \/unused?file=PATH@ — run @agda-unused@ over that file, narrowed to
+--     the ARGUMENT verdicts (@kinds=args@). The graph side, not the bridge:
+--     it answers what a @\/check@ structurally cannot, since Agda raises no
+--     warning for an argument a definition never uses. Report-only.
 --   * @GET \/ping@ — @200 ok@ (hook liveness probe).
 --   * anything else — @404@.
 --

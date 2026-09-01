@@ -115,7 +115,7 @@ jobs:
       # Byte-identical output between +RTS -N1 and +RTS -N4 is the
       # acceptance invariant for the multicore sibling binaries.
       run: |
-        for sub in motif basket fingerprint; do
+        for sub in motif basket fingerprint term-cluster; do
           cabal run -v0 agda-optimization -- "$sub" test/deps.json +RTS -N1 -RTS > "/tmp/$sub.n1"
           cabal run -v0 agda-optimization -- "$sub" test/deps.json +RTS -N4 -RTS > "/tmp/$sub.n4"
           diff "/tmp/$sub.n1" "/tmp/$sub.n4" || { echo "NON-DETERMINISTIC: $sub"; exit 1; }
@@ -138,10 +138,28 @@ jobs:
         echo "$out"
         echo "$out" | grep -q "# total: 1 finding" \
           || { echo "expected exactly 1 finding from the fixture"; exit 1; }
+        # A ROOT naming ONE FILE must find what the directory scan finds. It
+        # used to scan nothing and report a silent `# total: 0` for every kind
+        # — the shape `agda-explore`'s `unused scope=FILE` (and the plugin's
+        # post-edit hook, which scopes to the file just edited) asks for.
+        one="$(cabal run -v0 agda-unused -- --graph=/tmp/unused-deps.json --count-only "$root/Main.agda")"
+        echo "$one"
+        echo "$one" | grep -q "# total: 1 finding" \
+          || { echo "single-file ROOT scanned nothing"; exit 1; }
         echo "agda-unused finding smoke OK"
 
     - name: agda-explore — binary smoke
       run: cabal run -v0 agda-explore -- --version
+
+    - name: Plugin hooks — syntax check
+      # The hooks run in the user's Claude Code session, never in a test, so a
+      # syntax error surfaces only as silence (they are written to degrade
+      # quietly on any failure). `bash -n` is the one guard that can see it.
+      run: |
+        for h in plugin/hooks/*.sh plugin/bin/*.sh; do
+          bash -n "$h" || { echo "syntax error in $h"; exit 1; }
+        done
+        echo "plugin hook syntax OK"
 
     - name: Version sync (cabal == plugin.json == every --numeric-version)
       # One version source (AgdaGraph.Version off Paths): all five binaries and

@@ -9,6 +9,7 @@
 module AgdaMcp.Tools
   ( dispatch
   , enabledTools
+  , graphTools
   ) where
 
 import           Data.Aeson         (Value (..), object, (.=))
@@ -77,6 +78,10 @@ coreToolNames = Set.fromList
 fmtProp :: (Text, Value)
 fmtProp = ("format", ep "`text` (default) or `json` (structured envelope)." ["text", "json"])
 
+-- | The graph-side tool catalogue (the read tools plus @unused@ / @rebuild@),
+-- before any tier narrowing. Exported for the same reason 'interactTools' is:
+-- @Main@ hands individual runners to the control endpoint as plain callbacks,
+-- so an external caller and the agent run byte-identical code.
 graphTools :: [Tool]
 graphTools =
   [ Tool "brief"
@@ -492,14 +497,53 @@ runUnused ss a = do
                          <> freshnessFooter ld fr
                          <> snapshotFooters ld
   where
-    caveat =
-      "Note: `using` and `duplicate` findings are high-signal. `blanket`, \
-      \`defined`, and `public` are best-effort — instance methods and names \
-      \used only through `with`/`with ←` chains are known false positives. \
-      \Each `dead` finding now carries a confidence tag in its note: \
-      \high-confidence deletion candidates are safe, but verify the \
-      \low-confidence ones (`low confidence: trivial body, possibly inlined`) \
-      \before removing — the elaborator may have inlined the callee.\n\n"
+    -- The caveat is narrowed to the kinds actually asked for. A
+    -- `kinds=args` call (the plugin's post-edit hook) has no use for the
+    -- `dead` confidence rule, and every sentence is charged to the caller's
+    -- context. Kept as a token match rather than a parse: the vocabulary
+    -- belongs to `agda-unused`, which this tool only shells out to — so an
+    -- unrecognised token selects EVERY kind, and a newly added one keeps
+    -- its advice instead of silently losing it.
+    caveat = case [ s | (ks, s) <- caveats, any (`Set.member` selected) ks ] of
+      []  -> ""
+      ss' -> "Note: " <> T.unwords ss' <> "\n\n"
+    selected = Set.fromList (concatMap expand kindTokens)
+    kindTokens =
+      -- No `kinds` argument ⇒ agda-unused's own default set.
+      maybe ["using", "duplicate"]
+            (filter (not . T.null) . map T.strip . T.splitOn ",")
+            (argText a "kinds")
+    allKinds = [ "using", "blanket", "dead", "field", "internal-only"
+               , "public", "duplicate", "arg-removable", "arg-erasable" ]
+    expand t = case t of
+      "defined" -> ["dead", "field", "internal-only"]
+      "dead"    -> ["dead", "field"]
+      "args"    -> ["arg-removable", "arg-erasable"]
+      k | k `elem` allKinds -> [k]
+        | otherwise         -> allKinds          -- `all`, and anything new
+    caveats =
+      [ ( ["using", "duplicate"]
+        , "`using` and `duplicate` findings are high-signal." )
+      , ( ["blanket", "internal-only", "public"]
+        , "`blanket`, `defined`, and `public` are best-effort — instance \
+          \methods and names used only through `with`/`with ←` chains are \
+          \known false positives." )
+      , ( ["dead", "field"]
+        , "Each `dead` finding carries a confidence tag in its note: \
+          \high-confidence deletion candidates are safe, but verify the \
+          \low-confidence ones (`low confidence: trivial body, possibly \
+          \inlined`) before removing — the elaborator may have inlined the \
+          \callee." )
+      , ( ["arg-removable", "arg-erasable"]
+        , "An `arg-*` verdict is Agda's own occurrence/polarity analysis, so \
+          \the unusedness is certain; the confidence grades whether the \
+          \DELETION is contained, since dropping a binder changes the \
+          \definition's type. Delete a position listed `(with …)` together \
+          \with that whole set, and read the indices against the \
+          \definition's own signature line — they count implicits, and \
+          \`type_of` still shows binders inherited from an enclosing \
+          \module." )
+      ]
 
 -- | @search mode=text@: ripgrep over the project's source bytes. The graph
 -- indexes definitions + edges only, so textual queries (pragmas, comments,

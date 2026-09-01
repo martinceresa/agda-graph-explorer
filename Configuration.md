@@ -96,7 +96,7 @@ envelope; `--dry-run` writes nothing.
 | `rel-to`   | `--rel-to`         | Base directory findings are reported relative to.          |
 | `format`   | `--format`         | Output format: `human` or `json` (canonical).              |
 | `json-out` | `--json-out`       | Alias of `format: json` (bool; kept for compatibility).    |
-| `kinds`    | `--kinds`          | Which finding kinds to report (YAML list or comma-string). |
+| `kinds`    | `--kinds`          | Which finding kinds to report (YAML list or comma-string): `using`, `duplicate`, `blanket`, `dead`, `field`, `internal-only`, `public`, `arg-removable`, `arg-erasable`, plus the aliases `defined`, `args` and `all`. |
 | `roots`    | positional `ROOTS` | Source roots to scan (YAML list).                          |
 | `exclude`  | `--exclude`        | Globs whose matching findings are dropped.                 |
 | `group-by`   | `--group-by`     | Group findings by `dir` / `file` / `kind`.                 |
@@ -181,7 +181,9 @@ Mirrors the daemon's CLI flags.
   `agda-unused-bin`, `agda-bin` (else `$AGDA_BIN` / `$PATH`).
 - **Toggles (bool):** `no-term-hashes`, `no-signatures`,
   `normalise-signatures`, `show-implicit`, `no-auto-rebuild`, `no-watch`,
-  `no-incremental` (drop `agda-deps`' `--incremental` cache),
+  `no-incremental` (full rebuilds only: re-run `agda-deps` for every entry
+  and retain no per-entry graph, instead of re-running just the entries a
+  change touched),
   `require-well-typed` (only promote a fully type-checking rebuild; holes
   still refresh), `strict-producer` (drop `--keep-going` for `agda-deps`'
   `--incremental` cache; needs Agda ≥ 2.9), `no-query-log` (disable the
@@ -197,8 +199,9 @@ Mirrors the daemon's CLI flags.
   check-time Mimer probe tries, default 3); `auto-hints-timeout` (Mimer
   budget per goal, seconds, default 1); `auto-hints-lemmas` (top in-scope
   graph hints seeded into that probe, default 2; `0` = plain Mimer);
-  `control-port` (localhost `/check` + `/repair` endpoint for the edit hook;
-  needs `enable-interact`; `0` = off); `inspect-port` (start port, default 7000;
+  `control-port` (localhost `/check` + `/repair` + `/unused` endpoint for the
+  edit hook; needs `enable-interact`; `0` = off);
+  `inspect-port` (start port, default 7000;
   implies `inspect`); `agda-arg` (extra flags for `agda --interaction-json`,
   e.g. `--safe`); `interaction-heap-mb` (per-session `agda` heap cap in MB;
   `0` = unset); `max-interaction-sessions` (interaction session-pool cap,

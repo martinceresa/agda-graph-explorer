@@ -180,8 +180,9 @@ buildIndex ExpandedGraph{..} =
             , defSig    = Nothing
             , defUnsafe = []
             -- A synthetic node is an edge target we never saw a def for, so
-            -- there is nothing unsolved to report about it.
+            -- there is nothing unsolved — or unused — to report about it.
             , defUnsolvedMetas = 0
+            , defArgUsage = Nothing
             , defX      = 0
             , defY      = 0
             , defOrigin = Nothing

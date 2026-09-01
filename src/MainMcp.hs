@@ -51,7 +51,7 @@ import           AgdaMcp.State
 import           AgdaMcp.ToolDef    (Tool (..))
 import           AgdaInteract.Tools (closeAllSessions, interactTools,
                                      reapIdleSessions)
-import           AgdaMcp.Tools      (dispatch, enabledTools)
+import           AgdaMcp.Tools      (dispatch, enabledTools, graphTools)
 import qualified BuildInfo
 
 -- ---------------------------------------------------------------------
@@ -377,6 +377,9 @@ usage = unlines
   , "  --min-term-depth N    Term-hash depth filter (default 3)."
   , "  --no-auto-rebuild     Do not regenerate the graph when sources change."
   , "  --no-watch            Disable the fsnotify watcher; poll on each query instead."
+  , "  --no-incremental      Rebuild every entry on every change instead of only the"
+  , "                        entries a change touched; retains no per-entry graph"
+  , "                        (less RAM, slower rebuilds). Multi-entry only."
   , "  --require-well-typed  Only promote a rebuild that fully type-checks; while a"
   , "                        module has a type error, keep serving the last well-typed"
   , "                        graph (holes still refresh). Off by default."
@@ -407,6 +410,15 @@ usage = unlines
   , "  --agda-bin P          Path to agda for interaction sessions (else $AGDA_BIN, $PATH)."
   , "  --agda-arg ARG        Extra flag for `agda --interaction-json` (repeatable;"
   , "                        e.g. --agda-arg --safe)."
+  , "  --max-interaction-sessions N"
+  , "                        Cap on concurrently-live interaction `agda` subprocesses"
+  , "                        (default 2)."
+  , "  --interaction-idle-timeout N"
+  , "                        Close an interaction session idle this many seconds"
+  , "                        (default 0 = never)."
+  , "  --interaction-heap-mb N"
+  , "                        Per-session `agda` RTS heap cap in MB, +RTS -M"
+  , "                        (default 0 = no cap)."
   , "  --inspect             Serve a localhost web inspector (activity feed + live"
   , "                        editing view) at http://127.0.0.1:7000 over Server-Sent"
   , "                        Events. Off by default; localhost-only, no auth."
@@ -420,9 +432,10 @@ usage = unlines
   , "  --auto-hints-lemmas N  Seed the check-time probe with the top N in-scope graph"
   , "                        hints (default 2; 0 = plain Mimer). A hint that closes a"
   , "                        goal is named inline, teaching the agent the lemma exists."
-  , "  --control-port N      Serve a localhost control endpoint (GET /check?file=… and"
-  , "                        GET /repair?file=…, diff-only) for PostToolUse hooks;"
-  , "                        probes upward from N, writes the bound port to"
+  , "  --control-port N      Serve a localhost control endpoint for PostToolUse hooks:"
+  , "                        GET /check?file=…, GET /repair?file=… (diff-only) and"
+  , "                        GET /unused?file=… (that file's unused arguments). Probes"
+  , "                        upward from N, writing the bound port to"
   , "                        <out-dir>/control-port. Needs --enable-interact."
   , "                        Off by default."
   , "  --coverage-ignore GLOB  Source files (matching GLOB) intentionally outside every"
@@ -722,9 +735,9 @@ startInspect ss cfg = case ssInspect ss of
 
 -- | Start the localhost control endpoint when @--control-port@ is set (and
 -- the interaction bridge is on — @/check@ runs through it). Returns the
--- port-file path for shutdown cleanup. The callback dispatches to the same
--- @check@ runner the MCP tool uses, so an external hook and the agent see
--- byte-identical verdicts. A bind failure is logged but never fatal.
+-- port-file path for shutdown cleanup. Each callback dispatches to the same
+-- runner the MCP tool of that name uses, so an external hook and the agent see
+-- byte-identical output. A bind failure is logged but never fatal.
 startControlEndpoint :: ServerState -> Config -> IO (Maybe FilePath)
 startControlEndpoint ss cfg
   | cfgControlPort cfg <= 0 = pure Nothing
@@ -738,8 +751,22 @@ startControlEndpoint ss cfg
           toolCb nm f = case [ t | t <- interactTools, tName t == nm ] of
             (t : _) -> tRun t ss (object ["file" .= f])
             []      -> pure (Left (nm <> " tool unavailable"))
+          -- /unused is the graph side, not the bridge: the `unused` runner
+          -- scoped to the edited file and narrowed to the ARGUMENT verdicts.
+          -- Those are the only findings an edit can introduce that a `check`
+          -- cannot see — Agda has no warning for an argument a definition
+          -- never uses, so the file type-checks clean with a spare binder.
+          -- Hard-wired to `kinds=args` rather than read off the query string:
+          -- the route table passes only `file`, and a hook firing after every
+          -- edit must not be able to ask for the whole-project noisy kinds.
+          unusedCb f = case [ t | t <- graphTools, tName t == "unused" ] of
+            (t : _) -> tRun t ss (object ["scope" .= f, "kinds" .= T.pack "args"])
+            []      -> pure (Left "unused tool unavailable")
           -- /repair passes no `write`, so it proposes a fix, never applies it.
-          routes = [ ("/check?", toolCb "check"), ("/repair?", toolCb "repair") ]
+          routes = [ ("/check?",  toolCb "check")
+                   , ("/repair?", toolCb "repair")
+                   , ("/unused?", unusedCb)
+                   ]
       mport <- startControl (cfgControlPort cfg) portFile routes
       case mport of
         Just p  -> do

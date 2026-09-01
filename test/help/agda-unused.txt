@@ -36,10 +36,26 @@ OPTIONS:
                       duplicate      — same module opened twice from same file
                       blanket        — blanket `open import M` with no observed use
                       defined        — alias for `dead,internal-only`
-                      dead           — no callers anywhere (deletion candidate)
+                      dead           — no callers anywhere (deletion candidate;
+                                       includes `field`)
+                      field          — record field whose projection is never
+                                       applied (remove the field; low confidence)
                       internal-only  — intra-module callers only (private candidate)
                       public         — `open … public` re-exports with no consumer
+                      arg-removable  — arguments the definition never uses; the
+                                       binder and every call-site argument can go
+                      arg-erasable   — arguments used only in types (mark them @0).
+                                       Far more common than arg-removable, so it
+                                       has its own token
+                      args           — alias for `arg-removable,arg-erasable`
                       all            — every check above
+
+  Argument indices are 0-based telescope positions, IMPLICITS INCLUDED,
+  counted on the definition's own signature line. They need a graph built
+  by a producer that emits `argUsage`; older graphs yield no such findings.
+  A `removable` verdict means the binder is deletable from the type as
+  WRITTEN: the producer filters positions still occurring in the codomain
+  or a surviving later domain, whether that occurrence is relevant or not.
 
 ROOT…  one or more directories to source-scan for `.agda` / `.lagda*` files.
 

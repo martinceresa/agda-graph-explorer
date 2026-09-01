@@ -37,8 +37,12 @@ it exits nonzero only on an operational error (bad config, unreadable graph, or
 a run matching no scanned files).
 
 Default `--kinds=using,duplicate` — the lowest-noise combination. The other
-kinds (`blanket`, `dead`, `internal-only`, `public`, and `defined` = `dead` +
-`internal-only`) need more triage; enable all with `--kinds=all`.
+kinds (`blanket`, `dead`, `field`, `internal-only`, `public`, `arg-removable`,
+`arg-erasable`, and the aliases `defined` = `dead` + `internal-only` and
+`args` = both `arg-*`) need more triage; enable all with `--kinds=all`.
+The `arg-*` kinds need a graph whose producer emits `argUsage`; `arg-erasable`
+fires on roughly a quarter of definitions, so reach for `arg-removable` when
+you want the short, actionable list.
 `--format=json` (alias `--json-out`) emits a JSON array (one object per
 finding); `--group-by=dir|file|kind` and `--count-only` aggregate the findings;
 positional `ROOTS…` accept multiple directories.

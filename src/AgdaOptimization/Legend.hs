@@ -811,9 +811,28 @@ legends =
           , "proofs — common-subexpression candidates a graph-only analysis cannot"
           , "reach. Without those hashes in the graph the subcommand has nothing to"
           , "read, and says so instead of reporting an empty result."
+          , ""
+          , "Two sections. `Exact duplicates` leads and takes no thresholds:"
+          , "definitions whose whole subterm-hash MULTISET is identical, and whose"
+          , "signature also matches when the producer ran with --with-signatures."
+          , "`Recurring subterms` is the ranked cluster list under it, where a shared"
+          , "fragment is enough to group."
+          , ""
+          , "A duplicate group is evidence, not proof: a multiset has no shape, so two"
+          , "definitions assembling the same parts differently land in one group. The"
+          , "signature match is what rules most of those out — on a graph built"
+          , "without signatures the header says the tier is running on hashes alone."
           ]
       , lgBlocks =
-          [ ("Columns",
+          [ ("Exact duplicates",
+              [ ("Group", "rank within the duplicate listing; capped at --top-n.")
+              , ("|defs|", "how many definitions share the bag — always at least 2.")
+              , ("Terms", "size of the shared multiset. 1 means a single fragment \
+                          \matched, which is weak on its own; a large bag matching \
+                          \exactly is not a coincidence.")
+              , ("Members", "the definitions in the group, capped at --max-defs.")
+              ])
+          , ("Columns",
               [ ("Hash", "opaque 16-hex fingerprint of the canonical subterm. The \
                          \source term does not cross the JSON boundary, so this is the \
                          \only handle you get — it is stable enough to grep across \
@@ -834,9 +853,11 @@ legends =
                             \counts.")
               ])
           ]
-      , lgAct = "high MeanD and high Div before high Size — a deep fragment repeated \
-                \across several modules is the abstraction worth extracting. A huge \
-                \Size at MeanD ~1 is noise."
+      , lgAct = "an exact-duplicate group before any cluster — it is the one finding \
+                \here that needed no threshold to survive. Then high MeanD and high \
+                \Div before high Size: a deep fragment repeated across several \
+                \modules is the abstraction worth extracting. A huge Size at \
+                \MeanD ~1 is noise."
       })
 
   , ("concept-bundle", Legend

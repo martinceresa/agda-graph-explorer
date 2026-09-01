@@ -61,7 +61,18 @@ When the `agda-explore` MCP tools are available, use them over grepping:
 - `unused` — primary import-hygiene driver; trust `using`/`duplicate`, treat
   `blanket`/`defined`/`public` as hints. **Instance methods and names used only
   through `with`/`with ←` chains are false positives** — verify a deletion
-  candidate with `callers` (one hop) plus a grep before removing. Pass `exclude`
+  candidate with `callers` (one hop) plus a grep before removing. A `field`
+  finding (a never-projected record field, included in `dead`) is always
+  low-confidence and its edit is to the *record declaration*, never to the
+  projection — propose it, don't apply it blind. `--kinds=args` reports unused
+  *arguments* (`arg-removable` / `arg-erasable`): the verdict is Agda's own,
+  so at **High** confidence (private, or no cross-module user) apply and
+  re-typecheck, but at **Low** (exported, outside users) propose only — you
+  cannot see the downstream callers a binder removal breaks. Delete a
+  `(with …)` set whole, never partially, and read the binder the report
+  prints (`0 {a}`, `3 ⦃d⦄`) rather than counting arguments yourself — the
+  indices include implicits. A position marked *inserted by a `variable`* is
+  not on the signature line; deleting the set removes it. Pass `exclude`
   a glob (`**/Init.agda`, `Prelude.*`) to silence an `open import … public`
   re-export hub; the header echoes scope and excludes.
 - `callers` / `impact` — confirm who depends on something before changing or

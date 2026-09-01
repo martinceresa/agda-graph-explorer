@@ -116,10 +116,26 @@ usage = unlines
   , "                      duplicate      — same module opened twice from same file"
   , "                      blanket        — blanket `open import M` with no observed use"
   , "                      defined        — alias for `dead,internal-only`"
-  , "                      dead           — no callers anywhere (deletion candidate)"
+  , "                      dead           — no callers anywhere (deletion candidate;"
+  , "                                       includes `field`)"
+  , "                      field          — record field whose projection is never"
+  , "                                       applied (remove the field; low confidence)"
   , "                      internal-only  — intra-module callers only (private candidate)"
   , "                      public         — `open … public` re-exports with no consumer"
+  , "                      arg-removable  — arguments the definition never uses; the"
+  , "                                       binder and every call-site argument can go"
+  , "                      arg-erasable   — arguments used only in types (mark them @0)."
+  , "                                       Far more common than arg-removable, so it"
+  , "                                       has its own token"
+  , "                      args           — alias for `arg-removable,arg-erasable`"
   , "                      all            — every check above"
+  , ""
+  , "  Argument indices are 0-based telescope positions, IMPLICITS INCLUDED,"
+  , "  counted on the definition's own signature line. They need a graph built"
+  , "  by a producer that emits `argUsage`; older graphs yield no such findings."
+  , "  A `removable` verdict means the binder is deletable from the type as"
+  , "  WRITTEN: the producer filters positions still occurring in the codomain"
+  , "  or a surviving later domain, whether that occurrence is relevant or not."
   , ""
   , "ROOT…  one or more directories to source-scan for `.agda` / `.lagda*` files."
   , ""
@@ -140,7 +156,11 @@ defaultsYaml = unlines
   , "# merge order is defaults < config < CLI. Uncomment/edit to override."
   , ""
   , "# Which checks to run. Tokens: using, duplicate, blanket, dead,"
-  , "# internal-only, public, defined (= dead + internal-only), all."
+  , "# field, internal-only, public, defined (= dead + internal-only),"
+  , "# arg-removable, arg-erasable, args (= both), all."
+  , "# `dead` includes `field` (a never-projected record field is a dead"
+  , "# definition); `field` selects those alone. The arg-* checks need a"
+  , "# graph whose producer emits `argUsage`."
   , "kinds: [" ++ intercalate ", " (map kindToken (optKinds defaultOptions)) ++ "]"
   , "# Output format: 'human' (plain text) or 'json' (a JSON array)."
   , "format: " ++ (case optFormat defaultOptions of OutJson -> "json"; OutPlain -> "human")
@@ -228,10 +248,28 @@ parseKinds = fmap concat . mapM (parseKindsToken . trim) . splitComma
 
 -- ** Source-file discovery
 
+-- | Every Agda source file under @root@ — or @root@ itself when it names one.
+--
+-- The single-file case is not a convenience: @ROOT@ is documented as a path,
+-- @agda-explore@'s @unused@ tool resolves @scope@ to one (validating it
+-- against the graph first), and its post-edit hook scopes to the file just
+-- edited. Walking directories only meant every one of those reported
+-- @# total: 0 finding(s)@ for every kind — a silent zero, since a scan that
+-- reads no file also trips no "none of these matched the graph" guard.
+--
+-- Narrowing the scan narrows the /source/ evidence with it: the cross-file
+-- token index behind @dead@ and @blanket@ can only see the files scanned, so
+-- a name mentioned solely in an unscanned file reads as unmentioned. That is
+-- true of any sub-root scope, and it does not reach the graph-derived checks
+-- ('unusedArguments' consults no token at all).
 discoverAgdaFiles :: FilePath -> IO [FilePath]
 discoverAgdaFiles root = do
-  exists <- doesDirectoryExist root
-  if not exists then return [] else go [] root
+  isDir <- doesDirectoryExist root
+  if isDir
+    then go [] root
+    else do
+      isFile <- doesFileExist root
+      return [ root | isFile, isAgdaSourceFile root ]
   where
     go acc d = do
       entries <- listDirectory d `catch` \(_ :: IOException) -> return []
@@ -443,7 +481,7 @@ configTarget = ConfigTarget
 toJson :: Options -> [Finding] -> A.Value
 toJson opts fs = A.toJSON (map (one opts) fs)
   where
-    one o f = A.object
+    one o f = A.object $
       [ "file"       .= displayPath (optRelTo o) (fileFinding f)
       , "line"       .= lineFinding f
       , "module"     .= moduleFinding f
@@ -451,7 +489,15 @@ toJson opts fs = A.toJSON (map (one opts) fs)
       , "kind"       .= kindTag (kindFinding f)
       , "confidence" .= confTag (confFinding f)
       ]
+      -- Argument findings carry their positions, not just the prose note:
+      -- a consumer acting on one (the offline delete-and-retypecheck
+      -- check, a cascade loop) needs the indices and — for a removal —
+      -- the whole set that must go with each, or it strands a binder.
+      -- Absent on every other kind.
+      ++ [ "arguments" .= argumentsJson (kindFinding f) au
+         | Just au <- [argsFinding f] ]
 
     confTag :: Confidence -> T.Text
     confTag High = "high"
     confTag Low  = "low"
+

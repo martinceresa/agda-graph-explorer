@@ -15,6 +15,7 @@ module AgdaUnused.Analysis
   , kindTag
   , analyse
   , renderFindingLine
+  , argumentsJson
   ) where
 
 import           Control.DeepSeq            ( NFData(..), rnf )
@@ -26,6 +27,10 @@ import qualified Data.Set        as S
 import           Data.Text       ( Text )
 import qualified Data.Text       as T
 
+import qualified Data.Aeson        as A
+
+import           AgdaGraph.Schema  ( ArgUsage(..), ArgBinder(..), BinderHiding(..)
+                                   , abInserted, argRemovableAlone )
 import           AgdaUnused.Json   ( ExpandedGraph(..), Definition(..), Kind(..), Access(..), ReExport(..) )
 import           AgdaUnused.Source ( ImportLine(..), scanImports, bodyTokens )
 
@@ -43,6 +48,17 @@ data Finding = Finding
     -- branch ever downgrades to 'Low' (when the def's body is trivial,
     -- so the elaborator may have inlined it — see 'ctxTrivialBody');
     -- every other finding is 'High'.
+  , argsFinding   :: !(Maybe ArgUsage)
+    -- ^ The producer's per-argument evidence, on 'ArgRemovable' /
+    -- 'ArgErasable' findings only ('Nothing' everywhere else). Carried so
+    -- @--format=json@ can emit the /positions/, not just the prose note:
+    -- a consumer that wants to act on a finding — the offline
+    -- delete-and-retypecheck check, or a cascade loop — needs the indices
+    -- and 'argRemovableAlone''s deletion set, and re-deriving them means
+    -- re-reading the graph the report was built from.
+    --
+    -- The finding's 'kindFinding' selects which list applies: 'auRemovable'
+    -- or 'auErasable'.
   } deriving (Show)
 
 -- | How much trust to place in a finding. Surfaced as a parenthetical
@@ -72,6 +88,33 @@ data FindingKind
     -- ^ Defined here, has intra-module callers, but no cross-module
     -- user. Wrap in @private@ for scoping clarity, or leave as-is if
     -- intentionally public utility. NOT a deletion candidate.
+  | FieldNeverProjected
+    -- ^ A record-field projection ('KProjection') with no callers
+    -- anywhere. Exactly the 'DefinedDead' evidence, but a different
+    -- action: the fix is to remove the FIELD from its record, not to
+    -- delete a definition — so it gets its own kind rather than a
+    -- deletion suggestion the user cannot act on. Always 'Low'
+    -- confidence: a no-eta record matched positionally reads its
+    -- fields without ever applying the projection, and that use is
+    -- invisible in the graph.
+  | ArgRemovable
+    -- ^ The definition has arguments Agda's own occurrence/polarity
+    -- analysis proved it never uses: the binder and the argument at
+    -- every call site can go. One finding per definition, not per
+    -- position — the unit of action is the refactor, and positions that
+    -- must be deleted together are named in the note.
+    --
+    -- Deleting a binder changes the definition's __type__, so this is a
+    -- spec change rather than a refactor. For a theorem that is the win
+    -- (a lemma with a dead hypothesis is a worse lemma); for an exported
+    -- definition the arity is the contract, which is what the confidence
+    -- grades — see 'containedDeletion'.
+  | ArgErasable
+    -- ^ Arguments unused in the body but still relevant to the type: an
+    -- @\@0@ candidate rather than a removal. Far more common than
+    -- 'ArgRemovable' (26.3% of definitions versus 0.87%, measured on the
+    -- standard library), which is why it has its own @--kinds@ token and
+    -- is not in the default set.
   | DuplicateUsingForModule
     -- ^ Two separate @open import M using (...)@ lines in the same
     -- file. Consolidation candidate.
@@ -91,6 +134,9 @@ kindTag UnusedInUsing           = "unused-in-using"
 kindTag UnusedBlanketOpen       = "unused-blanket-open"
 kindTag DefinedDead             = "defined-dead"
 kindTag DefinedInternalOnly     = "defined-internal-only"
+kindTag FieldNeverProjected     = "field-never-projected"
+kindTag ArgRemovable            = "arg-removable"
+kindTag ArgErasable             = "arg-erasable"
 kindTag DuplicateUsingForModule = "duplicate-using"
 kindTag PublicWithoutDownstream = "public-no-downstream"
 
@@ -113,9 +159,9 @@ parseGroupBy "kind" = Right GByKind
 parseGroupBy s      = Left $ "unknown group-by: " ++ s
 
 instance NFData Finding where
-  rnf (Finding a b c d e f g) =
+  rnf (Finding a b c d e f g h) =
     rnf a `seq` rnf b `seq` rnf c `seq` rnf d `seq` rnf e `seq` rnf f
-      `seq` rnf g
+      `seq` rnf g `seq` rnf h
 
 -- ** Top-level driver
 
@@ -224,6 +270,32 @@ data Context = Context
     -- arrays are absent) — in that case we never fabricate triviality,
     -- so every @dead@ finding stays 'High'. Drives both the Phase A
     -- confidence downgrade and the Phase B synthetic-user suppression.
+  , ctxProjections      :: !(S.Set (Text, Text))
+    -- ^ (module, short-name) of every 'KProjection' definition — a
+    -- record field's projection function. A dead one is reported as
+    -- 'FieldNeverProjected' rather than 'DefinedDead': same evidence,
+    -- but the edit is to the record, not to the projection.
+  , ctxProjectionLive   :: !(S.Set (Text, Text))
+    -- ^ (module, short-name) of every 'KProjection' with a __real__ user.
+    --
+    -- The generic user set can never be empty for a projection, so
+    -- 'FieldNeverProjected' could not fire without this: a record has a
+    -- body edge to each of its own fields (its type mentions them), and
+    -- the enclosing module re-exports them — 1,698 of agda-stdlib's 1,702
+    -- projections sit in a @reexports@ row. Both are structure, not use.
+    --
+    -- This set drops exactly those two and nothing else: an edge from any
+    -- source other than the owning record counts, and so does a re-export
+    -- by any module other than the one that automatically surfaces the
+    -- field. Scoped to projections deliberately — for an ordinary
+    -- definition a re-export /is/ a use, and the generic path still says
+    -- so.
+  , ctxArgUsage         :: !(M.Map (Text, Text) ArgUsage)
+    -- ^ (module, short-name) -> the producer's per-argument usage
+    -- evidence, for the definitions that have any. Absent for every def
+    -- on a graph from a producer predating the field, so the
+    -- 'ArgRemovable' \/ 'ArgErasable' checks yield nothing there rather
+    -- than guessing.
   }
 
 buildContext :: ExpandedGraph -> [(FilePath, Text)] -> Context
@@ -286,6 +358,41 @@ buildContext ExpandedGraph{..} bodies =
       maxDepth [] = 0
       maxDepth xs = maximum xs
 
+      -- (module, short-name) of every record-field projection. Keyed
+      -- the same way as 'defLineByQ' so the @dead@ check can ask
+      -- "is this qname a field?" without a second name split.
+      projections :: S.Set (Text, Text)
+      projections = S.fromList
+        [ (defModule d, shortNameOf (defName d) (defModule d))
+        | d <- egDefinitions
+        , defKind d == KProjection
+        ]
+
+      -- Projections with a user that is not their own record and not the
+      -- automatic re-export by the module that encloses them. See
+      -- 'ctxProjectionLive'. The edge half rides 'ingestEdge'; the
+      -- re-export half reads 'rxBySrcQ', so both derive their short names
+      -- exactly the way every other index does.
+      projectionLive :: S.Set (Text, Text)
+      projectionLive = S.union projLiveEdges $ S.fromList
+        [ k
+        | (k@(src, _sh), hosts) <- M.toList rxBySrcQ
+        , k `S.member` projections
+        -- The module enclosing the record surfaces its fields
+        -- automatically; a re-export from anywhere else is a real user.
+        , any (/= moduleOfQName src) (S.toList hosts)
+        ]
+
+      -- Only the defs that actually carry the optional per-def object,
+      -- so the map is empty on a pre-field graph and the checks fire on
+      -- nothing at all.
+      argUsageByQ :: M.Map (Text, Text) ArgUsage
+      argUsageByQ = M.fromList
+        [ ((defModule d, shortNameOf (defName d) (defModule d)), au)
+        | d <- egDefinitions
+        , Just au <- [defArgUsage d]
+        ]
+
       -- Per-edge ingest, building the usage indices in one pass.
       -- Intra-module edges populate 'intraModUsedQ' ((mod,callee) -> caller
       -- shorts), used by the @defined@ check to distinguish dead vs
@@ -294,30 +401,41 @@ buildContext ExpandedGraph{..} bodies =
       -- Self-edges are excluded (a recursive call is not a caller, so
       -- counting it would shield a dead recursive def from the @dead@
       -- check) and remembered in 'selfRec0' ('ctxSelfRecursive') instead.
-      ingestEdge (src, dst) (!usersMod, !usedQ, !usersQ, !intraQ, !selfRec) =
+      ingestEdge (src, dst) (!usersMod, !usedQ, !usersQ, !intraQ, !selfRec, !projLive) =
         let srcMod = moduleOfQName src
             dstMod = moduleOfQName dst
             dstSh  = shortNameOf dst dstMod
             srcSh  = shortNameOf src srcMod
+            -- A record has a body edge to each of its own projections (its
+            -- type mentions its fields); the owning record's qname IS the
+            -- projection's module. That is structure, not use, so it is
+            -- the one edge 'projectionLive' does not count. Accumulated
+            -- here rather than in a second pass because it is the only
+            -- consumer that needs the source QNAME, which the indices
+            -- below discard.
+            !pl | src /= dstMod
+                , (dstMod, dstSh) `S.member` projections
+                = S.insert (dstMod, dstSh) projLive
+                | otherwise = projLive
         in if srcMod == dstMod
               then if src == dst
                 then
                   let !s = S.insert (dstMod, dstSh) selfRec
-                  in (usersMod, usedQ, usersQ, intraQ, s)
+                  in (usersMod, usedQ, usersQ, intraQ, s, pl)
                 else
                   let !i = M.insertWith S.union (dstMod, dstSh)
                              (S.singleton srcSh) intraQ
-                  in (usersMod, usedQ, usersQ, i, selfRec)
+                  in (usersMod, usedQ, usersQ, i, selfRec, pl)
               else
                 let !u1 = M.insertWith S.union dstMod (S.singleton srcMod) usersMod
                     !u2 = M.insertWith S.union srcMod (S.singleton (dstMod, dstSh)) usedQ
                     !u3 = M.insertWith S.union (dstMod, dstSh)
                             (S.singleton srcMod) usersQ
-                in (u1, u2, u3, intraQ, selfRec)
+                in (u1, u2, u3, intraQ, selfRec, pl)
 
-      (usersMod0, usedQ0, usersQ0, intraModUsedQ0, selfRec0) =
+      (usersMod0, usedQ0, usersQ0, intraModUsedQ0, selfRec0, projLiveEdges) =
         foldl' (\acc e -> ingestEdge e acc)
-               (M.empty, M.empty, M.empty, M.empty, S.empty) egDefinitionEdges
+               (M.empty, M.empty, M.empty, M.empty, S.empty, S.empty) egDefinitionEdges
 
       -- Re-export indices. For every row @(host, source, [qualified-names])@
       -- we build three orientations: by source-module, by (source, short),
@@ -376,6 +494,9 @@ buildContext ExpandedGraph{..} bodies =
        , ctxDefLineByQ       = defLineByQ
        , ctxDefAccessByQ     = defAccessByQ
        , ctxTrivialBody      = trivialBody
+       , ctxProjections      = projections
+       , ctxProjectionLive   = projectionLive
+       , ctxArgUsage         = argUsageByQ
        }
 
 -- ** Per-file logic
@@ -404,10 +525,11 @@ findingsForFile ctx fp body = case M.lookup fp (ctxModuleByFile ctx) of
     in concatMap (perImportFindings ctx fp primary bodyToks) imports
     ++ duplicateUsingFindings fp imports
     ++ concat
-         [ definedButUnused ctx fp m
-             (M.findWithDefault S.empty m (ctxDefShortByModule ctx))
+         [ definedButUnused ctx fp m shorts
+         ++ unusedArguments ctx fp m shorts
          ++ publicReexportFindings ctx fp m imports
          | m <- S.toList userFacing
+         , let shorts = M.findWithDefault S.empty m (ctxDefShortByModule ctx)
          ]
 
 -- | A module name like @Foo.Bar._@ or @Foo._.Bar@ designates an
@@ -446,6 +568,7 @@ checkUsing ctx fp thisMod bodyToks lineNo modName sym
           , symbolFinding = Just sym
           , noteFinding   = Nothing
           , confFinding   = High
+          , argsFinding   = Nothing
           }
       ]
   where
@@ -486,6 +609,7 @@ checkBlanket ctx _fp thisMod _bodyToks lineNo modName =
                  , symbolFinding = Nothing
                  , noteFinding   = Just "no symbol from this module is referenced (best-effort)"
                  , confFinding   = High
+                 , argsFinding   = Nothing
                  }
              ]
         else []
@@ -509,11 +633,19 @@ definedButUnused ctx fp thisMod shorts =
   [ Finding
       { fileFinding   = fp
       , lineFinding   = M.findWithDefault 0 (thisMod, sh) (ctxDefLineByQ ctx)
-      , kindFinding   = if dead then DefinedDead else DefinedInternalOnly
+      , kindFinding   = kind
       , moduleFinding = thisMod
       , symbolFinding = Just sh
       , noteFinding   = Just $
-          if isCycle
+          -- A dead PROJECTION is a dead record field: the edit is one
+          -- level up, in the record declaration. Said before the
+          -- deletion-candidate wording so the user is never told to
+          -- delete a generated projection function.
+          if deadField
+            then "remove the field from its record — low confidence: a \
+                 \no-eta record matched positionally uses fields without \
+                 \the projection"
+          else if isCycle
             -- A mutual-recursion cycle no external entry reaches: the
             -- graph shows intra-module callers, but they are only each
             -- other, so the cycle is dead as a unit.
@@ -530,15 +662,22 @@ definedButUnused ctx fp thisMod shorts =
                         then "deletion candidate (low confidence: trivial body, possibly inlined)"
                         else "deletion candidate"
           else "intra-module callers only"
-      , confFinding   = if S.null intra && trivial && not selfRec then Low else High
+      , confFinding   = if deadField || (S.null intra && trivial && not selfRec)
+                          then Low else High
+      , argsFinding   = Nothing
       }
   | sh <- S.toAscList shorts
-  , let trivial        = (thisMod, sh) `S.member` ctxTrivialBody ctx
+  , let isProj         = (thisMod, sh) `S.member` ctxProjections ctx
+        trivial        = (thisMod, sh) `S.member` ctxTrivialBody ctx
         selfRec        = (thisMod, sh) `S.member` ctxSelfRecursive ctx
         deadCyclePeers = M.lookup (thisMod, sh) (ctxDeadCycles ctx)
         isCycle        = isJust deadCyclePeers
         peersText      = T.intercalate ", " (S.toAscList (fromMaybe S.empty deadCyclePeers))
-  , S.null (usersClosure ctx (thisMod, sh))
+  -- A projection needs the projection-only user view: its generic user set
+  -- is never empty (own record + automatic re-export), so the plain test
+  -- would filter every field out before it could be reported.
+  , if isProj then (thisMod, sh) `S.notMember` ctxProjectionLive ctx
+              else S.null (usersClosure ctx (thisMod, sh))
   , let intra = M.findWithDefault S.empty (thisMod, sh) (ctxIntraModUsedQ ctx)
   -- A def is reported 'DefinedDead' when it has NO intra-module caller
   -- OR it is a dead-cycle member (its only callers are the cycle's
@@ -548,6 +687,12 @@ definedButUnused ctx fp thisMod shorts =
   -- can be masked by a live inlined mention).
   , let dead         = S.null intra || isCycle
         internalOnly = not dead        -- the two are the halves of one partition
+        -- A dead PROJECTION is a dead record field: it drives the kind,
+        -- the note and the confidence below, so it is named once here.
+        deadField    = dead && isProj
+        kind | deadField = FieldNeverProjected
+             | dead      = DefinedDead
+             | otherwise = DefinedInternalOnly
   -- 'crossFile' (short name used in some OTHER file) and 'inFileUse'
   -- (occurs beyond the def's signature + LHS in THIS file) are the two
   -- halves of the elaborator-inlining suppression below. Bound once
@@ -594,6 +739,115 @@ definedButUnused ctx fp thisMod shorts =
   where
     implies True  x = x
     implies False _ = True
+
+-- | Definitions carrying arguments Agda proved they never use.
+--
+-- One finding per definition per verdict, never one per position: the
+-- unit of action is "refactor this definition", and a def with three
+-- removable positions is one refactor, not three findings. Positions that
+-- cannot be deleted on their own are named inline, so the report never
+-- suggests a partial removal that would strand a later binder.
+--
+-- Silent on a graph whose producer predates @argUsage@ ('ctxArgUsage' is
+-- then empty), and — because the producer filters both — never sees a
+-- @with@-generated or pattern-lambda definition.
+unusedArguments :: Context -> FilePath -> Text -> S.Set Text -> [Finding]
+unusedArguments ctx fp thisMod shorts = concat
+  [ [ mk ArgRemovable $
+        positions au (map (showRemovable au) (auRemovable au))
+        <> insertedNote au (auRemovable au) <> "; " <> radius
+    | not (null (auRemovable au)) ]
+    ++
+    [ mk ArgErasable $
+        positions au (map (showPosition au) (auErasable au))
+        <> insertedNote au (auErasable au) <> "; " <> radius
+    | not (null (auErasable au)) ]
+  | sh <- S.toAscList shorts
+  , Just au <- [M.lookup (thisMod, sh) (ctxArgUsage ctx)]
+  , let intra    = M.findWithDefault S.empty (thisMod, sh) (ctxIntraModUsedQ ctx)
+        -- The module's one "who uses this qname" accessor, so the blast
+        -- radius and the confidence gate agree with `defined-dead` and
+        -- `public-no-downstream` on the same graph. Reading
+        -- 'ctxUsersOfQName' directly would drop the re-export widening
+        -- and call a def reached only through an `open … public` host
+        -- uncalled here while the other checks call it used.
+        outside  = usersClosure ctx (thisMod, sh)
+        -- The cost of the edit: every caller's argument list changes too.
+        -- Counted in definitions here and in MODULES elsewhere, because
+        -- that is what the graph actually knows — edges are def-to-def, so
+        -- there is no call-site count to report and we do not invent one.
+        radius
+          | S.null intra && S.null outside = "no callers"
+          | otherwise = tshow (S.size intra) <> " caller(s) here, "
+                          <> tshow (S.size outside) <> " other module(s)"
+        -- Agda's verdict ("the body does not depend on this argument") is
+        -- certain and is NOT what the confidence grades. What it grades is
+        -- whether we can see the blast radius of the edit: deleting a
+        -- binder off a definition another module imports is an API break
+        -- this tool cannot scope.
+        contained = M.findWithDefault Public (thisMod, sh) (ctxDefAccessByQ ctx)
+                      == Private
+                    || S.null outside
+        mk k note = Finding
+          { fileFinding   = fp
+          , lineFinding   = M.findWithDefault 0 (thisMod, sh) (ctxDefLineByQ ctx)
+          , kindFinding   = k
+          , moduleFinding = thisMod
+          , symbolFinding = Just sh
+          , noteFinding   = Just note
+          , confFinding   = if contained then High else Low
+          , argsFinding   = Just au
+          }
+  ]
+  where
+    commaSep = T.intercalate ", "
+    tshow :: Show a => a -> Text
+    tshow = T.pack . show
+    -- "argument 0 of 2" / "arguments 0 (with 1, 3), 1, 3 of 4". Positions
+    -- are 0-based telescope indices with implicits counted, on the
+    -- definition's OWN signature line — never on 'defSig', which still
+    -- carries the binders a section lifted in.
+    positions au rendered =
+      (if length rendered == 1 then "argument " else "arguments ")
+        <> commaSep rendered <> " of " <> tshow (auArity au)
+    -- A position that cannot go alone drags its forward closure with it;
+    -- offering the partial removal would strand a later binder.
+    showRemovable au i = case M.findWithDefault [] i (auRemovableRequires au) of
+      [] -> showPosition au i
+      js -> showPosition au i <> " (with " <> commaSep (map tshow js) <> ")"
+
+    -- The index plus the binder, spelled with Agda's own brackets so the
+    -- line reads like the signature: @0 {a}@, @3 ⦃d⦄@, @0 m@. An
+    -- implicit rendered as a bare index is the misread this exists to
+    -- prevent — "argument 0" of @{a : Set} → List a → …@ is the @{a}@,
+    -- not the first list. A position the producer had no binder for
+    -- stays a bare index rather than getting a guess.
+    showPosition au i = case M.lookup i (auBinders au) >>= bracket of
+      Nothing -> tshow i
+      Just b  -> tshow i <> " " <> b
+
+    -- An unnamed EXPLICIT binder renders as the bare index: "0 _" tells a
+    -- reader nothing they did not already assume. An unnamed implicit or
+    -- instance still shows its brackets, because the hiding is the half
+    -- that prevents the misread.
+    bracket b = case abHiding b of
+      BHExplicit -> abName b
+      BHImplicit -> Just ("{" <> nm <> "}")
+      BHInstance -> Just ("⦃" <> nm <> "⦄")
+      where nm = fromMaybe "_" (abName b)
+
+    -- Generalisation-inserted binders have no signature line to edit.
+    -- Said once per finding rather than per position: the deletion is
+    -- still well defined, because an inserted binder can only be
+    -- removable when the written argument that mentions it is removable
+    -- too and sits in its closure — so the set always contains something
+    -- the user can actually delete. This just stops them hunting for a
+    -- binder that was never written.
+    insertedNote au ixs =
+      case [ i | i <- ixs, Just b <- [M.lookup i (auBinders au)], abInserted b ] of
+        [] -> ""
+        is -> " (" <> commaSep (map tshow is)
+                <> " inserted by a `variable`, not on the signature line)"
 
 -- | True if @sh@ appears in the body tokens of some file OTHER than
 -- @fp@. 'definedButUnused' combines this (the cross-file half of the
@@ -736,6 +990,7 @@ publicReexportFindings ctx fp thisMod imports =
             , symbolFinding = Just sym
             , noteFinding   = Just "no other module references this re-export"
             , confFinding   = High
+            , argsFinding   = Nothing
             }
         | il <- imports
         , ilPublic il
@@ -767,6 +1022,7 @@ publicReexportFindings ctx fp thisMod imports =
                             , noteFinding   =
                                 Just "blanket re-export with no downstream user"
                             , confFinding   = High
+                            , argsFinding   = Nothing
                             }
                         | il <- imports
                         , ilPublic il
@@ -814,6 +1070,7 @@ duplicateUsingFindings fp imports =
          , symbolFinding = Nothing
          , noteFinding   = Just $ "another `open import` of this module already exists in the file"
          , confFinding   = High
+         , argsFinding   = Nothing
          }
      | ((m, _scope), ils) <- M.toList byMod
      , length ils > 1
@@ -833,12 +1090,43 @@ renderFindingLine f =
                    UnusedBlanketOpen       -> "blanket open with no observed use"
                    DefinedDead             -> "defined here, no callers anywhere"
                    DefinedInternalOnly     -> "defined here, intra-module callers only"
+                   FieldNeverProjected     -> "record field never projected"
+                   ArgRemovable            -> "unused argument(s), removable"
+                   ArgErasable             -> "unused argument(s), erasable (mark @0)"
                    DuplicateUsingForModule -> "duplicate `using` clause for module"
                    PublicWithoutDownstream -> "re-export with no downstream user"
       note     = case noteFinding f of
                    Just n  -> " (" ++ T.unpack n ++ ")"
                    Nothing -> ""
   in lineCol ++ " " ++ sym ++ "   -- " ++ tag ++ note
+
+-- | The actionable payload of an argument finding, emitted under
+-- @"arguments"@ by @--format=json@: the flagged positions, the binder at
+-- each (so a consumer need not re-read the graph to render or locate one),
+-- the arity, and — for 'ArgRemovable' — @delete@, mapping each position to
+-- the full set that must go with it ('argRemovableAlone', itself
+-- included).
+--
+-- __Acting on @delete[i]@ rather than on @i@ is the difference between a
+-- valid edit and a stranded binder__, which is the whole reason this is on
+-- the wire rather than left to prose. A public contract: the offline
+-- delete-and-retypecheck check and any cascade loop read it.
+argumentsJson :: FindingKind -> ArgUsage -> A.Value
+argumentsJson k au = A.object $
+  [ "positions" A..= ps
+  , "arity"     A..= auArity au
+    -- Encoded through aeson's 'ToJSONKey' for 'Int', the same instance
+    -- 'Schema.auBinders' / 'auRemovableRequires' already round-trip on,
+    -- so the decimal-string key convention has one spelling rather than
+    -- a hand-rolled second one here.
+  , "binders"   A..= M.restrictKeys (auBinders au) (S.fromList ps)
+  ]
+  ++ [ "delete" A..= M.fromList [ (i, argRemovableAlone au i) | i <- ps ]
+     | k == ArgRemovable ]
+  where
+    ps = case k of
+      ArgRemovable -> auRemovable au
+      _            -> auErasable au
 
 -- ** Qname helpers
 

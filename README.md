@@ -9,7 +9,7 @@ Hackage in minutes.
 | Tool                       | What it does                                                                                                                              |
 |----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------|
 | **`agda-graph`** (library) | Typed view of the expanded `graph.json` + an in-memory `Index`. The substrate the executables share.                                      |
-| **`agda-unused`**          | Flags unused imports / definitions / blanket opens / public re-exports.                                                                   |
+| **`agda-unused`**          | Flags unused imports / definitions / blanket opens / public re-exports / never-projected record fields / unused arguments.                 |
 | **`agda-optimization`**    | 19 subcommands: 18 graph-level analyses (centrality, clustering, motif mining, axiom footprint, …) + `hint-bench`, an offline lemma-ranker eval. |
 | **`agda-goals`**           | Drives `agda --interaction-json` over a pool of persistent processes and buckets goal states by canonical hash. Needs `agda` on `$PATH`. |
 | **`agda-explore`**         | Interactive MCP server: a daemon that answers point queries over the graph for coding agents, regenerating it on the fly via `agda-deps`. |
@@ -262,6 +262,18 @@ flag reads the positive key `x`, so write `x: false` rather than `no-x: true`;
   `--lenient-imports` — there Agda postulates the open metas and the module
   *succeeds*, so `failedModules: []` does **not** mean the project type-checks.
   Meta lines are exact; constraint lines are best-effort locations.
+- Optional per-definition `argUsage` — which telescope positions the definition
+  never uses, read off Agda's own occurrence/polarity analysis. `removable`
+  (binder and call-site argument can go) and `erasable` (used only in types, an
+  `@0` candidate) are 0-based positions with **implicits counted**, on the
+  definition's *own* signature line; `arity` bounds them, `binders` gives each
+  reported position's hiding and name, and `removableRequires` maps a position
+  to the others that must be deleted **with** it. Omitted when there is nothing
+  to report. Two rules for a consumer: act on a `removableRequires` set, never
+  a lone position, or the removal strands a later binder; and never align these
+  indices against the sibling `type` string, which still shows the binders a
+  parametrised module or `where` block lifted in. Consumed by `agda-unused`'s
+  `arg-removable` / `arg-erasable` kinds.
 
 A machine-readable JSON Schema (draft 2020-12) for the expanded form lives in the
 producer repo at `schema/graph-v2-expanded.schema.json`. For the full schema

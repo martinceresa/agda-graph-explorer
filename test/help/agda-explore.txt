@@ -35,6 +35,9 @@ Options (server mode):
   --min-term-depth N    Term-hash depth filter (default 3).
   --no-auto-rebuild     Do not regenerate the graph when sources change.
   --no-watch            Disable the fsnotify watcher; poll on each query instead.
+  --no-incremental      Rebuild every entry on every change instead of only the
+                        entries a change touched; retains no per-entry graph
+                        (less RAM, slower rebuilds). Multi-entry only.
   --require-well-typed  Only promote a rebuild that fully type-checks; while a
                         module has a type error, keep serving the last well-typed
                         graph (holes still refresh). Off by default.
@@ -65,6 +68,15 @@ Options (server mode):
   --agda-bin P          Path to agda for interaction sessions (else $AGDA_BIN, $PATH).
   --agda-arg ARG        Extra flag for `agda --interaction-json` (repeatable;
                         e.g. --agda-arg --safe).
+  --max-interaction-sessions N
+                        Cap on concurrently-live interaction `agda` subprocesses
+                        (default 2).
+  --interaction-idle-timeout N
+                        Close an interaction session idle this many seconds
+                        (default 0 = never).
+  --interaction-heap-mb N
+                        Per-session `agda` RTS heap cap in MB, +RTS -M
+                        (default 0 = no cap).
   --inspect             Serve a localhost web inspector (activity feed + live
                         editing view) at http://VERSION.1:7000 over Server-Sent
                         Events. Off by default; localhost-only, no auth.
@@ -78,9 +90,10 @@ Options (server mode):
   --auto-hints-lemmas N  Seed the check-time probe with the top N in-scope graph
                         hints (default 2; 0 = plain Mimer). A hint that closes a
                         goal is named inline, teaching the agent the lemma exists.
-  --control-port N      Serve a localhost control endpoint (GET /check?file=… and
-                        GET /repair?file=…, diff-only) for PostToolUse hooks;
-                        probes upward from N, writes the bound port to
+  --control-port N      Serve a localhost control endpoint for PostToolUse hooks:
+                        GET /check?file=…, GET /repair?file=… (diff-only) and
+                        GET /unused?file=… (that file's unused arguments). Probes
+                        upward from N, writing the bound port to
                         <out-dir>/control-port. Needs --enable-interact.
                         Off by default.
   --coverage-ignore GLOB  Source files (matching GLOB) intentionally outside every
