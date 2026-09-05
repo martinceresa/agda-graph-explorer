@@ -184,11 +184,25 @@ identChar ch = isAlphaNum ch || ch == '\'' || ch == '_'
 
 -- | A symbol character: not whitespace, not a bracket, not the
 -- qualified-name dot, and not an identifier character.
+-- | The bracket pairs a printed Agda type can use to enclose a group.
+--
+-- @\8291 \8292@ (Agda's INSTANCE brackets) belong here as much as
+-- @{ }@ does: an instance argument is a group, and leaving it out left its
+-- contents at depth 0 and the bracket itself reading as a top-level
+-- operator — so 'headSymbol' answered the bracket for any goal or premise
+-- carrying one (@Reachable {a} (…) ⦃ Init-State ⦄ s@ headed by @⦃@ rather
+-- than by @Reachable@). Every bracket-depth walker in this module —
+-- 'flattenShape', 'isOpChar' and 'conclusionOf' — keys off these, so no
+-- two of them can disagree about what a bracket is.
+openBracket, closeBracket :: String
+openBracket  = "([{\10627"
+closeBracket = ")]}\10628"
+
 isOpChar :: Char -> Bool
 isOpChar ch =
   not (isSpace ch)
     && not (identStart ch)
-    && ch `notElem` ("()[]{}." :: String)
+    && ch `notElem` ('.' : openBracket ++ closeBracket)
 
 ----------------------------------------------------------------------
 -- Conclusion / token extraction (find_lemma).
@@ -217,8 +231,12 @@ conclusionOf t = T.strip (go 0 (T.unpack t) "")
     go _ []           acc = T.pack (reverse acc)
     go d s@(c : rest) acc
       | d <= 0, Just s' <- arrowAt s = go 0 s' ""
-      | c `elem` ("({[" :: String)   = go (d + 1) rest (c : acc)
-      | c `elem` (")}]" :: String)   = go (d - 1) rest (c : acc)
+      -- The shared bracket sets, not a third literal pair: this is the
+      -- function that decides where a signature's conclusion begins,
+      -- before 'headSymbol' ever runs, so an arrow inside an instance
+      -- group must not read as top-level here either.
+      | c `elem` openBracket         = go (d + 1) rest (c : acc)
+      | c `elem` closeBracket        = go (d - 1) rest (c : acc)
       | otherwise                    = go d rest (c : acc)
     -- Match a leading arrow (Unicode or ASCII) and return the remainder.
     arrowAt ('\x2192' : r) = Just r
@@ -436,8 +454,17 @@ flattenShape = go . T.unpack
       | isSpace c = go cs
       -- empty-list / unit literal  []  (or  [ ] )
       | c == '[', (']' : rest') <- dropWhile isSpace cs = TId "[]" : go rest'
-      | c `elem` ("([{" :: String) = TLParen : go cs
-      | c `elem` (")]}" :: String) = TRParen : go cs
+      -- A RENDERING ARTEFACT, not a token: the producer prints an anonymous
+      -- enclosing-section parameter as a lone U+22EF, and it reaches every
+      -- consumer of a producer-rendered type (`defSig` in the lemma ranker
+      -- and premise selection, `binders[i].type` in the argument report).
+      -- Left in, it is an 'isOpChar' and therefore a top-level OPERATOR, so
+      -- it outranks the real head: `AwaitingGS ⋯ s` came back headed by the
+      -- placeholder rather than by the predicate. Dropped here so the whole
+      -- shape vocabulary is free of it, not just one caller's view.
+      | c == '\8943' = go cs
+      | c `elem` openBracket  = TLParen : go cs
+      | c `elem` closeBracket = TRParen : go cs
       | identStart c =
           let (tok, rest) = span identChar (c : cs) in resolveQual tok rest
       | isOpChar c =

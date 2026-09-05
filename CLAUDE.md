@@ -82,7 +82,7 @@ One shared library and five executables:
   Under `--control-port N` (needs `--enable-interact`) it serves a second
   localhost side channel (`AgdaMcp.Control`, `GET /check?file=…`,
   `GET /repair?file=…` diff-only, and `GET /unused?file=…` = that file's
-  `unused kinds=args`) so the plugin's PostToolUse hook can run the warm
+  `unused kinds=arg-removable`) so the plugin's PostToolUse hook can run the warm
   check, suggest a repair, and report unused arguments from outside the MCP
   transport. Needs `agda` on `$PATH` (or `--agda-bin`).
 - **`agda-auto`** — *batch hole-filler* (CLI, no daemon): fills every open hole
@@ -197,21 +197,43 @@ it) — check it first when `AgdaGraph.Schema` drifts on a decode failure.
     means "removable on its own", **never "unknown"**. Gate every suggested
     deletion on it (`AgdaGraph.Schema.argRemovableAlone` returns the set to
     delete, self included); a partial removal strands a later binder.
-  - **Never align an index against `defSig`.** The `type` string reifies the
-    *raw elaborated* telescope while these indices have the enclosing
-    section's telescope subtracted, so for a section-lifted def they disagree
-    — the producer's `Section.drops` is `arity 2` against a three-binder
-    `type`, where index 0 read off the type names the wrong binder. Indices
-    are positions on the definition's **own signature line**. `auArity` <
-    the `type`'s binder count is the tell.
+  - **Never align an index against `defSig`.** Indices are positions in the
+    definition's **own reduced telescope**: the elaborated telescope with the
+    enclosing section's prefix subtracted. That is *not* the signature line,
+    in either direction, so reading a position off the `type` string names
+    the wrong binder both ways:
+    - `type` is *longer* for a section-lifted def (the producer's
+      `Section.drops` is `arity 2` against a three-binder `type`, where index
+      0 read off the type names the wrong binder);
+    - the telescope is longer than the **signature line** whenever a
+      definition in the type unfolds into more binders, because
+      `dependentPolarity` walks a *reduced* spine. `Sec.complete :
+      (xs : Set) → xs ⊆ xs` (one written binder, `⊆` unfolding to
+      `{x} → x ∈ xs → x ∈ ys`) reports `arity 3` and `removable [2]`, and
+      position 2 is the membership hypothesis — not `xs`. Misreading exactly
+      this cost a field reviewer two "false positives" that were sound
+      verdicts (notes/UnusedArgs.Feedback.Plan.md).
 
   `binders` (sparse, keyed like `removableRequires`) → `auBinders :: Map Int
   ArgBinder`, carrying `hiding` (always) and `name` (when the syntactic Pi
   spine binds one) — taken *after* the section shift, so it agrees with the
-  indices. A position the spine does not reach gets **no entry**, never a
-  guess, so render the bare index there. Rendering the hiding is not
-  cosmetic: "argument 0" of `{a : Set} → List a → …` reads as the first list
-  to any reader, and it is the `{a}`.
+  indices. It is restricted to the **reported** positions, and the producer
+  emits an entry for every reported position the syntactic spine reaches, so
+  the absence is informative and exact:
+  - **no entry ⇔ the position is past the syntactic spine ⇔ that binder is
+    not on the signature line** (it appeared by unfolding a definition in the
+    type, so the edit target is that definition, not this signature). Render
+    the bare index and say so; don't drop the finding — a dead position inside
+    an unfolded relation is a dead *premise*, which is the most valuable thing
+    this analysis says about a proof.
+  - **entry present, `name` absent ⇔ a written binder spelled `_`.**
+  Rendering the hiding is not cosmetic: "argument 0" of
+  `{a : Set} → List a → …` reads as the first list to any reader, and it is
+  the `{a}`. One case defeats both tests: an *elaborator-inserted* instance
+  binder is on the spine and carries an internal name (`Block.BlockId`, whose
+  whole definition is `BlockId = Hash`, reports
+  `{"hiding":"instance","name":"x"}`) — only the producer can see that the
+  source wrote `_`.
 
   `removable` means deletable from the type **as written**: the producer's
   `guardDeletable` drops a position still occurring in the codomain or in a
@@ -225,6 +247,31 @@ it) — check it first when `AgdaGraph.Schema` drifts on a decode failure.
   later domain": that destroys `removableRequires`, whose chains are free in
   later domains by construction.
 
+  Four further optional fields qualify *actionability*, each omitted at its
+  default so an older graph decodes unchanged:
+  - **`syntacticArity`** — how many positions are on the signature line.
+    Omitted when it equals `arity`, so its presence is itself the signal
+    that some position is unwritten; the producer asserts every `binders`
+    key is below it. `AgdaGraph.Schema.argOnSignatureLine` is the test
+    (falling back to binder-entry membership on a graph without the field).
+  - **`binders[i].type`** — the domain, reified in the context of the
+    binders before it, under `--with-signatures` only. It is what makes an
+    *unnamed* position reportable: 63 of the 94 mapped removable positions
+    on the measured corpus are unnamed explicit binders, so the type is the
+    only name they have. Never normalised, and internal syntax rather than
+    source text.
+  - **`occursInBody`** — the `removable` subset the elaborated body still
+    threads into a callee, so the deletion is a multi-definition edit
+    (`AgdaGraph.Schema.argLocalEdit`). Absence is the reliable half (the
+    producer over-reports where the clause-pattern mapping cannot answer),
+    and an *instance* position listed here is the build-breaking case:
+    instance search resolved a callee's constraint from that binder.
+  - **`partiallyApplied`** — the definition is referenced unsaturated
+    somewhere in the graph, so its arity is part of its interface and **no**
+    position is removable however dead it is (`Eager ∩¹ AfterT t` needs
+    `AfterT t` unary). Corpus-scoped and `Def`-heads only: a filter, not a
+    proof.
+
   A **dotted** name (`P.A`) means the binder was inserted by a `variable`
   generalisation and is *not on the signature line* — a written binder name
   cannot contain `.`. `AgdaGraph.Schema.abInserted` is that test. It is
@@ -234,6 +281,20 @@ it) — check it first when `AgdaGraph.Schema` drifts on a decode failure.
   mentions it is removable too and sits in its closure, so
   `argRemovableAlone` always returns a set containing something editable.
   Report it, don't gate on it.
+- **Effective module options.** Optional top-level `moduleEffectiveOptions`
+  (`{ module → [flag] }`, top-level modules only, omitted when empty) →
+  `ExpandedGraph.egModuleEffectiveOptions`. The actionability-relevant
+  options actually **in force**, currently `--erasure` alone, read from the
+  interface's effective options — deliberately the opposite source to
+  `moduleOptionEscapes` (the file's own `{-# OPTIONS #-}` tokens), because
+  `--erasure` normally lives in the `.agda-lib`'s `flags:` line where no
+  pragma scan can see it. `AgdaGraph.Schema.egErasureFor` answers it for a
+  submodule by walking dot-prefixes. Without it, an `argUsage.erasable`
+  verdict is un-appliable however true it is (`@0` is
+  `[AttributeKindNotEnabled]`), which is why `agda-unused` grades those
+  findings `Low` and says so — and why `--kinds=all` no longer includes
+  `arg-erasable`.
+
 - **Module option escapes.** Optional top-level `moduleOptionEscapes`
   (`{ module → [flag] }`, ascending, escaping modules only, omitted when
   empty) → `ExpandedGraph.egModuleOptionEscapes`. Carries the file-level
@@ -250,9 +311,12 @@ it) — check it first when `AgdaGraph.Schema` drifts on a decode failure.
 Two tools shell out:
 
 - **`agda-explore` → `agda-deps`.** Regenerates the graph by running
-  `agda-deps` as a subprocess. `AgdaMcp.State.findBin` resolves it by
-  precedence **`--agda-deps-bin` > `$AGDA_DEPS_BIN` > `$PATH`** (newest-mtime
-  wins). Put `agda-deps` on `$PATH` (or pin it); preloaded mode (an existing
+  `agda-deps` as a subprocess. `AgdaMcp.State.findBin` is **not** a precedence
+  list: it stats every candidate — `--agda-deps-bin`, `$AGDA_DEPS_BIN`,
+  `$PATH`, and the `dist-newstyle` sibling of the running executable
+  (`siblingPath`) — and takes the **newest mtime**, a pin only breaking a tie
+  (and printing a stderr note when it loses, so the stale pin stays visible).
+  Put `agda-deps` on `$PATH` (or pin it); preloaded mode (an existing
   `graph.json`) needs no `agda-deps`.
 - **`agda-goals` → `agda`.** Drives `agda --interaction-json` over a pool of
   persistent subprocesses (`AgdaInteract.Session`); needs `agda` on `$PATH`.
@@ -357,7 +421,13 @@ src/
                                 questions: statement-match vs. premise-use).
     Tools.hs                    MCP lifecycle + read-side tool catalogue +
                                 tools/call dispatch; `unused` shells to
-                                agda-unused; appends interactTools (gated on
+                                agda-unused, forwarding kinds / exclude /
+                                min_confidence / group_by / count_only
+                                VERBATIM — agda-unused owns that vocabulary and
+                                validates it, so a bad value arrives as its
+                                diagnostic in the tool output, not as an MCP
+                                error, and the schema's enums are advisory;
+                                appends interactTools (gated on
                                 --enable-interact). `enabledTools` also narrows
                                 the catalogue to `coreToolNames` under
                                 --tool-tier=core (the measured-used subset; keep
@@ -379,7 +449,8 @@ src/
                                 (--control-port, needs --enable-interact):
                                 GET /check?file=…, GET /repair?file=…
                                 (diff-only) and GET /unused?file=… (the graph
-                                side: `unused scope=<file> kinds=args`) run the
+                                side: `unused scope=<file>
+                                kinds=arg-removable`) run the
                                 same runners as the `check` / `repair` /
                                 `unused` tools (MainMcp passes them as plain
                                 callbacks — imports no project module, no
@@ -668,6 +739,23 @@ scripts/
                                 (`just opts`); given a src dir + entry it builds
                                 the expanded JSON (subterm hashes) with
                                 agda-deps first.
+  verify-arg-removal.py         semantic acceptance for `agda-unused
+                                --kinds=arg-removable`: delete each finding's
+                                whole `delete` set from the source signature,
+                                re-typecheck, assert it still compiles. Tests
+                                the INDEX PLUMBING (does "position 2" name the
+                                binder a human counts?), not Agda's verdict.
+                                Every positive is paired with a NEGATIVE probe
+                                deleting an unflagged position — without it a
+                                script that silently edits nothing reports 100%;
+                                a definition whose negative also passes is
+                                INCONCLUSIVE, not a pass. Attempts only named
+                                binders in explicit groups on caller-free defs;
+                                everything else is SKIPPED with a counted
+                                reason. One work tree, restored per probe, so
+                                .agdai interfaces persist. Needs `agda`; slow,
+                                offline, NOT in CI. Exit 1 iff a positive broke
+                                the build.
 
 plugin/                         Claude Code plugin: agda-explore MCP server +
                                 skill + two Agda agents.

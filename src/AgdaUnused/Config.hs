@@ -36,7 +36,8 @@ import qualified Data.Text           as T
 
 import           AgdaGraph.ConfigCore ( DiscoverSpec(..), discoverWith, loadYamlConfig
                                       , checkKnownKeysP )
-import           AgdaUnused.Analysis ( FindingKind(..), GroupBy, parseGroupBy )
+import           AgdaUnused.Analysis ( Confidence(..), FindingKind(..), GroupBy
+                                     , parseConfidence, parseGroupBy )
 
 -- | Externally-supplied configuration. Every field is 'Maybe' so a
 -- partial config only overrides what the user actually set.
@@ -49,6 +50,7 @@ data Config = Config
   , cfgExclude   :: !(Maybe [String])
   , cfgGroupBy   :: !(Maybe GroupBy)
   , cfgCountOnly :: !(Maybe Bool)
+  , cfgMinConf   :: !(Maybe Confidence)
   } deriving (Show)
 
 -- | Drop-target for 'applyConfig'. We don't import the @Options@
@@ -63,6 +65,7 @@ data ConfigTarget a = ConfigTarget
   , ctSetExclude   :: [String]      -> a -> a
   , ctSetGroupBy   :: GroupBy       -> a -> a
   , ctSetCountOnly :: Bool          -> a -> a
+  , ctSetMinConf   :: Confidence    -> a -> a
   }
 
 -- | Apply a 'Config' to an arbitrary @Options@-shaped value using
@@ -78,6 +81,7 @@ applyConfig ConfigTarget{..} Config{..} = id
   . maybe id ctSetExclude   cfgExclude
   . maybe id ctSetGroupBy   cfgGroupBy
   . maybe id ctSetCountOnly cfgCountOnly
+  . maybe id ctSetMinConf   cfgMinConf
 
 -- | 'FromJSON' for the 'cfgKinds' field. Accepts EITHER a YAML
 -- scalar (@kinds: "using,blanket"@) or a YAML list
@@ -90,7 +94,7 @@ applyConfig ConfigTarget{..} Config{..} = id
 knownKeys :: [T.Text]
 knownKeys =
   [ "graph", "json", "rel-to", "format", "json-out", "kinds", "roots"
-  , "exclude", "group-by", "count-only" ]
+  , "exclude", "group-by", "count-only", "min-confidence" ]
 
 instance FromJSON Config where
   parseJSON = withObject "agda-unused config" $ \o -> do
@@ -111,6 +115,8 @@ instance FromJSON Config where
     rawGroupBy   <- o .:? "group-by"
     cfgGroupBy   <- traverse parseGroupByField rawGroupBy
     cfgCountOnly <- o .:? "count-only"
+    rawMinConf   <- o .:? "min-confidence"
+    cfgMinConf   <- traverse parseMinConfField rawMinConf
     return Config{..}
     where
       parseFormatField :: T.Text -> A.Parser Bool
@@ -118,6 +124,9 @@ instance FromJSON Config where
         "json"  -> pure True
         "human" -> pure False
         other   -> fail ("unknown format: " ++ other ++ " (want human|json)")
+      parseMinConfField :: A.Value -> A.Parser Confidence
+      parseMinConfField = withText "min-confidence" $ \t ->
+        either fail return (parseConfidence (T.unpack t))
       parseGroupByField :: A.Value -> A.Parser GroupBy
       parseGroupByField = withText "group-by" $ \t ->
         case parseGroupBy (T.unpack t) of
@@ -167,11 +176,17 @@ parseKindsToken "duplicate"     = Right [DuplicateUsingForModule]
 parseKindsToken "arg-removable" = Right [ArgRemovable]
 parseKindsToken "arg-erasable"  = Right [ArgErasable]
 parseKindsToken "args"          = Right [ArgRemovable, ArgErasable]
+-- `all` is the TRIAGE set, not "every token". 'ArgErasable' is left out
+-- deliberately: it fires on roughly a quarter of all definitions (1328 of
+-- 1433 argUsage rows on the measured corpus, 41% of the whole report), it
+-- suggests an `@0` that is a syntax error unless the project enables
+-- `--erasure`, and it is dominated by level binders. Selecting it takes
+-- the explicit `arg-erasable` / `args` token.
 parseKindsToken "all"           = Right
   [ UnusedInUsing, UnusedBlanketOpen
   , DefinedDead, FieldNeverProjected, DefinedInternalOnly
   , PublicWithoutDownstream, DuplicateUsingForModule
-  , ArgRemovable, ArgErasable
+  , ArgRemovable
   ]
 parseKindsToken s = Left $ "unknown kind: " ++ s
 

@@ -2,12 +2,163 @@
 
 ## Unreleased
 
+### Field report on the argument checks: the dead-check net, and four new producer signals (2026-09-04)
+
+Everything here comes from the first run of the `arg-*` checks over a real
+6 000-definition proof development, and the numbers are measured on that
+corpus and its graph.
+
+- **Fixed: the `defined-dead` false-positive net was structurally disabled for
+  module-local and mixfix names — 42 of 157 findings (27%) were false
+  positives it should have caught.** `definedButUnused` suppresses a dead
+  verdict when the name is mentioned in another file, or more than twice in its
+  own; both lookups used the producer's short name *verbatim*, including the
+  `@<line>` disambiguator it appends to `where`/anonymous-module helpers.
+  `PreEnoughV?@240` appears in no source file, so the net answered "never
+  mentioned" for **every** module-local definition (87 of 157 here). Mixfix
+  names missed the same way: `_:InitTC?` is written `𝔹 :InitTC?` at its call
+  sites. Both spellings are now tried (`AgdaGraph.Index.stripLineTag` for the
+  tag, name parts for the mixfix form, all parts required in one file so a
+  one-part operator like `_+_` is not suppressed by the `+` that appears
+  everywhere), and the whole-name spelling is still tried first — it does occur
+  verbatim in a `using (…)` list. Pure suppression: nothing new appears.
+- **`arg-removable` / `arg-erasable` consume four new producer signals** —
+  `syntacticArity`, `binders[i].type`, `occursInBody` and `partiallyApplied`
+  (`agda-deps` round 5; all optional, so older graphs behave as before). Each
+  is an *actionability* fact Agda knows and the report cannot re-derive:
+  - a position past the signature line is **labelled, not dropped**. It exists
+    because a type in the signature unfolds, so the verdict is still true — a
+    premise the proof never inspects means the statement could be strengthened
+    — but the edit target is that other definition. 54 of the 133
+    `arg-removable` findings here are in that class, and the earlier plan to
+    drop them would have deleted true positives.
+  - an **unnamed** binder now renders its *type* (`argument 5 (GST ≤ s) of 11`
+    instead of `argument 5 of 11`). 63 of the 94 mapped removable positions on
+    this corpus are unnamed explicit binders, because the project writes
+    premises bullet-style.
+  - a definition **used unsaturated** cannot lose a binder at all (its arity is
+    part of its interface: `Eager ∩¹ AfterT t` needs `AfterT t` unary), and an
+    argument **passed on to a callee** that discards it needs that callee
+    edited too.
+  - without `--erasure` in force (new top-level `moduleEffectiveOptions`), the
+    `@0` that `arg-erasable` suggests is a syntax error, and the finding says
+    so. 1 259 findings on this corpus were un-appliable as configured.
+- **`--kinds=all` no longer includes `arg-erasable`.** It fires on roughly a
+  quarter of all definitions (1 328 of 1 433 `argUsage` rows here, 41% of the
+  whole report) and is dominated by level binders, so it swamped a triage run;
+  ask for it by name or via `args`. `--kinds=all` went from 3 028 findings to
+  1 729 on this corpus, without losing a kind.
+- **New `--min-confidence=low|high`** (config `min-confidence:`), and
+  confidence is **re-derived from actionability**: `High` only when the edit
+  the finding names can be made as stated — contained blast radius, every
+  position on the signature line, not partially applied, and not `@0` advice in
+  a module without `--erasure`. A callee edit is a *cost*, not a doubt, so it
+  does not grade down. `--min-confidence=high` takes `arg-removable` from 133
+  to 41 here.
+- **Confidence is printed in plain text** (`[low confidence]`), which the
+  Haddock had claimed for some time while only `--format=json` carried it. It
+  now has one spelling: the two notes that said "low confidence:" in prose no
+  longer do.
+- **`--format=json` gained the finding's `note`** — the prose the human line
+  carries, including the blast radius (`2 caller(s) here, 5 other module(s)`)
+  a consumer costs a refactor from. JSON was the machine format and the only
+  one without it. The `arguments` object also gained `unwritten`, `nonLocal`
+  and `partiallyApplied`.
+- **Fixed: `unused-in-using` — a DEFAULT kind, and this tool's namesake
+  check — could never fire.** Usage was measured against `bodyTokens`, which
+  covers the whole file *including* the import block, so every symbol in a
+  `using (…)` clause was credited by that clause itself. Verified on a
+  two-symbol minimal case with the released binary (`open import Lib using
+  (wanted; neverUsed)`, only `wanted` used → `# total: 0 finding(s)`) and by
+  a 6 000-definition corpus that reported zero `unused-in-using` findings in
+  its entire history. The import-usage checks now search a haystack with the
+  import lines removed (`AgdaUnused.Source.bodyTokensOutside`, numbering
+  lines exactly as `scanImports` does). That corpus now reports 3 findings,
+  all verified true positives — two `IO.Base` symbols and one lemma whose
+  names appear nowhere but their own import lines. The module header had
+  claimed the analyser "ignores the per-import line itself"; it did not.
+- **Fixed: a multi-line `{- … -}` comment shifted every reported line below
+  it.** `scanImports` numbers `ilLine` off `lines . stripBlock`, and
+  `stripBlock` dropped the comment's own newlines — an import three lines
+  under a three-line comment was reported three lines too high (pinned by a
+  fixture). Harmless while nothing consumed those numbers; not harmless now
+  that `unused-in-using` fires and points a reader at a line. `stripBlock`
+  now keeps newlines, which diverges deliberately from the
+  `AgdaDeps.Precompute` copy it was taken from.
+- **A mixfix name in a `using` clause is credited by its parts.**
+  `using (_∷_)` is written whole but applied as `x ∷ xs`, so requiring the
+  whole spelling in the body would report a used import as unused —
+  a false positive newly reachable now that the kind fires at all.
+- **`unused-blanket-open`'s source-side credit is normalised too**
+  (`mentionedInTokens`): a re-exported name is very often line-tagged or
+  mixfix — 790 of 1549 distinct re-export shorts on the measured corpus —
+  and neither spelling occurs verbatim in a body, so a plain set
+  intersection lost the credit and flagged an import the file does use.
+  Yield was one finding of 137 (`Running/Proc.agda`, which uses `Type`,
+  `Σ` and `L.∷ʳ` from its `open import Prelude`): the two graph-side credits
+  already carry almost everything, and the source fallback only matters when
+  the underlying definition was dropped by `--no-externals`.
+- **New `--group-by=premise`**: buckets an argument finding by the head symbol
+  of each flagged position's *type*, so "which hypotheses has this development
+  stopped using" is one row per family instead of one line per lemma. On the
+  measured corpus the 20 high-confidence `arg-removable` findings collapse to
+  `Reachable 5`, `AwaitingGS 4`, `≥ 3`, `GlobalState 2`, `≤ 2`, … — the report's
+  item 7 (its most-valued output) and the clustering half of its FP-8, without
+  a new kind and without keying on binder names, which would be one project's
+  convention dressed up as an analysis. A finding touching two families counts
+  under both, so rows can sum above the total.
+- **Fixed: `AgdaGraph.GoalCanon.flattenShape` did not know Agda's instance
+  brackets.** `⦃ … ⦄` was not in its bracket sets, so an instance argument's
+  contents stayed at depth 0 and the bracket itself read as a top-level
+  operator — `headSymbol` answered `⦃` for any goal or premise carrying one
+  (`Reachable {a} (…) ⦃ Init s ⦄ s`) instead of `Reachable`. That is the
+  shared "top-level relation or type constructor" the lemma ranker keys
+  conclusions on, so the head-symbol strategies were mis-firing on every
+  instance-carrying goal too.
+- **`partiallyApplied` only blocks an EXPLICIT position.** An unsaturated
+  reference pins the order of the explicit arguments, so deleting one shifts
+  every call site's list; a hidden position is never written at a call site and
+  Agda re-solves it, so its removal is invisible. Measured on a rebuilt graph:
+  the unscoped rule was burying `Enumeration.enumProof`'s `⦃ Q ⁇¹ ⦄`, one of
+  the two findings the field report hand-verified as genuine, on a definition
+  that *is* passed unsaturated (`return (enumProof enum allQ)`).
+  High-confidence `arg-removable` findings 18 → 20.
+- **Measured on a graph rebuilt with the round-5 producer** (same entry, same
+  5818 definitions): defs with a `removable` verdict 139 → 122, positions
+  173 → 150, `arg-removable` findings 132 → 115, and at
+  `--min-confidence=high` 40 → 20. The 17 definitions the producer's
+  solvability guard dropped are the field report's false-positive taxonomy by
+  name — `Prelude.Init.typeOf` (its FP-7) and `AfterT` / `BeforeT` / `Between`
+  / `WithinNow` (its FP-5). All 69 unnamed removable positions now carry a
+  type, 55 of 150 positions are flagged as not on the signature line, 104 of
+  150 need a callee edit, and zero modules enable `--erasure`.
+- **The PostToolUse hook's `/unused` route is narrowed to `arg-removable`.**
+  It ran `unused kinds=args`, so on a project without `--erasure` every
+  injection could carry `@0` advice that is a syntax error there — and
+  `arg-erasable` fires on roughly a quarter of all definitions. A hook lands
+  in every edit's turn, so a kind that is usually noise does not belong on
+  that route; `unused kinds=args` is still one MCP call away. The section
+  header now names the narrowed kind, and the hook's comment points at the
+  per-finding confidence and the note that says what stands in the way of the
+  edit.
+- **Fixed: `duplicate-using` flagged two opens that differ only in
+  `public`-ness.** Merging them would change the file's re-export surface, so
+  they are not consolidation candidates; `ilPublic` is part of the bucket key.
+- **`defined-dead` says what it cannot see.** The note now reads "verify first:
+  a use in a `with` scrutinee leaves no edge" rather than leaving every finding
+  looking equally solid.
+- **Documentation: "the definition's own signature line" was wrong**, in this
+  repo's `CLAUDE.md`, `--help`, `README.md`, the plugin skill and the MCP
+  `unused` caveat. Argument indices address the definition's own *reduced*
+  telescope, which can be **longer** than the signature line. That one word
+  cost a careful reviewer two "false positives" that were sound verdicts.
+
 ### The post-edit hook reports unused arguments (2026-09-01)
 
 - **The plugin's PostToolUse hook now runs `unused kinds=args` on a clean edit.** After a `✓` check of the edited file it appends that file's unused-argument findings; a `✗` still gets the diff-only `repair` suggestion instead, and a file with no findings injects nothing. This is the one defect class the edit→check loop was structurally blind to: Agda raises no warning for an argument a definition never uses, so a spare binder type-checks clean, and the verdict lives in the graph (the producer's `argUsage`) rather than in the compiler session.
 - **New `GET /unused?file=…` control-endpoint route**, beside `/check` and `/repair`, wired to the same `unused` runner the MCP tool uses (`kinds=args`, scoped to the file). Being graph-side it reports the last `agda-deps` build, so findings can lag an edit by one rebuild — the report's own freshness footer says so when they do.
 - **Fixed: an `agda-unused` ROOT naming a single file scanned nothing** and reported `# total: 0 finding(s)` for every kind — `discoverAgdaFiles` walked directories only, and a scan that reads no file also trips no "none of these matched the graph" guard. `agda-explore`'s `unused scope=FILE` (which validates the path against the graph first) has always been silently empty because of it. CI now asserts the single-file scope finds what the directory scan finds.
-- **The `unused` tool's caveat is narrowed to the kinds requested.** A `kinds=args` call was spending a paragraph on the `dead` confidence tag and the `blanket`/`public` false positives; it now gets the two rules that govern acting on an argument finding (delete a `(with …)` set whole; indices count implicits and are read against the definition's own signature line). An unrecognised kind token still selects every paragraph, so a new kind can't lose its advice.
+- **The `unused` tool's caveat is narrowed to the kinds requested.** A `kinds=args` call was spending a paragraph on the `dead` confidence tag and the `blanket`/`public` false positives; it now gets the two rules that govern acting on an argument finding (delete a `(with …)` set whole; indices count implicits — read against the definition's own reduced telescope, corrected 2026-09-04). An unrecognised kind token still selects every paragraph, so a new kind can't lose its advice.
 
 ### Unused arguments, never-projected fields, exact duplicates (2026-09-01)
 

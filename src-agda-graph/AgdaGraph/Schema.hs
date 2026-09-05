@@ -21,7 +21,14 @@ module AgdaGraph.Schema
   , ArgBinder(..)
   , BinderHiding(..)
   , argRemovableAlone
+  , argOnSignatureLine
+  , argWritten
+  , argLocalEdit
+  , argRemovalBlocked
   , abInserted
+  , egErasureFor
+  , erasureEnabledFor
+  , egDescribesArgBinders
   , Definition(..)
   , ReExport(..)
   , ExternalsSummary(..)
@@ -49,6 +56,10 @@ import           Data.Text            ( Text )
 import qualified Data.Text            as T
 import           Data.Word            ( Word64 )
 import           GHC.Generics         ( Generic )
+
+-- The dot-component step and the shared shape tokeniser. GoalCanon imports
+-- no project module, so this is not a cycle.
+import           AgdaGraph.GoalCanon  ( moduleComponent )
 
 -- | Per-definition lifecycle state. Encoded by the producer as the
 -- single-letter strings @"D"@/@"P"@/@"H"@/@"F"@. See @CLAUDE.md@'s
@@ -116,16 +127,21 @@ instance FromJSON Access where
 -- not a heuristic — see the @agda-deps@ repo's @Prompts\/ArgUsage.md@.
 --
 -- Positions are 0-based telescope indices, __implicits included__,
--- ascending, and — since the producer subtracts the enclosing section's
--- telescope — every one is a position on the definition's __own signature
--- line__.
+-- ascending, over the definition's __own reduced telescope__: elaborated,
+-- with the enclosing section's telescope subtracted. That is /not/ the
+-- signature line — it can be __longer__, because Agda derives the
+-- underlying analysis from a /reduced/ spine, so a type whose codomain
+-- only becomes a function after unfolding a definition contributes
+-- positions with no written binder at all. 'argOnSignatureLine' is the
+-- boundary test.
 --
 -- Do __not__ align these against 'defSig'. That string reifies the /raw
 -- elaborated/ telescope, so a section-lifted definition still shows the
 -- binders it inherited while these indices do not: the producer's golden
 -- has @Section.drops@ at @arity 2@ with a three-binder @type@, where index
--- 0 read off the type names the wrong binder. @auArity@ < the binder count
--- in 'defSig' is the tell that a def was section-lifted.
+-- 0 read off the type names the wrong binder. The disagreement runs both
+-- ways — @auArity@ can also /exceed/ the binder count in 'defSig' — so
+-- neither direction is a safe alignment.
 -- | How a binder is passed. Rendered with Agda's own brackets, so a
 -- report line reads the way the signature does.
 data BinderHiding = BHExplicit | BHImplicit | BHInstance
@@ -154,19 +170,33 @@ data ArgBinder = ArgBinder
     -- ^ The binder name as Agda spells it, or 'Nothing' where the spine
     -- binds nothing to name (@Nat → Nat@). Never guessed: a position the
     -- spine does not reach has no entry in 'auBinders' at all rather
-    -- than a fabricated one.
+    -- than a fabricated one. A __present__ entry with no name is a binder
+    -- that /is/ written, spelled @_@.
+  , abType   :: !(Maybe Text)
+    -- ^ The binder's domain, reified in the context of the binders before
+    -- it (so it names them rather than printing de Bruijn indices).
+    -- Present only when the producer ran with @--with-signatures@, the
+    -- same gate as 'defSig'. Never normalised — reducing a domain would
+    -- destroy the head symbol that makes it recognisable — so it is
+    -- internal syntax, not source text.
+    --
+    -- This is what makes an /unnamed/ position reportable: two thirds of
+    -- the actionable removable positions in a real proof development are
+    -- unnamed explicit binders (premises written bullet-style), where the
+    -- type is the only name they have.
   } deriving (Show, Eq, Generic)
 
 instance NFData ArgBinder
 
 instance FromJSON ArgBinder where
   parseJSON = withObject "argBinder" $ \o ->
-    ArgBinder <$> o .: "hiding" <*> o .:? "name"
+    ArgBinder <$> o .: "hiding" <*> o .:? "name" <*> o .:? "type"
 
 instance A.ToJSON ArgBinder where
   toJSON b = A.object $
     [ "hiding" A..= abHiding b ]
     ++ [ "name" A..= n | Just n <- [abName b] ]
+    ++ [ "type" A..= t | Just t <- [abType b] ]
 
 -- | True when the binder was inserted by a @variable@ generalisation
 -- rather than written on the definition's signature line, so there is
@@ -205,18 +235,52 @@ data ArgUsage = ArgUsage
     -- \"unknown\": a lone removal that strands a later binder is the
     -- failure this map exists to prevent. Empty for every single-index
     -- verdict.
+  , auOccursInBody :: ![Int]
+    -- ^ The subset of 'auRemovable' whose variable the __elaborated body__
+    -- still mentions: the value is threaded into a callee that discards
+    -- it, so the deletion is a /multi-definition/ edit (the callee's
+    -- parameter and its own call sites have to go too). A removable
+    -- position __absent__ from this list is a local edit — strike the
+    -- binder and the arguments, nothing else changes — and an absent
+    -- field means every position is local.
+    --
+    -- Absence is the reliable half: the producer over-reports where the
+    -- clause-pattern mapping cannot answer (a position matched on, a
+    -- copattern clause, a position past the clause's patterns).
+    --
+    -- An /instance/ position listed here is the case that breaks builds:
+    -- instance search resolved a callee's constraint from that binder,
+    -- which no source-text search can see.
   , auErasable  :: ![Int]
     -- ^ Unused in the body but still variance-relevant: used only in
     -- types, so an @\@0@ candidate rather than a removal.
   , auArity     :: {-# UNPACK #-} !Int
     -- ^ Telescope positions the verdict ranges over; every index above is
-    -- below this.
+    -- below this. Counts the definition's own /reduced/ telescope, so it
+    -- can exceed the binder count on the signature line — see
+    -- 'auSyntacticArity'.
+  , auSyntacticArity :: !(Maybe Int)
+    -- ^ How many of the 'auArity' positions are __on the signature
+    -- line__: the length of the syntactic @Pi@ spine, section prefix
+    -- subtracted. The producer omits it when it equals 'auArity', so its
+    -- /presence/ is itself the signal that some position has no written
+    -- binder. Use 'argOnSignatureLine' rather than reading it directly.
+  , auPartiallyApplied :: !Bool
+    -- ^ The definition is referenced somewhere in the graph with fewer
+    -- arguments than it takes, so its arity is part of its interface and
+    -- __no position is removable__ however dead it is: a value used as
+    -- @f x@ where a unary function is wanted cannot lose a binder.
+    --
+    -- Corpus-scoped (only as complete as the modules compiled) and
+    -- @Def@-heads only, so it is a filter, not a proof. Absent from the
+    -- wire means \"not observed unsaturated\".
   , auBinders   :: !(M.Map Int ArgBinder)
-    -- ^ Binder hiding + name for the reported positions, sparse (only
-    -- positions the producer had something to say about) and keyed like
-    -- 'auRemovableRequires'. A missing entry means the syntactic spine
-    -- did not reach that position — the producer degrades rather than
-    -- guessing — so render the bare index there.
+    -- ^ Binder hiding + name (+ type under @--with-signatures@) for the
+    -- reported positions, sparse and keyed like 'auRemovableRequires'.
+    -- Keys are always below 'auSyntacticArity' — an invariant the
+    -- producer asserts — so a __missing__ entry means the position is
+    -- past the signature line, not that the binder is unremarkable.
+    -- Render the bare index there, and say why.
   } deriving (Show, Eq, Generic)
 
 instance NFData ArgUsage
@@ -228,8 +292,11 @@ instance FromJSON ArgUsage where
       -- Wire keys are decimal strings ("0", "1"); aeson's 'FromJSONKey'
       -- for 'Int' parses them.
       <*> o .:? "removableRequires" .!= M.empty
+      <*> o .:? "occursInBody" .!= []
       <*> o .:? "erasable"  .!= []
       <*> o .:? "arity"     .!= 0
+      <*> o .:? "syntacticArity"
+      <*> o .:? "partiallyApplied" .!= False
       <*> o .:? "binders"   .!= M.empty
 
 instance A.ToJSON ArgUsage where
@@ -238,10 +305,14 @@ instance A.ToJSON ArgUsage where
     , "erasable"  A..= auErasable au
     , "arity"     A..= auArity au
     ]
-    -- Both omitted when empty, matching the producer, so a decode/encode
-    -- round-trip is byte-stable.
+    -- Every optional field is omitted at its producer default, so a
+    -- decode/encode round-trip is byte-stable.
     ++ [ "removableRequires" A..= auRemovableRequires au
        | not (M.null (auRemovableRequires au)) ]
+    ++ [ "occursInBody" A..= auOccursInBody au
+       | not (null (auOccursInBody au)) ]
+    ++ [ "syntacticArity" A..= k | Just k <- [auSyntacticArity au] ]
+    ++ [ "partiallyApplied" A..= True | auPartiallyApplied au ]
     ++ [ "binders" A..= auBinders au | not (M.null (auBinders au)) ]
 
 -- | The positions that must be deleted together with @i@, @i@ included and
@@ -255,6 +326,68 @@ argRemovableAlone au i
   | i `notElem` auRemovable au = []
   | otherwise = IS.toAscList
       (IS.insert i (IS.fromList (M.findWithDefault [] i (auRemovableRequires au))))
+
+-- | Is position @i@ a binder the reader can find __on the signature
+-- line__, as opposed to one that exists only after a type in the
+-- signature unfolds?
+--
+-- The distinction is not cosmetic: for an unwritten position the verdict
+-- is still true and often interesting (\"the proof never inspects this
+-- hypothesis\", so the statement could be strengthened), but the edit
+-- target is the /unfolded definition/, not this signature. Reporting it
+-- as \"delete argument 2\" sends the reader hunting for a binder nobody
+-- wrote.
+--
+-- Prefers 'auSyntacticArity' (exact, and the producer asserts every
+-- 'auBinders' key is below it) and falls back to the binder-entry
+-- membership that implies, for a graph from a producer that predates the
+-- field. On a graph so old it carries no binder data __at all__ the
+-- fallback has nothing to read, so callers should gate on
+-- 'egDescribesArgBinders' — 'argWritten' is that gate applied.
+argOnSignatureLine :: ArgUsage -> Int -> Bool
+argOnSignatureLine au i = case auSyntacticArity au of
+  Just k  -> i < k
+  Nothing -> M.member i (auBinders au)
+
+-- | 'argOnSignatureLine', but answering \"unknown\" as \"written\".
+--
+-- @described@ is 'egDescribesArgBinders' for the graph the 'ArgUsage' came
+-- from: 'False' means the producer emits no binder data anywhere, and there
+-- an absent entry is not evidence of an unwritten binder. THE one gate both
+-- a report line and a machine payload must ask, so the two cannot disagree
+-- about which positions are on the signature line.
+argWritten :: Bool -> ArgUsage -> Int -> Bool
+argWritten described au i = not described || argOnSignatureLine au i
+
+-- | Does an unsaturated reference to this definition __block__ removing
+-- these positions?
+--
+-- A partial application pins the order of the __explicit__ arguments, so
+-- deleting one shifts every call site's list. A hidden position is never
+-- written at a call site and Agda re-solves it at each use, so removing it
+-- is invisible to a partial application — and gating on that distinction is
+-- the difference between reporting and burying a genuine finding on a
+-- definition that happens to be passed to a combinator.
+--
+-- A position with no binder entry has no hiding to read and counts as
+-- explicit: conservative, and such a position is not on the signature line
+-- anyway.
+argRemovalBlocked :: ArgUsage -> [Int] -> Bool
+argRemovalBlocked au ixs = auPartiallyApplied au && any explicitAt ixs
+  where
+    explicitAt i = case M.lookup i (auBinders au) of
+      Just b  -> abHiding b == BHExplicit
+      Nothing -> True
+
+-- | Is deleting position @i@ a __local__ edit — the binder and its call-site
+-- arguments and nothing else?
+--
+-- 'False' means the elaborated body still threads the value into a callee,
+-- so the callee's parameter (and /its/ call sites) must go too. Only
+-- meaningful for a position in 'auRemovable'; an 'auErasable' position
+-- makes no deletion claim at all.
+argLocalEdit :: ArgUsage -> Int -> Bool
+argLocalEdit au i = i `notElem` auOccursInBody au
 
 -- | A single definition. Strict fields throughout; this record is built
 -- once per QName and held across the whole analysis.
@@ -485,6 +618,21 @@ data ExpandedGraph = ExpandedGraph
     -- escapes): 'AgdaGraph.Index.buildIndex' folds these module-wide escapes
     -- into every enclosed def's 'defUnsafe', so the @agda-explore@ soundness
     -- audit (@search@ / @roots@ @unsafe=@) and transitive taint see them.
+  , egModuleEffectiveOptions :: !(M.Map Text [Text])
+    -- ^ Per top-level module, the actionability-relevant Agda options
+    -- actually __in force__ — currently @--erasure@ alone. Read from the
+    -- interface's /effective/ options, which is deliberately the opposite
+    -- source to 'egModuleOptionEscapes' (the module's own @OPTIONS@
+    -- tokens): a flag like @--erasure@ normally lives in the
+    -- @.agda-lib@'s @flags:@ line or on the command line, where a pragma
+    -- scan cannot see it.
+    --
+    -- Only modules enabling one appear, so 'M.empty' — from an older
+    -- producer /or/ from a project that enables none — is the answer
+    -- \"nowhere\". Gate advice on it via 'egErasureFor': without
+    -- @--erasure@, @\@0@ is a syntax error
+    -- (@[AttributeKindNotEnabled]@), so every 'auErasable' verdict in
+    -- that module is un-appliable as configured however true it is.
   , egUnsolvedModules  :: !(M.Map Text ([Int], [Int]))
     -- ^ Per top-level module, @(silent unsolved-meta lines, unsolved-constraint
     -- lines)@ — the optional @unsolvedModules@ object, @{module → {metas: […],
@@ -559,6 +707,7 @@ instance FromJSON ExpandedGraph where
             rxs    <- o .:? "reexports"        .!= []
             extSum <- o .:? "externals_summary"
             mesc   <- o .:? "moduleOptionEscapes" .!= M.empty
+            meff   <- o .:? "moduleEffectiveOptions" .!= M.empty
             unsol  <- fmap (fmap unUnsolvedModule) (o .:? "unsolvedModules" .!= M.empty)
             prov   <- o .:? "definitionEdgesProvenance" .!= []
             sths   <- o .:? "definitionSubtermHashes"   .!= []
@@ -607,6 +756,7 @@ instance FromJSON ExpandedGraph where
                 , egReExports        = rxs
                 , egExternalsSummary = extSum
                 , egModuleOptionEscapes = mesc
+                , egModuleEffectiveOptions = meff
                 , egUnsolvedModules  = unsol
                 , egEdgeProvenance   = prov
                 , egSubtermHashes    = sths
@@ -703,8 +853,59 @@ instance A.ToJSON ExpandedGraph where
     -- daemon materialises to @cfgGraphPath@ mirrors the producer exactly).
     ++ [ "moduleOptionEscapes" A..= egModuleOptionEscapes g
        | not (M.null (egModuleOptionEscapes g)) ]
+    ++ [ "moduleEffectiveOptions" A..= egModuleEffectiveOptions g
+       | not (M.null (egModuleEffectiveOptions g)) ]
     ++ [ "unsolvedModules" A..= M.map unsolvedModuleJson (egUnsolvedModules g)
        | not (M.null (egUnsolvedModules g)) ]
+
+-- | Is @--erasure@ in force for module @m@ (so an 'auErasable' verdict
+-- there is actually appliable)?
+--
+-- 'egModuleEffectiveOptions' is keyed by __top-level__ module, because the
+-- flag is a file/library-level fact, so a submodule inherits its file's
+-- answer: @Foo.Bar.Baz@ is answered by the longest dot-prefix present in
+-- the map. An older producer emits no map at all, which reads as
+-- \"nowhere\" — the same answer as a project that enables it nowhere, and
+-- the conservative one for advice that would otherwise be a syntax error.
+egErasureFor :: ExpandedGraph -> Text -> Bool
+egErasureFor = erasureEnabledFor . egModuleEffectiveOptions
+
+-- | 'egErasureFor' over the map alone.
+--
+-- The map is the whole input, so a consumer that answers this question
+-- repeatedly holds __only the map__ rather than a closure over the graph:
+-- a partially-applied 'egErasureFor' stored in a long-lived record keeps
+-- every definition, edge and subterm array of a decoded graph reachable
+-- for as long as that record lives.
+erasureEnabledFor :: M.Map Text [Text] -> Text -> Bool
+erasureEnabledFor opts m
+  | M.null opts = False
+  | otherwise   = any enabled (m : ancestors m)
+  where
+    enabled k = "--erasure" `elem` M.findWithDefault [] k opts
+    -- "A.B.C" -> ["A.B", "A"]: the enclosing modules, innermost first.
+    -- 'moduleComponent' is the shared spelling of that step and yields
+    -- @""@ once there is no dot left, which ends the walk.
+    ancestors = takeWhile (not . T.null) . drop 1 . iterate moduleComponent
+
+-- | Does this graph's producer describe argument binders at all — any
+-- 'auSyntacticArity', or any 'auBinders' entry?
+--
+-- A graph capability, not a per-definition fact, and the distinction is
+-- load-bearing: the FIRST producer to emit @argUsage@ emitted
+-- @{removable, removableRequires, erasable, arity}@ and nothing else, and
+-- on such a graph a missing binder entry carries no information. Per
+-- definition the two cases are indistinguishable — and a definition whose
+-- every reported position is unwritten is exactly the case worth
+-- labelling — so the question has to be asked of the whole graph.
+-- 'argWritten' is the gate that consumes it.
+egDescribesArgBinders :: ExpandedGraph -> Bool
+egDescribesArgBinders g =
+  any described [ au | d <- egDefinitions g, Just au <- [defArgUsage d] ]
+  where
+    described au =
+      maybe False (const True) (auSyntacticArity au)
+        || not (M.null (auBinders au))
 
 -- | One 'egUnsolvedModules' value back in the producer's object shape.
 unsolvedModuleJson :: ([Int], [Int]) -> A.Value

@@ -22,9 +22,12 @@
 --     writes); @200@ with the report + proposed diff. Serves the PostToolUse
 --     hook's "suggest a fix" step.
 --   * @GET \/unused?file=PATH@ — run @agda-unused@ over that file, narrowed to
---     the ARGUMENT verdicts (@kinds=args@). The graph side, not the bridge:
---     it answers what a @\/check@ structurally cannot, since Agda raises no
---     warning for an argument a definition never uses. Report-only.
+--     the REMOVABLE-argument verdicts (@kinds=arg-removable@; @arg-erasable@
+--     is deliberately not on this route — it fires on roughly a quarter of
+--     all definitions and its @\@0@ advice is a syntax error without
+--     @--erasure@). The graph side, not the bridge: it answers what a
+--     @\/check@ structurally cannot, since Agda raises no warning for an
+--     argument a definition never uses. Report-only.
 --   * @GET \/ping@ — @200 ok@ (hook liveness probe).
 --   * anything else — @404@.
 --

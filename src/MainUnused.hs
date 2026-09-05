@@ -47,6 +47,7 @@ import           AgdaUnused.Config   ( ConfigTarget(..)
                                      , applyConfig, discoverConfigPath, loadConfig
                                      , parseKindsToken
                                      )
+import           AgdaGraph.Schema    ( egDescribesArgBinders )
 import           AgdaUnused.Json     ( ExpandedGraph(..), loadExpandedGraph )
 
 -- ** CLI options
@@ -60,6 +61,10 @@ data Options = Options
   , optExclude   :: ![String]
   , optGroupBy   :: !(Maybe GroupBy)
   , optCountOnly :: !Bool
+  , optMinConf   :: !Confidence
+    -- ^ Drop findings below this confidence. 'Low' (the default) keeps
+    -- everything; 'High' keeps only the findings whose named edit a reader
+    -- can act on as stated — see 'Confidence'.
   }
 
 data OutFormat = OutPlain | OutJson
@@ -74,6 +79,7 @@ defaultOptions = Options
   , optExclude   = []
   , optGroupBy   = Nothing
   , optCountOnly = False
+  , optMinConf   = Low
   }
 
 usage :: String
@@ -107,10 +113,24 @@ usage = unlines
   , "                      dir   — bucket by directory of the (relativised) path"
   , "                      file  — bucket by the (relativised) file path"
   , "                      kind  — bucket by finding kind"
+  , "                      premise — bucket an arg-* finding by the PREMISE"
+  , "                                FAMILY of each flagged position: the head"
+  , "                                symbol of its type (`Reachable`, `≥`), so"
+  , "                                one dead hypothesis across six lemmas reads"
+  , "                                as one row. Needs a graph built"
+  , "                                --with-signatures. A finding touching two"
+  , "                                families is counted under both, so rows can"
+  , "                                sum above the total."
   , "                      Output is sorted by descending count, ties broken by"
   , "                      group key ascending."
   , "  --count-only      print only the grand total (`# total: N finding(s)`)."
   , "                      Wins over --group-by if both are given."
+  , "  --min-confidence=C keep only findings at confidence C or better:"
+  , "                      low (default, everything) | high. `high` drops the"
+  , "                      findings whose named edit a reader cannot make as"
+  , "                      stated: an unscoped API break, a binder that is not"
+  , "                      on the signature line, a definition used unsaturated,"
+  , "                      or an `@0` suggestion in a module without --erasure."
   , "  --kinds=K[,K…]    which checks to run (default: 'using,duplicate')."
   , "                      using          — symbols in `using (…)` not referenced in body"
   , "                      duplicate      — same module opened twice from same file"
@@ -128,14 +148,26 @@ usage = unlines
   , "                                       Far more common than arg-removable, so it"
   , "                                       has its own token"
   , "                      args           — alias for `arg-removable,arg-erasable`"
-  , "                      all            — every check above"
+  , "                      all            — every check above EXCEPT arg-erasable"
+  , "                                       (a quarter of all definitions carry one,"
+  , "                                       so it swamps a triage run; ask for it"
+  , "                                       by name)"
   , ""
   , "  Argument indices are 0-based telescope positions, IMPLICITS INCLUDED,"
-  , "  counted on the definition's own signature line. They need a graph built"
-  , "  by a producer that emits `argUsage`; older graphs yield no such findings."
+  , "  over the definition's own REDUCED telescope: elaborated, with any"
+  , "  enclosing section telescope subtracted. That is not the same as the"
+  , "  signature line and can be longer than it, because a type in the"
+  , "  signature may unfold into further binders; such a position is reported"
+  , "  and labelled `not on the signature line` rather than dropped (the"
+  , "  verdict is still true — a premise the proof never inspects means the"
+  , "  statement could be strengthened — but the edit target is the unfolded"
+  , "  definition). Never read an index against the `type` field."
+  , "  They need a graph built by a producer that emits `argUsage`; older"
+  , "  graphs yield no such findings."
   , "  A `removable` verdict means the binder is deletable from the type as"
   , "  WRITTEN: the producer filters positions still occurring in the codomain"
-  , "  or a surviving later domain, whether that occurrence is relevant or not."
+  , "  or a surviving later domain, whether that occurrence is relevant or not,"
+  , "  and positions whose removal would leave an earlier implicit unsolvable."
   , ""
   , "ROOT…  one or more directories to source-scan for `.agda` / `.lagda*` files."
   , ""
@@ -166,6 +198,8 @@ defaultsYaml = unlines
   , "format: " ++ (case optFormat defaultOptions of OutJson -> "json"; OutPlain -> "human")
   , "# Print only the grand total (wins over group-by)."
   , "count-only: " ++ yn (optCountOnly defaultOptions)
+  , "# Keep only findings at this confidence or better: low | high."
+  , "min-confidence: " ++ T.unpack (confTag (optMinConf defaultOptions))
   , ""
   , "# --- Required / optional keys (uncomment and set a value to use) ---"
   , "# agda-deps expanded JSON (also settable via --graph=FILE on the CLI;"
@@ -177,7 +211,8 @@ defaultsYaml = unlines
   , "# rel-to: src"
   , "# Drop findings whose file/module matches a glob (list; ** spans dirs)."
   , "# exclude: ['**/Init.agda', 'Prelude.*']"
-  , "# Aggregate into per-group counts instead of one line each: dir | file | kind."
+  , "# Aggregate into per-group counts instead of one line each:"
+  , "# dir | file | kind | premise (arg findings by their premise family)."
   , "# group-by: dir"
   ]
   where
@@ -226,6 +261,9 @@ parseArgs seed = go ParseState { psOpts = seed, psCliRoots = [], psHadRoots = Fa
       | Just v <- stripPrefix "--group-by=" a = case parseGroupBy v of
           Left e  -> Left e
           Right g -> go st { psOpts = (psOpts st) { optGroupBy = Just g } } rest
+      | Just v <- stripPrefix "--min-confidence=" a = case parseConfidence v of
+          Left e  -> Left e
+          Right c -> go st { psOpts = (psOpts st) { optMinConf = c } } rest
       | a == "--count-only" = go st { psOpts = (psOpts st) { optCountOnly = True } } rest
       | a == "--json-out" = go st { psOpts = (psOpts st) { optFormat = OutJson } } rest
       | a == "-h" || a == "--help" = Left ""
@@ -372,13 +410,22 @@ main = do
         ++ "(paths don't line up — pass an absolute ROOT, or check --graph is for this project)"
     exitFailure
 
-  let allFindings = analyse graph pairs
+  -- Forced here, next to the graph, so the flag does not carry a thunk
+  -- over `graph` into the JSON encode and keep the decoded graph alive.
+  let !bindersKnown = egDescribesArgBinders graph
+      allFindings = analyse graph pairs
       -- Tokenise each exclude pattern once (partial application of
       -- globMatch), rather than re-parsing it for every finding.
       matchers    = map globMatch (optExclude opts)
       excluded f  = any (\m -> m (fileFinding f) || m (T.unpack (moduleFinding f))) matchers
       kindMatched = filter (\f -> kindFinding f `elem` optKinds opts) allFindings
-      (dropped, keep) = partition excluded kindMatched
+      -- --min-confidence is a SEPARATE gate from --exclude and is applied
+      -- first, so the `# excluded:` count keeps meaning "dropped by a
+      -- glob" rather than silently absorbing confidence drops.
+      confMatched = case optMinConf opts of
+        Low  -> kindMatched
+        High -> filter ((== High) . confFinding) kindMatched
+      (dropped, keep) = partition excluded confMatched
       sorted      = sortOn (\f -> (fileFinding f, lineFinding f)) keep
       -- Findings that matched the active kinds but were dropped solely
       -- by --exclude. Reported so a low/zero total can't be mistaken for
@@ -415,7 +462,7 @@ main = do
             [ A.object ["group" .= k, "count" .= n]
             | (k, n) <- aggregate opts g sorted ]))
       | otherwise ->
-          BLC.putStrLn (A.encode (toJson opts sorted))
+          BLC.putStrLn (A.encode (toJson bindersKnown opts sorted))
 
 -- | Take 'renderFindingLine's absolute-path output and rewrite the
 -- file prefix to the user's preferred relative form. The renderer
@@ -440,14 +487,19 @@ formatLine opts f =
 aggregate :: Options -> GroupBy -> [Finding] -> [(Text, Int)]
 aggregate opts g fs =
   sortBy (comparing (Down . snd) <> comparing fst)
-    (M.toList (M.fromListWith (+) [ (groupKey opts g f, 1) | f <- fs ]))
+    (M.toList (M.fromListWith (+)
+      [ (k, 1) | f <- fs, k <- groupKeys opts g f ]))
 
--- | The group key for one finding under a given 'GroupBy'.
-groupKey :: Options -> GroupBy -> Finding -> Text
-groupKey opts g f = case g of
-  GByKind -> kindTag (kindFinding f)
-  GByFile -> T.pack shown
-  GByDir  -> T.pack (takeDirectory shown)
+-- | The group keys for one finding under a given 'GroupBy'. A list, not a
+-- single key: `premise` buckets a finding under every premise family it
+-- touches, so a lemma that stopped using two unrelated hypotheses appears
+-- under both. Every other mode returns exactly one key.
+groupKeys :: Options -> GroupBy -> Finding -> [Text]
+groupKeys opts g f = case g of
+  GByKind    -> [kindTag (kindFinding f)]
+  GByFile    -> [T.pack shown]
+  GByDir     -> [T.pack (takeDirectory shown)]
+  GByPremise -> premiseFamilies f
   where
     shown = displayPath (optRelTo opts) (fileFinding f)
 
@@ -470,6 +522,7 @@ configTarget = ConfigTarget
   , ctSetExclude   = \v o -> o { optExclude   = v }
   , ctSetGroupBy   = \v o -> o { optGroupBy   = Just v }
   , ctSetCountOnly = \v o -> o { optCountOnly = v }
+  , ctSetMinConf   = \v o -> o { optMinConf   = v }
   }
 
 -- ** JSON-out
@@ -478,8 +531,8 @@ configTarget = ConfigTarget
 -- plain-text columns: @file@ (path, optionally relativised via
 -- @--rel-to@), @line@, @module@, @symbol@ (or @null@), @kind@.
 -- Built via aeson so string escaping is correct by construction.
-toJson :: Options -> [Finding] -> A.Value
-toJson opts fs = A.toJSON (map (one opts) fs)
+toJson :: Bool -> Options -> [Finding] -> A.Value
+toJson bindersKnown opts fs = A.toJSON (map (one opts) fs)
   where
     one o f = A.object $
       [ "file"       .= displayPath (optRelTo o) (fileFinding f)
@@ -489,15 +542,19 @@ toJson opts fs = A.toJSON (map (one opts) fs)
       , "kind"       .= kindTag (kindFinding f)
       , "confidence" .= confTag (confFinding f)
       ]
+      -- The prose the human line carries, verbatim. JSON is the
+      -- machine-consumable format and was the one WITHOUT the finding's
+      -- explanation — including the blast radius ("2 caller(s) here, 5
+      -- other module(s)"), which is what a consumer costs a refactor
+      -- from. Emitted for every kind, since every kind has a note.
+      ++ [ "note" .= n | Just n <- [noteFinding f] ]
       -- Argument findings carry their positions, not just the prose note:
       -- a consumer acting on one (the offline delete-and-retypecheck
       -- check, a cascade loop) needs the indices and — for a removal —
       -- the whole set that must go with each, or it strands a binder.
       -- Absent on every other kind.
-      ++ [ "arguments" .= argumentsJson (kindFinding f) au
+      ++ [ "arguments" .= argumentsJson bindersKnown (kindFinding f) au
          | Just au <- [argsFinding f] ]
 
-    confTag :: Confidence -> T.Text
-    confTag High = "high"
-    confTag Low  = "low"
+
 

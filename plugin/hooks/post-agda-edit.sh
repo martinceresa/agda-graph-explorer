@@ -5,7 +5,7 @@
 # endpoint (--control-port; discovered via <project>/.agda-explore/
 # control-port), run a REAL warm `check` of the edited file and inject the
 # verdict + diagnostics + open goals as context. On a ✗ it appends a
-# diff-only `repair` suggestion; on a ✓ it appends any unused-ARGUMENT
+# diff-only `repair` suggestion; on a ✓ it appends any REMOVABLE-argument
 # findings, which a clean check cannot report (Agda has no warning for an
 # argument a definition never uses).
 #
@@ -56,7 +56,17 @@ $rep"
       # A ✓ file can still carry arguments nothing uses: that verdict comes
       # from the GRAPH (the producer's argUsage, Agda's own occurrence and
       # polarity analysis), never from a type-check, so `check` alone can
-      # never surface it. /unused runs `unused scope=<file> kinds=args`.
+      # never surface it. /unused runs
+      # `unused scope=<file> kinds=arg-removable` — the removable verdicts
+      # only, since `arg-erasable` fires on ~a quarter of all definitions and
+      # its `@0` advice is a syntax error without `--erasure`. Ask for
+      # `unused kinds=args` directly when you want that class.
+      #
+      # Each finding carries its own confidence and says what stands in the
+      # way of the edit (cross-module callers, a binder that is not on the
+      # signature line, a definition used unsaturated, an argument passed on
+      # to a callee). Read the note before acting: `[low confidence]` here
+      # means "propose, do not apply".
       #
       # `# total: 0 finding(s)` is agda-unused's own zero line — skip the
       # whole section then, so a clean edit stays silent. A 500 (file not in
@@ -77,7 +87,7 @@ $rep"
            && ! grep -q '^# total: 0 finding' <<<"$un"; then
         ctx="$result
 
-── unused arguments in $file (agda-unused kinds=args; NOT applied) ──
+── unused arguments in $file (agda-unused kinds=arg-removable; NOT applied) ──
 $un"
       fi
     fi

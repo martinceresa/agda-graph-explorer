@@ -87,6 +87,11 @@ graph is reported as a failure. Exit codes: `0` clean, `1` a check failed
 warning), `2` usage/environment error. `--json` emits a machine-readable
 envelope; `--dry-run` writes nothing.
 
+Other flags: `--graph-dir DIR` moves the shared graph (always `DIR/deps.json`),
+`--only TOOL` / `--skip TOOL` (repeatable) restrict which of the six configs are
+written, and `--bin-dir DIR` (repeatable) looks for the tool binaries there
+first.
+
 ## `.agda-unused.yml`
 
 | Key        | CLI flag           | Meaning                                                    |
@@ -96,11 +101,12 @@ envelope; `--dry-run` writes nothing.
 | `rel-to`   | `--rel-to`         | Base directory findings are reported relative to.          |
 | `format`   | `--format`         | Output format: `human` or `json` (canonical).              |
 | `json-out` | `--json-out`       | Alias of `format: json` (bool; kept for compatibility).    |
-| `kinds`    | `--kinds`          | Which finding kinds to report (YAML list or comma-string): `using`, `duplicate`, `blanket`, `dead`, `field`, `internal-only`, `public`, `arg-removable`, `arg-erasable`, plus the aliases `defined`, `args` and `all`. |
+| `kinds`    | `--kinds`          | Which finding kinds to report (YAML list or comma-string): `using`, `duplicate`, `blanket`, `dead`, `field`, `internal-only`, `public`, `arg-removable`, `arg-erasable`, plus the aliases `defined`, `args` and `all` (every kind except `arg-erasable`). |
 | `roots`    | positional `ROOTS` | Source roots to scan (YAML list).                          |
 | `exclude`  | `--exclude`        | Globs whose matching findings are dropped.                 |
-| `group-by`   | `--group-by`     | Group findings by `dir` / `file` / `kind`.                 |
+| `group-by`   | `--group-by`     | Group findings by `dir` / `file` / `kind` / `premise` (arg findings by the head symbol of each flagged position's type; needs a graph built `--with-signatures`). |
 | `count-only` | `--count-only`   | Report per-group counts only, not each finding (bool).     |
+| `min-confidence` | `--min-confidence` | Keep only findings at this confidence or better: `low` (default) or `high`. |
 
 `graph:` + `roots:` supply the required CLI inputs, so `agda-unused` can
 run with no arguments. When both a canonical key and its alias are present,

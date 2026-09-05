@@ -39,10 +39,30 @@ a run matching no scanned files).
 Default `--kinds=using,duplicate` — the lowest-noise combination. The other
 kinds (`blanket`, `dead`, `field`, `internal-only`, `public`, `arg-removable`,
 `arg-erasable`, and the aliases `defined` = `dead` + `internal-only` and
-`args` = both `arg-*`) need more triage; enable all with `--kinds=all`.
-The `arg-*` kinds need a graph whose producer emits `argUsage`; `arg-erasable`
-fires on roughly a quarter of definitions, so reach for `arg-removable` when
-you want the short, actionable list.
+`args` = both `arg-*`) need more triage; `--kinds=all` enables every one
+**except** `arg-erasable`, which fires on roughly a quarter of all definitions
+and suggests an `@0` that is a syntax error unless the project enables
+`--erasure` — ask for it by name. The `arg-*` kinds need a graph whose producer
+emits `argUsage`.
+
+`--group-by=premise` answers a different question from the per-finding list:
+which *hypotheses* has the development stopped using? It buckets each
+argument finding by the head symbol of its flagged position's type, so one
+dead premise across several lemmas reads as one row:
+
+```
+Reachable    5
+AwaitingGS   4
+≥            3
+```
+
+`--min-confidence=high` keeps only the findings whose named edit a reader can
+make as stated, dropping the ones the tool cannot scope (an API break with
+cross-module users), cannot locate (a binder that is not on the signature
+line), or knows is blocked (a definition used unsaturated, an `@0` in a module
+without `--erasure`). Nothing it drops is hidden — the human report already
+names the obstacle in each finding's note.
+
 `--format=json` (alias `--json-out`) emits a JSON array (one object per
 finding); `--group-by=dir|file|kind` and `--count-only` aggregate the findings;
 positional `ROOTS…` accept multiple directories.

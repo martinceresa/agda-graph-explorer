@@ -71,13 +71,15 @@ import qualified AgdaRepair.Diagnostic as RD
 import qualified AgdaRepair.Edit       as RE
 import qualified AgdaRepair.Strategy   as RS
 import           Data.Aeson            ( Value(..), decode, eitherDecode, encode
-                                       , object, (.=) )
+                                       , object, toJSON, (.=) )
 import qualified Data.Aeson.Key        as K
 import qualified Data.Aeson.KeyMap     as KM
 import qualified Data.Map.Strict       as Map
 import           AgdaGraph.Schema      ( ExpandedGraph(..), Definition(..), ReExport(..)
                                        , State(..), Kind(..), Access(..)
                                        , ArgUsage(..), ArgBinder(..), BinderHiding(..)
+                                       , argOnSignatureLine, argLocalEdit
+                                       , egErasureFor
                                        , argRemovableAlone, abInserted
                                        , loadExpandedGraph, explainDecodeError )
 import           AgdaGraph.Index       ( buildIndex, lookupId, unsafeDeps, unsolvedDeps, defAt
@@ -85,7 +87,8 @@ import           AgdaGraph.Index       ( buildIndex, lookupId, unsafeDeps, unsol
                                        , idxDefs, idxExternalsSummary
                                        , idxSubtermHashes )
 import           AgdaUnused.Analysis   ( Finding(..), FindingKind(..), Confidence(..)
-                                       , analyse, argumentsJson )
+                                       , analyse, argumentsJson, premiseFamilies
+                                       , parseGroupBy, GroupBy(..) )
 import           AgdaGraph.ConfigCore  ( unknownKeys, unknownKeyError, nearestKey
                                        , checkKnownKeys, extractValueFlag )
 import           AgdaOptimization.Legend ( legendKeys, renderLegend )
@@ -723,12 +726,47 @@ argFindingJson = BLC.pack $ unlines
   , "  [ { \"name\": \"AU.chain\", \"module\": \"AU\", \"kind\": \"function\", \"line\": 3"
   , "    , \"argUsage\": { \"removable\": [0,1,3]"
   , "                  , \"removableRequires\": { \"0\": [1,3] }"
-  , "                  , \"erasable\": [], \"arity\": 4 } }"
+  , "                  , \"erasable\": [], \"arity\": 4"
+  -- A real producer emits an entry for every reported position its
+  -- syntactic spine reaches, so a fixture without them would make the
+  -- "not on the signature line" rule fire on ordinary written binders.
+  , "                  , \"binders\": { \"0\": {\"hiding\": \"explicit\", \"name\": \"X\"}"
+  , "                                , \"1\": {\"hiding\": \"explicit\"}"
+  , "                                , \"3\": {\"hiding\": \"explicit\"} } } }"
   , "  , { \"name\": \"AU.solo\", \"module\": \"AU\", \"kind\": \"function\", \"line\": 6"
-  , "    , \"argUsage\": { \"removable\": [0], \"erasable\": [], \"arity\": 2 } }"
+  , "    , \"argUsage\": { \"removable\": [0], \"erasable\": [], \"arity\": 2"
+  , "                  , \"binders\": { \"0\": {\"hiding\": \"explicit\"} } } }"
   , "  , { \"name\": \"AU.priv\", \"module\": \"AU\", \"kind\": \"function\", \"line\": 9"
   , "    , \"access\": \"private\""
-  , "    , \"argUsage\": { \"removable\": [0], \"erasable\": [], \"arity\": 2 } }"
+  , "    , \"argUsage\": { \"removable\": [0], \"erasable\": [], \"arity\": 2"
+  , "                  , \"binders\": { \"0\": {\"hiding\": \"explicit\"} } } }"
+  -- The producer's actionability qualifiers (agda-deps round 5):
+  -- `unfold` has a position past the signature line, `partial` is
+  -- referenced unsaturated, `viaCallee` threads its dead argument into a
+  -- callee, and `typed` has a type where it has no name.
+  , "  , { \"name\": \"AU.unfold\", \"module\": \"AU\", \"kind\": \"function\", \"line\": 21"
+  , "    , \"argUsage\": { \"removable\": [2], \"erasable\": [], \"arity\": 3"
+  , "                  , \"syntacticArity\": 1"
+  , "                  , \"binders\": { \"0\": {\"hiding\": \"explicit\", \"name\": \"xs\"} } } }"
+  , "  , { \"name\": \"AU.partial\", \"module\": \"AU\", \"kind\": \"function\", \"line\": 24"
+  , "    , \"argUsage\": { \"removable\": [1], \"erasable\": [], \"arity\": 2"
+  , "                  , \"partiallyApplied\": true"
+  , "                  , \"binders\": { \"1\": {\"hiding\": \"explicit\"} } } }"
+  -- Same unsaturated reference, but the flagged position is HIDDEN: no
+  -- call site writes it, so nothing shifts and the verdict still holds.
+  , "  , { \"name\": \"AU.partialHidden\", \"module\": \"AU\", \"kind\": \"function\", \"line\": 36"
+  , "    , \"argUsage\": { \"removable\": [0], \"erasable\": [], \"arity\": 2"
+  , "                  , \"partiallyApplied\": true"
+  , "                  , \"binders\": { \"0\": {\"hiding\": \"instance\""
+  , "                                       , \"type\": \"Eq A\"} } } }"
+  , "  , { \"name\": \"AU.viaCallee\", \"module\": \"AU\", \"kind\": \"function\", \"line\": 27"
+  , "    , \"argUsage\": { \"removable\": [0], \"erasable\": [], \"arity\": 1"
+  , "                  , \"occursInBody\": [0]"
+  , "                  , \"binders\": { \"0\": {\"hiding\": \"explicit\"} } } }"
+  , "  , { \"name\": \"AU.typed\", \"module\": \"AU\", \"kind\": \"function\", \"line\": 30"
+  , "    , \"argUsage\": { \"removable\": [0], \"erasable\": [], \"arity\": 1"
+  , "                  , \"binders\": { \"0\": {\"hiding\": \"explicit\""
+  , "                                       , \"type\": \"GST <= s\"} } } }"
   , "  , { \"name\": \"AU.eras\", \"module\": \"AU\", \"kind\": \"function\", \"line\": 12"
   , "    , \"argUsage\": { \"removable\": [], \"erasable\": [0], \"arity\": 2"
   , "                  , \"binders\": { \"0\": {\"hiding\": \"implicit\", \"name\": \"a\"} } } }"
@@ -753,7 +791,13 @@ argFindingSrc = T.unlines
   , "chain _ _ n _ = n", "", "solo : Nat -> Nat -> Nat", "solo _ b = b", ""
   , "priv : Nat -> Nat -> Nat", "priv _ b = b", ""
   , "eras : {A : Set} -> A -> A", "eras a = a", ""
-  , "plain : Nat -> Nat", "plain n = n"
+  , "plain : Nat -> Nat", "plain n = n", ""
+  , "shapes : Nat -> Nat", "shapes n = n", ""
+  , "unfold : (xs : Set) -> Sub xs xs", "unfold xs p = p", ""
+  , "partial : Nat -> Nat -> Nat", "partial a _ = a", ""
+  , "viaCallee : Nat -> Nat", "viaCallee n = solo n zero", ""
+  , "typed : Nat -> Nat", "typed _ = zero", ""
+  , "partialHidden : Nat -> Nat", "partialHidden n = n"
   ]
 
 argFindingClientSrc :: Text
@@ -774,7 +818,7 @@ argFindingTests =
       [ checkEq "argUsage finding: a removable verdict fires once per def"
           [ArgRemovable] (kindsOf "chain")
       , check "argUsage finding: a chained position renders its closure"
-          (any ("0 (with 1, 3)" `T.isInfixOf`) (noteOf "chain"))
+          (any ("0 X (with 1, 3)" `T.isInfixOf`) (noteOf "chain"))
       , check "argUsage finding: independent positions render bare"
           (any (\n -> "1, 3 of 4" `T.isInfixOf` n) (noteOf "chain"))
       , check "argUsage finding: a single position reads singular"
@@ -789,8 +833,66 @@ argFindingTests =
           [High] (confOf "solo")
       , checkEq "argUsage confidence: private is High"
           [High] (confOf "priv")
+        -- The producer's actionability qualifiers. Each one changes what
+        -- the reader is told to do, so each is pinned in BOTH formats.
+      , check "argUsage: a position past syntacticArity is labelled, not dropped"
+          (any ("2 not on the signature line" `T.isInfixOf`) (noteOf "unfold"))
+      , checkEq "argUsage: an unwritten position cannot be acted on as stated"
+          [Low] (confOf "unfold")
+      , check "argUsage: the unwritten positions reach --format=json"
+          (case [ argumentsJson True (kindFinding f) au
+                | f <- argsOf "unfold", Just au <- [argsFinding f] ] of
+             [Object o] -> KM.lookup "unwritten" o == Just (toJSON [2 :: Int])
+             _          -> False)
+      , check "argUsage: a graph with no binder data claims nothing unwritten"
+          (case [ argumentsJson False (kindFinding f) au
+                | f <- argsOf "unfold", Just au <- [argsFinding f] ] of
+             [Object o] -> not (KM.member "unwritten" o)
+             _          -> False)
+      , check "argUsage: partiallyApplied says the arity is the interface"
+          (any ("used unsaturated" `T.isInfixOf`) (noteOf "partial"))
+      , checkEq "argUsage: a partially-applied def cannot lose a binder"
+          [Low] (confOf "partial")
+        -- A partial application pins the ORDER of the explicit arguments
+        -- only. Burying a hidden position here would bury the two findings
+        -- a reviewer hand-verified as genuine on the measured corpus, both
+        -- on definitions that are passed unsaturated.
+      , checkEq "argUsage: unsaturated use does NOT block a hidden position"
+          [High] (confOf "partialHidden")
+      , check "argUsage: and the note says why it is harmless"
+          (any ("every flagged position is hidden" `T.isInfixOf`)
+               (noteOf "partialHidden"))
+      , check "argUsage: occursInBody names the multi-definition edit"
+          (any ("passed on to a callee" `T.isInfixOf`) (noteOf "viaCallee"))
+        -- A callee edit is a COST, not a doubt: the verdict is as certain
+        -- as any other, so it must not be graded down.
+      , checkEq "argUsage: a non-local edit stays High (cost, not doubt)"
+          [High] (confOf "viaCallee")
+      , check "argUsage: an unnamed binder falls back to its TYPE"
+          (any ("argument 0 (GST <= s) of 1" `T.isInfixOf`) (noteOf "typed"))
+        -- Premise families (--group-by=premise). The review unit is "which
+        -- hypothesis has this development stopped using", so the key is the
+        -- head symbol of the position's TYPE — never the binder's name,
+        -- which would be one project's convention dressed up as analysis.
+      , checkEq "premiseFamilies: an applied predicate keys on its head"
+          [["Eq"]] (map premiseFamilies (argsOf "partialHidden"))
+      , checkEq "premiseFamilies: a relational premise keys on its relation"
+          [["<="]] (map premiseFamilies (argsOf "typed"))
+      , checkEq "premiseFamilies: a position with no type is not guessed at"
+          [["(no binder type)"]] (map premiseFamilies (argsOf "viaCallee"))
+      , checkEq "premiseFamilies: a non-argument finding says so"
+          ["(not an argument finding)"]
+          (take 1 (concatMap premiseFamilies
+            [ f | f <- findings, isNothing (argsFinding f) ]))
       , checkEq "argUsage finding: erasable is its own kind"
           [ArgErasable] (kindsOf "eras")
+        -- Without --erasure the `@0` this kind suggests is a syntax error,
+        -- so the finding says so and cannot be High. The fixture graph has
+        -- no `moduleEffectiveOptions`, which is exactly that case.
+      , check "argUsage: erasable without --erasure says @0 is a syntax error"
+          (any ("`--erasure` is not enabled" `T.isInfixOf`) (noteOf "eras"))
+      , checkEq "argUsage: un-appliable erasable advice is not High"
+          [Low] (confOf "eras")
       , checkEq "argUsage finding: a def without the field yields nothing"
           [] (kindsOf "plain")
         -- The `arguments` JSON payload is a public contract: the offline
@@ -799,16 +901,21 @@ argFindingTests =
         -- instead of its set is what strands a binder.
       , checkEq "arguments JSON: removable carries positions, arity and delete sets"
           -- `chain` is `removable [0,1,3]` requiring only `{"0": [1,3]}`, so
-          -- 1 and 3 each stand alone; `binders` is empty because this
-          -- fixture carries none (the binder shapes are pinned on `shapes`).
+          -- 1 and 3 each stand alone. Every position is on the signature
+          -- line, so no `unwritten` / `nonLocal` / `partiallyApplied` key
+          -- appears: a clean finding's payload is exactly what it was.
           (Just (object [ "positions" .= [0 :: Int, 1, 3]
                         , "arity"     .= (4 :: Int)
-                        , "binders"   .= object []
+                        , "binders"   .= object
+                            [ "0" .= object [ "hiding" .= ("explicit" :: Text)
+                                            , "name"   .= ("X" :: Text) ]
+                            , "1" .= object [ "hiding" .= ("explicit" :: Text) ]
+                            , "3" .= object [ "hiding" .= ("explicit" :: Text) ] ]
                         , "delete"    .= object
                             [ "0" .= [0 :: Int, 1, 3]
                             , "1" .= [1 :: Int]
                             , "3" .= [3 :: Int] ] ]))
-          (listToMaybe [ argumentsJson (kindFinding f) au
+          (listToMaybe [ argumentsJson True (kindFinding f) au
                        | f <- argsOf "chain", Just au <- [argsFinding f] ])
       , checkEq "arguments JSON: binders are carried through for the flagged positions"
           (Just (object [ "0" .= object [ "hiding" .= ("instance" :: Text)
@@ -818,10 +925,10 @@ argFindingTests =
                                         , "name"   .= ("P.A" :: Text) ] ]))
           (listToMaybe [ b
                        | f <- argsOf "shapes", Just au <- [argsFinding f]
-                       , Object o <- [argumentsJson (kindFinding f) au]
+                       , Object o <- [argumentsJson True (kindFinding f) au]
                        , Just b <- [KM.lookup "binders" o] ])
       , check "arguments JSON: erasable carries positions but NO delete key"
-          (case [ argumentsJson (kindFinding f) au
+          (case [ argumentsJson True (kindFinding f) au
                 | f <- argsOf "eras", Just au <- [argsFinding f] ] of
              [Object o] -> KM.member "positions" o && not (KM.member "delete" o)
              _          -> False)
@@ -845,6 +952,75 @@ argFindingTests =
       , check "argUsage render: only the dotted position is called out"
           (not (any ("0, 2 inserted" `T.isInfixOf`) (noteOf "shapes")))
       ]
+
+-- A blanket `open import Lib` whose ONLY credit is source-side: the body
+-- names something Lib re-exports, but the underlying definition carries a
+-- spelling that never occurs verbatim in a body — a `@NNN` line tag, or a
+-- mixfix name applied as its parts. Both are the common case in a real
+-- graph (790 of 1549 distinct re-export shorts on the measured corpus), and
+-- a set intersection loses the credit and flags the import.
+blanketCreditJson :: BL.ByteString
+blanketCreditJson = BLC.pack $ unlines
+  [ "{ \"v\": 2, \"mode\": \"expanded\", \"schemaVersion\": 2"
+  , ", \"modules\": [\"App\", \"Lib\"]"
+  , ", \"moduleFiles\": { \"App\": \"/t/App.agda\" }"
+  , ", \"definitions\":"
+  -- No edge from App to anything in Lib: the graph-side credits are empty,
+  -- so the source-token fallback is the only thing that can save the open.
+  , "  [ { \"name\": \"App.main\", \"module\": \"App\", \"kind\": \"function\", \"line\": 3 } ]"
+  , ", \"definitionEdges\": []"
+  , ", \"reexports\": [ { \"from\": \"Lib\", \"to\": \"Lib.Impl\""
+  , "                 , \"names\": [\"Lib.Impl.helper@42\", \"Lib.Impl._<>_\"] } ]"
+  , "}"
+  ]
+
+blanketCreditSrc :: Text
+blanketCreditSrc = T.unlines
+  [ "module App where", "", "open import Lib", ""
+  , "main = helper (a <> b)"
+  ]
+
+-- A multi-line block comment ABOVE the import: `ilLine` is numbered off
+-- `lines . stripBlock`, so dropping a comment's newlines shifted every
+-- line below it and the finding pointed at the wrong source line.
+blockCommentJson :: BL.ByteString
+blockCommentJson = BLC.pack $ unlines
+  [ "{ \"v\": 2, \"mode\": \"expanded\", \"schemaVersion\": 2"
+  , ", \"modules\": [\"App3\"]"
+  , ", \"moduleFiles\": { \"App3\": \"/t/App3.agda\" }"
+  , ", \"definitions\":"
+  , "  [ { \"name\": \"App3.main\", \"module\": \"App3\", \"kind\": \"function\", \"line\": 9 } ]"
+  , ", \"definitionEdges\": []"
+  , "}"
+  ]
+
+blockCommentSrc :: Text
+blockCommentSrc = T.unlines
+  [ "module App3 where", ""                       -- 1, 2
+  , "{- a block comment", "   spanning three"     -- 3, 4
+  , "   source lines -}", ""                      -- 5, 6
+  , "open import Lib3 using (neverUsed)", ""      -- 7, 8
+  , "main = Set"                                  -- 9
+  ]
+
+-- Same shape for a `using (…)` clause: written whole, applied as parts.
+usingMixfixJson :: BL.ByteString
+usingMixfixJson = BLC.pack $ unlines
+  [ "{ \"v\": 2, \"mode\": \"expanded\", \"schemaVersion\": 2"
+  , ", \"modules\": [\"App2\"]"
+  , ", \"moduleFiles\": { \"App2\": \"/t/App2.agda\" }"
+  , ", \"definitions\":"
+  , "  [ { \"name\": \"App2.main\", \"module\": \"App2\", \"kind\": \"function\", \"line\": 3 } ]"
+  , ", \"definitionEdges\": []"
+  , "}"
+  ]
+
+usingMixfixSrc :: Text
+usingMixfixSrc = T.unlines
+  [ "module App2 where", ""
+  , "open import Lib2 using (_<>_; usedOne; unusedOne)", ""
+  , "main = usedOne (a <> b)"
+  ]
 
 -- | Decode a fixture graph and hand the resulting findings to the
 -- assertion builder; a decode failure surfaces as a single failing
@@ -872,6 +1048,33 @@ unusedDeadTests = concat
           [DefinedInternalOnly] (kindOf "busy")
       , checkEq "intra-module-called def stays internal-only"
           [DefinedInternalOnly] (kindOf "helper")
+      ]
+
+    -- A graph-side name is checked against SOURCE tokens in three places,
+    -- and half the names in a real graph (line-tagged, mixfix) never occur
+    -- verbatim in a body. Each of these was a false positive.
+  , fixtureChecks blanketCreditJson [("/t/App.agda", blanketCreditSrc)] $ \findings ->
+      [ checkEq "blanket open is credited by a LINE-TAGGED re-exported name"
+          [] [ kindFinding f | f <- findings
+             , kindFinding f == UnusedBlanketOpen ]
+      ]
+  , fixtureChecks usingMixfixJson [("/t/App2.agda", usingMixfixSrc)] $ \findings ->
+      let usingOf = [ symbolFinding f | f <- findings
+                    , kindFinding f == UnusedInUsing ]
+      in
+      -- Three symbols, one finding: `_<>_` is credited by its parts
+      -- (`a <> b`), `usedOne` by its own name, and `unusedOne` appears
+      -- nowhere but the clause that imports it. Before the haystack
+      -- excluded import lines, ALL THREE were credited by that clause and
+      -- this kind could not fire at all.
+      [ checkEq "using: the unused symbol is reported, the used ones are not"
+          [Just "unusedOne"] usingOf
+      ]
+
+  , fixtureChecks blockCommentJson [("/t/App3.agda", blockCommentSrc)] $ \findings ->
+      [ checkEq "a multi-line block comment does not shift the reported line"
+          [7] [ lineFinding f | f <- findings
+              , kindFinding f == UnusedInUsing ]
       ]
 
   , fixtureChecks cycleDeadJson [("/t/Cyc.agda", cycleSrc)] $ \findings ->
@@ -1009,7 +1212,17 @@ argUsageGraphJson = BLC.pack $ unlines
   , "  , { \"name\": \"AU.eras\", \"module\": \"AU\", \"kind\": \"function\""
   , "    , \"argUsage\": { \"removable\": [], \"erasable\": [0,1], \"arity\": 4 } }"
   , "  , { \"name\": \"AU.plain\", \"module\": \"AU\", \"kind\": \"function\" }"
+  -- Round-5 fields: a position past the signature line, a body
+  -- occurrence, an unsaturated reference, and a binder type.
+  , "  , { \"name\": \"AU.round5\", \"module\": \"AU\", \"kind\": \"function\""
+  , "    , \"argUsage\": { \"removable\": [0,2], \"erasable\": [], \"arity\": 3"
+  , "                  , \"occursInBody\": [2]"
+  , "                  , \"syntacticArity\": 2"
+  , "                  , \"partiallyApplied\": true"
+  , "                  , \"binders\": { \"0\": {\"hiding\": \"explicit\""
+  , "                                       , \"type\": \"List A\"} } } }"
   , "  ]"
+  , ", \"moduleEffectiveOptions\": { \"AU\": [\"--erasure\"] }"
   , ", \"definitionEdges\": []"
   , "}"
   ]
@@ -1066,6 +1279,57 @@ argUsageTests = case eitherDecode argUsageGraphJson :: Either String ExpandedGra
       -- survive, and must not grow an empty removableRequires key.
     , checkEq "argUsage: ToJSON round-trips the object"
         chain (decode (encode chain) :: Maybe ArgUsage)
+      -- Round-5 optional fields. Each is omitted at its producer default,
+      -- so a graph without them must decode to that default rather than
+      -- failing (older producers emit none of them).
+    , checkEq "argUsage: occursInBody decodes (the multi-definition edits)"
+        (Just [2]) (fmap auOccursInBody (auOf "AU.round5"))
+    , checkEq "argUsage: an absent occursInBody means every edit is local"
+        (Just []) (fmap auOccursInBody chain)
+    , checkEq "argUsage: syntacticArity decodes"
+        (Just (Just 2)) (fmap auSyntacticArity (auOf "AU.round5"))
+    , checkEq "argUsage: an absent syntacticArity is Nothing, not 0"
+        (Just Nothing) (fmap auSyntacticArity chain)
+    , checkEq "argUsage: partiallyApplied decodes"
+        (Just True) (fmap auPartiallyApplied (auOf "AU.round5"))
+    , checkEq "argUsage: partiallyApplied defaults to False"
+        (Just False) (fmap auPartiallyApplied chain)
+    , checkEq "argUsage: a binder carries its type under --with-signatures"
+        (Just (Just (Just "List A")))
+        (fmap (fmap abType . Map.lookup 0 . auBinders) (auOf "AU.round5"))
+      -- The boundary test. `syntacticArity` is exact when present; a
+      -- graph that predates it falls back to the binder-entry membership
+      -- that same invariant implies.
+    , checkEq "argOnSignatureLine: below syntacticArity is on the line"
+        (Just True) (fmap (`argOnSignatureLine` 0) (auOf "AU.round5"))
+    , checkEq "argOnSignatureLine: at/above syntacticArity is not"
+        (Just False) (fmap (`argOnSignatureLine` 2) (auOf "AU.round5"))
+    , checkEq "argOnSignatureLine: without the field, a binder entry decides"
+        (Just (True, False))
+        (fmap (\a -> (argOnSignatureLine a 0, argOnSignatureLine a 3)) chain)
+    , checkEq "argLocalEdit: a position in occursInBody is NOT a local edit"
+        (Just (True, False))
+        (fmap (\a -> (argLocalEdit a 0, argLocalEdit a 2)) (auOf "AU.round5"))
+      -- The --erasure gate. Keyed by TOP-LEVEL module, so a submodule
+      -- inherits its file's answer; an absent map reads as "nowhere",
+      -- which is also what a project enabling it nowhere looks like.
+    , check "egErasureFor: a module in moduleEffectiveOptions has erasure"
+        (egErasureFor g "AU")
+    , check "egErasureFor: a submodule inherits its top-level module"
+        (egErasureFor g "AU.Inner.Deeper")
+    , check "egErasureFor: an unrelated module does not"
+        (not (egErasureFor g "Other"))
+    , checkEq "moduleEffectiveOptions decodes"
+        (Map.fromList [("AU", ["--erasure"])]) (egModuleEffectiveOptions g)
+    , checkEq "argUsage: ToJSON round-trips every round-5 field"
+        (auOf "AU.round5")
+        (auOf "AU.round5" >>= decode . encode)
+    , check "argUsage: round-5 fields are omitted at their defaults on re-encode"
+        (case chain >>= decode . encode :: Maybe (KM.KeyMap Value) of
+           Just o  -> not (KM.member "occursInBody" o)
+                        && not (KM.member "syntacticArity" o)
+                        && not (KM.member "partiallyApplied" o)
+           Nothing -> False)
     , check "argUsage: empty removableRequires and binders are omitted on re-encode"
         (case auOf "AU.indep" >>= decode . encode :: Maybe (KM.KeyMap Value) of
            Just o  -> not (KM.member "removableRequires" o)
@@ -1368,6 +1632,16 @@ phase1RankTests =
       (Just "+") (headSymbol "n + zero")
   , checkEq "headSymbol: an empty conclusion has no head"
       Nothing (headSymbol "")
+    -- Agda's INSTANCE brackets are a group like `{ }`. Left out of
+    -- 'flattenShape' they kept their contents at depth 0 and the bracket
+    -- itself read as a top-level operator, so ANY goal or premise carrying
+    -- an instance argument was headed by the bracket.
+  , checkEq "headSymbol: instance brackets do not head a type"
+      (Just "Reachable")
+      (headSymbol "Reachable {a} (Step p) \10627 Init s \10628 s")
+  , checkEq "headSymbol: an instance argument does not hide the relation"
+      (Just "\8804")
+      (headSymbol "f x \10627 Ord A \10628 \8804 g y")
 
     -- 1b. head-filter drops a head-mismatched candidate the baseline keeps.
     -- At minSim 0 both defs qualify; the ≤ lemma is dropped for an ≡ goal.

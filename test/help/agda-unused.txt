@@ -27,10 +27,24 @@ OPTIONS:
                       dir   — bucket by directory of the (relativised) path
                       file  — bucket by the (relativised) file path
                       kind  — bucket by finding kind
+                      premise — bucket an arg-* finding by the PREMISE
+                                FAMILY of each flagged position: the head
+                                symbol of its type (`Reachable`, `≥`), so
+                                one dead hypothesis across six lemmas reads
+                                as one row. Needs a graph built
+                                --with-signatures. A finding touching two
+                                families is counted under both, so rows can
+                                sum above the total.
                       Output is sorted by descending count, ties broken by
                       group key ascending.
   --count-only      print only the grand total (`# total: N finding(s)`).
                       Wins over --group-by if both are given.
+  --min-confidence=C keep only findings at confidence C or better:
+                      low (default, everything) | high. `high` drops the
+                      findings whose named edit a reader cannot make as
+                      stated: an unscoped API break, a binder that is not
+                      on the signature line, a definition used unsaturated,
+                      or an `@0` suggestion in a module without --erasure.
   --kinds=K[,K…]    which checks to run (default: 'using,duplicate').
                       using          — symbols in `using (…)` not referenced in body
                       duplicate      — same module opened twice from same file
@@ -48,14 +62,26 @@ OPTIONS:
                                        Far more common than arg-removable, so it
                                        has its own token
                       args           — alias for `arg-removable,arg-erasable`
-                      all            — every check above
+                      all            — every check above EXCEPT arg-erasable
+                                       (a quarter of all definitions carry one,
+                                       so it swamps a triage run; ask for it
+                                       by name)
 
   Argument indices are 0-based telescope positions, IMPLICITS INCLUDED,
-  counted on the definition's own signature line. They need a graph built
-  by a producer that emits `argUsage`; older graphs yield no such findings.
+  over the definition's own REDUCED telescope: elaborated, with any
+  enclosing section telescope subtracted. That is not the same as the
+  signature line and can be longer than it, because a type in the
+  signature may unfold into further binders; such a position is reported
+  and labelled `not on the signature line` rather than dropped (the
+  verdict is still true — a premise the proof never inspects means the
+  statement could be strengthened — but the edit target is the unfolded
+  definition). Never read an index against the `type` field.
+  They need a graph built by a producer that emits `argUsage`; older
+  graphs yield no such findings.
   A `removable` verdict means the binder is deletable from the type as
   WRITTEN: the producer filters positions still occurring in the codomain
-  or a surviving later domain, whether that occurrence is relevant or not.
+  or a surviving later domain, whether that occurrence is relevant or not,
+  and positions whose removal would leave an earlier implicit unsolvable.
 
 ROOT…  one or more directories to source-scan for `.agda` / `.lagda*` files.
 

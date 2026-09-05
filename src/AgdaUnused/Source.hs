@@ -19,6 +19,7 @@ module AgdaUnused.Source
   ( ImportLine(..)
   , scanImports
   , bodyTokens
+  , bodyTokensSplit
   ) where
 
 import           Data.Char  ( isSpace )
@@ -202,24 +203,47 @@ splitSyms = filter (not . null) . map clean . splitOnSeps
       | s == "public"   = ""
       | otherwise       = s
 
--- | Identifier-ish tokens that appear OUTSIDE the import block of a
--- file. Used as the haystack the unused-import analysis searches.
+-- | Identifier-ish tokens of a whole file, import block included. The
+-- haystack for the checks that ask \"is this name mentioned in this
+-- source at all\" — the @dead@ false-positive suppression, where an
+-- @import@ mention is fair evidence of use.
 --
--- We deliberately scan the whole file (including the import block):
--- false positives from a symbol appearing in its own @using (...)@
--- clause are avoided by structuring the analyser to ignore the
--- per-import line itself when computing usage (see "AgdaUnused.Analysis").
+-- __Not__ the haystack for the import-usage checks: a symbol listed in a
+-- @using (…)@ clause is mentioned BY that clause, so measuring usage
+-- against this set credits every import with itself. That is exactly what
+-- made @unused-in-using@ unable to fire. Those checks use
+-- 'bodyTokensOutside' with the import lines removed
+-- (see "AgdaUnused.Analysis").
 --
 -- The token set is an over-approximation: anything that looks like a
 -- (possibly unicode) Agda identifier is reported. Operator-name
 -- pieces wrapped in @_@ are NOT split — they're returned whole, which
 -- is what Agda's symbol table uses too.
 bodyTokens :: T.Text -> S.Set T.Text
-bodyTokens raw =
-  let stripped = stripBlock (T.unpack raw)
-      noCmts   = unlines (map stripLineComment (lines stripped))
-  in S.fromList (map T.pack (tokenise noCmts))
+bodyTokens = fst . bodyTokensSplit S.empty
+
+-- | Both haystacks a file needs, from __one__ clean-and-walk: the tokens of
+-- every line, and the tokens of every line EXCEPT the 1-based numbers in
+-- @skip@ (the import statements).
+--
+-- The two answers differ deliberately — the @dead@ suppression counts an
+-- @import@ mention as evidence of use, the import-usage checks must not —
+-- and both are wanted for every scanned file, so computing them together
+-- costs one traversal instead of two. Unpacking, comment-stripping and
+-- tokenising a source file is this tool's heaviest per-file work.
+--
+-- Line numbers are the ones 'scanImports' reports: both walk
+-- @lines . stripBlock@, so a multi-line block comment shifts the two
+-- identically and @ilLine@ can be used as a key here directly.
+bodyTokensSplit :: S.Set Int -> T.Text -> (S.Set T.Text, S.Set T.Text)
+bodyTokensSplit skip raw =
+  ( S.fromList (concat toks)
+  , S.fromList (concat [ ts | (n, ts) <- zip [1 :: Int ..] toks
+                            , not (n `S.member` skip) ])
+  )
   where
+    toks = [ map T.pack (tokenise (stripLineComment l))
+           | l <- lines (stripBlock (T.unpack raw)) ]
     tokenise []     = []
     tokenise (c:cs)
       | isIdChar c  = let (t, rest) = span isIdChar (c:cs) in t : tokenise rest
@@ -254,6 +278,16 @@ stripLineComment = go
     go ('-':'-':_) = []
     go (c:cs) = c : go cs
 
+-- | Strip @{- … -}@ block comments, __keeping their newlines__ so line
+-- numbering survives. Nesting is tracked, as Agda's is.
+--
+-- Diverges from "AgdaDeps.Precompute"'s copy in exactly that: dropping a
+-- comment's newlines shifts every line below a multi-line comment, and
+-- 'scanImports' numbers 'ilLine' off this text — an import three lines
+-- under a three-line comment was reported three lines too high. Harmless
+-- while nothing consumed those numbers; not harmless once a finding points
+-- a reader at a line. The comment's CONTENT is still dropped, and a newline
+-- is a token separator either way, so 'bodyTokens' is unaffected.
 stripBlock :: String -> String
 stripBlock = go (0 :: Int)
   where
@@ -262,6 +296,7 @@ stripBlock = go (0 :: Int)
     go 0 (c:cs)                   = c : go 0 cs
     go n ('-':'}':rest)           = go (max 0 (n - 1)) rest
     go n ('{':'-':rest)           = go (n + 1) rest
+    go n ('\n':cs)                = '\n' : go n cs
     go n (_:cs)                   = go n cs
 
 -- | Trim Agda module names of trailing punctuation (semicolons, parens,

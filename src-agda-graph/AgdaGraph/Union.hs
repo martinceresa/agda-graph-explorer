@@ -79,6 +79,12 @@ unionExpandedGraphs gs@(g0 : _) =
     , egExternalsSummary = egExternalsSummary g0
     , egModuleOptionEscapes = M.unionsWith mergeEscapes
                                 (map egModuleOptionEscapes gs)
+      -- Same shape, same merge: a module's effective options are a
+      -- property of the module, so any entry's graph that saw it settles
+      -- it (union of flags, ascending). Overlay federation cannot make an
+      -- option "unset" for a module one entry compiled with it.
+    , egModuleEffectiveOptions = M.unionsWith mergeEscapes
+                                   (map egModuleEffectiveOptions gs)
       -- Per-module rollups, so a module carrying unsolved metas in ANY entry's
       -- graph stays flagged in the union (line lists merged, ascending).
     , egUnsolvedModules  = M.unionsWith mergeUnsolved (map egUnsolvedModules gs)

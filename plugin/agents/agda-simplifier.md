@@ -64,13 +64,18 @@ When the `agda-explore` MCP tools are available, use them over grepping:
   candidate with `callers` (one hop) plus a grep before removing. A `field`
   finding (a never-projected record field, included in `dead`) is always
   low-confidence and its edit is to the *record declaration*, never to the
-  projection — propose it, don't apply it blind. `--kinds=args` reports unused
+  projection — propose it, don't apply it blind. `kinds=args` reports unused
   *arguments* (`arg-removable` / `arg-erasable`): the verdict is Agda's own,
-  so at **High** confidence (private, or no cross-module user) apply and
-  re-typecheck, but at **Low** (exported, outside users) propose only — you
-  cannot see the downstream callers a binder removal breaks. Delete a
+  so at **High** confidence apply and re-typecheck, but at **Low** propose
+  only — the note names what is in the way (cross-module callers you cannot
+  see, a binder that is *not on the signature line* because a type in it
+  unfolds, a definition *used unsaturated* whose arity is its interface, an
+  argument *passed on to a callee that discards it*, or an `@0` suggestion in
+  a module without `--erasure`). `min_confidence=high` filters to the
+  applicable set in one argument. Delete a
   `(with …)` set whole, never partially, and read the binder the report
-  prints (`0 {a}`, `3 ⦃d⦄`) rather than counting arguments yourself — the
+  prints (`0 {a}`, `3 ⦃d⦄`, or its type `0 (GST ≤ s)` when it has no name)
+  rather than counting arguments yourself — the
   indices include implicits. A position marked *inserted by a `variable`* is
   not on the signature line; deleting the set removes it. Pass `exclude`
   a glob (`**/Init.agda`, `Prelude.*`) to silence an `open import … public`

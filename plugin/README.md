@@ -109,7 +109,7 @@ export AGDA_EXPLORE_GRAPH=/abs/path/to/deps.json
 | `similar_bodies` | What else is implemented like `X`? |
 | `find_lemma`     | Goal-directed lemma search: `anchor=<def>` (WL fingerprint) or `goal="<type>"` (name/shape match — combinator shape + def name + conclusion; needs signatures). Filter with `kind` / `module_prefix`. |
 | `search`         | Find by name substring, or list by `kind` / `state` / `module_prefix` (`top_level_only`). `unsafe=any` audits soundness escapes; `mode=text` ripgreps the source bytes for what the graph doesn't index (pragmas, comments, regex). |
-| `unused`         | Unused imports / dead code (`scope` / `exclude`; FP caveats). |
+| `unused`         | Unused imports / dead code / never-used arguments (`scope` / `kinds` / `exclude` / `min_confidence` / `group_by`; FP caveats). |
 | `rebuild`        | Force-regenerate the graph now. |
 | `status`         | Server fingerprint + binary path/mtime, config, freshness, graph stats (flags a stale-format graph or a newer build on disk). |
 
@@ -145,7 +145,7 @@ loop.
 
 The plugin ships two hooks (`hooks/hooks.json`; they need `jq` on `PATH` and are active only while the plugin is enabled):
 
-- **`post-agda-edit`** (PostToolUse on `Edit`/`Write`): after any text edit to an `.agda` / `.lagda*` file, close the edit→check loop. If the daemon serves its control endpoint (below), the hook runs a REAL warm `check` and injects the verdict + diagnostics + goals as context; otherwise it injects a one-line nudge to call the bridge's `check` (rate-limited per session+file, so refactors aren't spammed). On a `✗` it appends a diff-only `repair` suggestion. On a `✓` it appends any **unused-argument** findings for that file (`unused kinds=args`) — the one defect class a clean check cannot report, since Agda raises no warning for an argument a definition never uses; nothing is injected when there are none. It never blocks the edit and never writes.
+- **`post-agda-edit`** (PostToolUse on `Edit`/`Write`): after any text edit to an `.agda` / `.lagda*` file, close the edit→check loop. If the daemon serves its control endpoint (below), the hook runs a REAL warm `check` and injects the verdict + diagnostics + goals as context; otherwise it injects a one-line nudge to call the bridge's `check` (rate-limited per session+file, so refactors aren't spammed). On a `✗` it appends a diff-only `repair` suggestion. On a `✓` it appends any **removable-argument** findings for that file (`unused kinds=arg-removable`) — the one defect class a clean check cannot report, since Agda raises no warning for an argument a definition never uses; nothing is injected when there are none. `arg-erasable` is deliberately off this route: it fires on roughly a quarter of all definitions and its `@0` advice is a syntax error unless the project enables `--erasure`, so it is noise in a per-edit injection — call `unused kinds=args` when you want it. Each finding carries its confidence and names what stands in the way of the edit, so a `[low confidence]` one is to propose, not apply. It never blocks the edit and never writes.
 - **`pre-grep-route`** (PreToolUse on `Grep`): the FIRST structural grep over Agda sources in a session is denied with the grep→graph tool mapping (`locate` / `search` / `callers` / `callees` / `type_of` / `find_lemma`); every later grep sails through — text searches over prose and comments are legitimate.
 
 **Kill switch:** disable the plugin, or delete/blank `hooks/hooks.json`.
@@ -165,7 +165,7 @@ used, and how reliably). Needs `jq`.
 
 ### Control endpoint
 
-Start the daemon with **`--control-port N`** (or `control-port: N` in `.agda-explore.yml`; needs `--enable-interact`) to serve `GET /check?file=…`, `GET /repair?file=…` (diff-only, never writes) and `GET /unused?file=…` (that file's unused-argument findings, `kinds=args`) on localhost — the same runners the MCP `check` / `repair` / `unused` tools use, callable by the hook from outside the MCP transport. The bound port (probed upward from N) is written to `<out-dir>/control-port` for discovery and removed on shutdown; a busy endpoint answers `503` and the hook degrades to the nudge. Localhost-only, off by default.
+Start the daemon with **`--control-port N`** (or `control-port: N` in `.agda-explore.yml`; needs `--enable-interact`) to serve `GET /check?file=…`, `GET /repair?file=…` (diff-only, never writes) and `GET /unused?file=…` (that file's removable-argument findings, `kinds=arg-removable`) on localhost — the same runners the MCP `check` / `repair` / `unused` tools use, callable by the hook from outside the MCP transport. The bound port (probed upward from N) is written to `<out-dir>/control-port` for discovery and removed on shutdown; a busy endpoint answers `503` and the hook degrades to the nudge. Localhost-only, off by default.
 
 `/unused` reads the **graph**, not the live session, so it reports what the last `agda-deps` build saw: right after an edit the finding set can lag by one rebuild, which the report's own freshness footer says when it does. The next edit's hook picks up whatever the background rebuild has since landed.
 

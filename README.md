@@ -72,9 +72,10 @@ cabal install exe:agda-explore exe:agda-auto exe:agda-optimization \
               --installdir="$HOME/.local/bin" --overwrite-policy=always
 ```
 
-The plugin launcher resolves `agda-explore` by precedence
-`$AGDA_EXPLORE_BIN` > `$PATH` > newest `dist-newstyle` build tree, so an
-installed binary wins over a stale in-tree build automatically.
+The plugin launcher collects every `agda-explore` it can see —
+`$AGDA_EXPLORE_BIN`, one on `$PATH`, and any under a nearby `dist-newstyle`
+tree — and launches the one with the **newest mtime**, so the freshest build
+always wins. When a pinned `$AGDA_EXPLORE_BIN` loses, it says so on stderr.
 
 ## Producing the input graph
 
@@ -234,9 +235,11 @@ flag reads the positive key `x`, so write `x: false` rather than `no-x: true`;
 
 ## Cross-repo runtime link
 
-- **`agda-explore` → `agda-deps`.** Resolution: `--agda-deps-bin` >
-  `$AGDA_DEPS_BIN` > `$PATH`. Preloaded mode (an existing `graph.json`) needs no
-  `agda-deps`.
+- **`agda-explore` → `agda-deps`.** Candidates are `--agda-deps-bin`,
+  `$AGDA_DEPS_BIN`, `$PATH`, and a sibling in the running binary's own
+  `dist-newstyle` tree; the **newest mtime** wins, a pin only breaking a tie
+  (and printing a stderr note when it loses). Preloaded mode (an existing
+  `graph.json`) needs no `agda-deps`.
 - **`agda-goals` / `agda-auto` → `agda`.** Need `agda` on `$PATH` (or, for
   `agda-auto`, `--agda-bin`); neither runs `agda-deps`.
 
@@ -265,15 +268,28 @@ flag reads the positive key `x`, so write `x: false` rather than `no-x: true`;
 - Optional per-definition `argUsage` — which telescope positions the definition
   never uses, read off Agda's own occurrence/polarity analysis. `removable`
   (binder and call-site argument can go) and `erasable` (used only in types, an
-  `@0` candidate) are 0-based positions with **implicits counted**, on the
-  definition's *own* signature line; `arity` bounds them, `binders` gives each
-  reported position's hiding and name, and `removableRequires` maps a position
-  to the others that must be deleted **with** it. Omitted when there is nothing
-  to report. Two rules for a consumer: act on a `removableRequires` set, never
-  a lone position, or the removal strands a later binder; and never align these
-  indices against the sibling `type` string, which still shows the binders a
-  parametrised module or `where` block lifted in. Consumed by `agda-unused`'s
-  `arg-removable` / `arg-erasable` kinds.
+  `@0` candidate) are 0-based positions with **implicits counted**, over the
+  definition's *own* **reduced** telescope; `arity` bounds them,
+  `syntacticArity` says how many of them are on the signature line, `binders`
+  gives each reported position's hiding, name and (under `--with-signatures`)
+  type, `removableRequires` maps a position to the others that must be deleted
+  **with** it, `occursInBody` marks the removals that also need a callee edit,
+  and `partiallyApplied` says the definition is referenced unsaturated — so its
+  arity is part of its interface and no binder can go. Omitted when there is
+  nothing to report. Three rules for a consumer: act on a `removableRequires`
+  set, never a lone position, or the removal strands a later binder; never
+  align these indices against the sibling `type` string, which still shows the
+  binders a parametrised module or `where` block lifted in; and do not read
+  `arity` as a count of written binders — a type in the signature that unfolds
+  contributes positions with no binder to strike out (`syntacticArity` is that
+  boundary). Consumed by `agda-unused`'s `arg-removable` / `arg-erasable`
+  kinds.
+- Optional top-level `moduleEffectiveOptions` — per module, the
+  actionability-relevant options actually in force (currently `--erasure`),
+  read from the interface rather than the file's own pragmas, since the flag
+  normally lives in the `.agda-lib`. `agda-unused` gates its `@0` advice on it:
+  without `--erasure`, an `erasable` verdict is un-appliable however true it
+  is.
 
 A machine-readable JSON Schema (draft 2020-12) for the expanded form lives in the
 producer repo at `schema/graph-v2-expanded.schema.json`. For the full schema

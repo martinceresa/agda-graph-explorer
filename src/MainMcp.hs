@@ -752,15 +752,25 @@ startControlEndpoint ss cfg
             (t : _) -> tRun t ss (object ["file" .= f])
             []      -> pure (Left (nm <> " tool unavailable"))
           -- /unused is the graph side, not the bridge: the `unused` runner
-          -- scoped to the edited file and narrowed to the ARGUMENT verdicts.
+          -- scoped to the edited file and narrowed to `arg-removable`.
           -- Those are the only findings an edit can introduce that a `check`
           -- cannot see — Agda has no warning for an argument a definition
           -- never uses, so the file type-checks clean with a spare binder.
-          -- Hard-wired to `kinds=args` rather than read off the query string:
-          -- the route table passes only `file`, and a hook firing after every
-          -- edit must not be able to ask for the whole-project noisy kinds.
+          --
+          -- `arg-removable`, NOT the `args` alias: `arg-erasable` fires on
+          -- roughly a quarter of all definitions, and its `@0` advice is a
+          -- syntax error in a project without `--erasure` — measured
+          -- un-appliable for all 1259 of its findings on one real
+          -- development. A hook injects into every edit's turn, so a kind
+          -- that is usually noise does not belong on this route; `unused
+          -- kinds=args` remains one MCP call away when someone wants it.
+          --
+          -- Hard-wired rather than read off the query string: the route
+          -- table passes only `file`, and a hook firing after every edit must
+          -- not be able to ask for the whole-project noisy kinds.
           unusedCb f = case [ t | t <- graphTools, tName t == "unused" ] of
-            (t : _) -> tRun t ss (object ["scope" .= f, "kinds" .= T.pack "args"])
+            (t : _) -> tRun t ss
+                         (object ["scope" .= f, "kinds" .= T.pack "arg-removable"])
             []      -> pure (Left "unused tool unavailable")
           -- /repair passes no `write`, so it proposes a fix, never applies it.
           routes = [ ("/check?",  toolCb "check")

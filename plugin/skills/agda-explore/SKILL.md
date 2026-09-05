@@ -129,15 +129,28 @@ mode:
 - **Certain, but a spec change:** `arg-removable` / `arg-erasable` (kinds
   `args`) — arguments a definition never uses. The verdict is Agda's own
   occurrence/polarity analysis, so it is not a heuristic; the confidence
-  grades whether the *deletion* is contained (private or no cross-module
-  user), because removing a binder changes the definition's type. Two rules:
-  a position listed as `(with …)` must be deleted **together** with that set,
-  and the indices count **implicits** and refer to the definition's own
-  signature line — not to what `type_of` prints, which for a `where` helper
-  or a parametrised-module definition still shows inherited binders. The
-  report spells each binder the way the signature does (`0 {a}`, `3 ⦃d⦄`,
-  `0 m`); a position flagged *inserted by a `variable`* has no binder on the
-  line at all — delete the whole set and it goes away with it.
+  grades whether the *edit the finding names* can be made as stated, and the
+  note says which of these is in the way. Rules:
+  a position listed as `(with …)` must be deleted **together** with that set;
+  the indices count **implicits** and address the definition's own *reduced*
+  telescope — not what `type_of` prints, which for a `where` helper or a
+  parametrised-module definition still shows inherited binders, and not
+  necessarily the signature line either. A position labelled *not on the
+  signature line* exists only because a type in the signature unfolds: the
+  verdict is still true (a premise the proof never inspects means the
+  statement could be strengthened) but the edit target is that other
+  definition. A definition labelled *used unsaturated* cannot lose a binder
+  at all — its arity is part of its interface. A position *passed on to a
+  callee that discards it* needs that callee edited too. Without `--erasure`
+  in force, an `arg-erasable` `@0` is a syntax error, and the note says so.
+  The report spells each binder the way the signature does (`0 {a}`, `3 ⦃d⦄`,
+  `0 m`) and falls back to its **type** when it has no name
+  (`0 (GST ≤ s)`); a position flagged *inserted by a `variable`* has no binder
+  on the line at all — delete the whole set and it goes away with it.
+  `kinds=all` deliberately leaves `arg-erasable` out (a quarter of all
+  definitions carry one); ask for it by name. `min_confidence=high` keeps
+  only the findings whose edit holds as stated — the volume lever for this
+  kind and for `dead`.
   Needs a graph whose producer emits `argUsage`. These are the one class of
   finding a `check` can never raise — Agda warns about no argument a
   definition fails to use — so when the daemon serves its control endpoint,
@@ -149,10 +162,13 @@ mode:
 So: grep-verify any deletion candidate (and check one `callers` hop) before
 removing it.
 
-Scope: `scope` accepts a dir, file, or module name (relative paths resolve
-against project root; a no-module scope is rejected loudly). `exclude` takes
-comma-separated globs vs file path or module name (`**/Init.agda`, `Prelude.*`).
-The response header echoes resolved scope, kinds, and excludes.
+Scope and filters: `scope` accepts a dir, file, or module name (relative paths
+resolve against project root; a no-module scope is rejected loudly). `exclude`
+takes comma-separated globs vs file path or module name (`**/Init.agda`,
+`Prelude.*`). `min_confidence: high` drops every finding whose named edit
+cannot be made as stated. The response header echoes the resolved scope, the
+kinds, and every filter applied — so a `# total: 0` is never ambiguous between
+"nothing to report" and "filtered away".
 
 ## Editing proofs with the interaction bridge (when enabled)
 

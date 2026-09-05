@@ -266,12 +266,13 @@ graphTools =
 
   , Tool "unused"
       "[audit] Run agda-unused over the graph: unused imports, duplicate opens, and \
-      \(opt-in) dead definitions, confidence-tagged. See the skill for the \
-      \false-positive caveats."
+      \(opt-in) dead definitions and never-used arguments, confidence-tagged. \
+      \See the skill for the false-positive caveats."
       (objSchema [ ("scope", sp "Restrict to a directory, file, or module name (e.g. `Prelude.Init`); relative to project root. Default: project root.")
-                 , ("kinds", sp "agda-unused --kinds value, e.g. `all` or `using,duplicate`.")
+                 , ("kinds", sp "agda-unused --kinds value, e.g. `all`, `using,duplicate`, or `args` (= `arg-removable,arg-erasable`; `all` excludes `arg-erasable`).")
                  , ("exclude", sp "Comma-separated globs matched against each finding's file path and module name (`**` spans dirs, `*` stops at `/`); a match drops the finding.")
-                 , ("group_by", sp "Per-group counts instead of per-finding lines: `dir`, `file`, or `kind`.")
+                 , ("min_confidence", ep "Keep only findings at this confidence or better. `high` drops the ones whose named edit cannot be made as stated (an unscoped API break, a binder that is not on the signature line, a definition used unsaturated, an `@0` in a module without `--erasure`) — the volume lever for `dead` / `arg-*`." ["low", "high"])
+                 , ("group_by", sp "Per-group counts instead of per-finding lines: `dir`, `file`, `kind`, or `premise` (an arg finding by the head symbol of each flagged position's type).")
                  , ("count_only", bp "Print only the grand total (default false; wins over group_by).")
                  , fmtProp
                  ] [])
@@ -459,6 +460,7 @@ runUnused ss a = do
             Just bin -> do
               let mkinds   = argText a "kinds"
                   excls    = maybe [] (filter (not . T.null) . T.splitOn ",") (argText a "exclude")
+                  mminConf  = argText a "min_confidence"
                   mgroupBy  = argText a "group_by"
                   countOnly = argBool a "count_only" False
                   jsonOut   = parseFmt (argText a "format") == FmtJson
@@ -466,6 +468,7 @@ runUnused ss a = do
                           , "--rel-to=" ++ cfgProjectRoot c ]
                        ++ maybe [] (\k -> ["--kinds=" ++ T.unpack k]) mkinds
                        ++ [ "--exclude=" ++ T.unpack g | g <- excls ]
+                       ++ maybe [] (\v -> ["--min-confidence=" ++ T.unpack v]) mminConf
                        ++ maybe [] (\v -> ["--group-by=" ++ T.unpack v]) mgroupBy
                        ++ [ "--count-only" | countOnly ]
                        -- agda-unused's --json-out already emits the array to
@@ -477,13 +480,14 @@ runUnused ss a = do
                 readCreateProcessWithExitCode (proc bin uargs) { cwd = Just (cfgProjectRoot c) } ""
               let body   = if null out then err else out
                   -- Self-describing header: resolved scope, effective
-                  -- kinds, exclude globs, and any aggregation mode, so
-                  -- "0 findings" can't be mistaken for a mis-scoped or
-                  -- over-excluded run.
+                  -- kinds, every filter applied, and any aggregation mode,
+                  -- so "0 findings" can't be mistaken for a mis-scoped,
+                  -- over-excluded or confidence-filtered run.
                   header = "scope: " <> T.pack scope <> "\n"
                         <> "kinds: " <> fromMaybe "(agda-unused default)" mkinds <> "\n"
                         <> (if null excls then ""
                               else "exclude: " <> T.intercalate ", " excls <> "\n")
+                        <> maybe "" (\v -> "min_confidence: " <> v <> "\n") mminConf
                         <> maybe "" (\v -> "group_by: " <> v <> "\n") mgroupBy
                         <> (if countOnly then "count_only: true\n" else "")
                         <> "\n"
@@ -498,9 +502,9 @@ runUnused ss a = do
                          <> snapshotFooters ld
   where
     -- The caveat is narrowed to the kinds actually asked for. A
-    -- `kinds=args` call (the plugin's post-edit hook) has no use for the
-    -- `dead` confidence rule, and every sentence is charged to the caller's
-    -- context. Kept as a token match rather than a parse: the vocabulary
+    -- `kinds=arg-removable` call (the plugin's post-edit hook) has no use
+    -- for the `dead` confidence rule, and every sentence is charged to the
+    -- caller's context. Kept as a token match rather than a parse: the vocabulary
     -- belongs to `agda-unused`, which this tool only shells out to — so an
     -- unrecognised token selects EVERY kind, and a newly added one keeps
     -- its advice instead of silently losing it.
@@ -519,8 +523,12 @@ runUnused ss a = do
       "defined" -> ["dead", "field", "internal-only"]
       "dead"    -> ["dead", "field"]
       "args"    -> ["arg-removable", "arg-erasable"]
+      -- An unrecognised token (including `all`) selects EVERY paragraph.
+      -- This list drives the CAVEAT text only — which kinds actually run is
+      -- `agda-unused`'s own decision, so mirroring its `all` set here would
+      -- be a second, silently-drifting owner of that policy for no gain.
       k | k `elem` allKinds -> [k]
-        | otherwise         -> allKinds          -- `all`, and anything new
+        | otherwise         -> allKinds
     caveats =
       [ ( ["using", "duplicate"]
         , "`using` and `duplicate` findings are high-signal." )
@@ -529,20 +537,22 @@ runUnused ss a = do
           \methods and names used only through `with`/`with ←` chains are \
           \known false positives." )
       , ( ["dead", "field"]
-        , "Each `dead` finding carries a confidence tag in its note: \
-          \high-confidence deletion candidates are safe, but verify the \
-          \low-confidence ones (`low confidence: trivial body, possibly \
-          \inlined`) before removing — the elaborator may have inlined the \
-          \callee." )
+        , "Every finding carries a confidence tag (`[low confidence]` in \
+          \the human line, `confidence` in JSON): high-confidence deletion \
+          \candidates are safe, but verify the low-confidence ones before \
+          \removing — the elaborator may have inlined the callee, and a \
+          \use in a `with` scrutinee leaves no edge in the graph." )
       , ( ["arg-removable", "arg-erasable"]
         , "An `arg-*` verdict is Agda's own occurrence/polarity analysis, so \
           \the unusedness is certain; the confidence grades whether the \
-          \DELETION is contained, since dropping a binder changes the \
-          \definition's type. Delete a position listed `(with …)` together \
-          \with that whole set, and read the indices against the \
-          \definition's own signature line — they count implicits, and \
-          \`type_of` still shows binders inherited from an enclosing \
-          \module." )
+          \edit the finding names can be made as stated. Delete a position \
+          \listed `(with …)` together with that whole set. Indices count \
+          \implicits and address the definition's own REDUCED telescope, \
+          \which is neither the `type_of` signature (that still shows \
+          \binders inherited from an enclosing module) nor necessarily the \
+          \signature line: a position labelled `not on the signature line` \
+          \exists only because a type in the signature unfolds, so the \
+          \verdict is true but the edit target is that other definition." )
       ]
 
 -- | @search mode=text@: ripgrep over the project's source bytes. The graph
